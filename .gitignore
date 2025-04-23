@@ -1,0 +1,46 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+.env/
+env/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# IDEs
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+
+# Data folders (raw and processed)
+data/classification/raw/
+data/segmentation/raw/
+data/volume_density/raw_measurements/
+
+# Build/artifacts
+dist/
+build/
+*.egg-info/
+
+# Xcode
+*.xcworkspace
+*.xcodeproj
+*.xcuserdatad
+build/
+
+# Android
+*.apk
+.keystore
+.gradle/
+local.properties
+build/
