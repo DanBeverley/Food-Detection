@@ -1,0 +1,25 @@
+# Configuration file for classification model training and evaluation
+
+# General settings
+image_size: [224, 224]  # Height and width for input images
+batch_size: 32          # Batch size for data loading
+epochs: 50              # Number of training epochs
+split_ratio: 0.2        # Validation split ratio
+
+# Data paths
+metadata_path: "data/classification/processed/metadata.json"  # Path to metadata JSON from data loading
+data_dir: "data/classification/processed/"  # Root directory for processed images
+
+# Model parameters
+model_architecture: "EfficientNetV2B0"  # Base model to use (e.g., EfficientNetV2)
+num_classes: 256  # Number of classes (e.g., for UEC Food-256; adjust based on dataset)
+learning_rate: 0.001  # Initial learning rate for optimizer
+fine_tune_layers: 0.5  # Fraction of layers to fine-tune (e.g., 0.5 to unfreeze half)
+
+# Optimization and hardware
+use_gpu: true  # Whether to use GPU if available
+quantization: "default"  # Default quantization for TFLite export (options: default, float16, int8)
+
+# Logging and checkpoints
+checkpoint_dir: "trained_models/classification/checkpoints/"  # Directory for saving checkpoints
+log_dir: "logs/classification/"  # Directory for TensorBoard logs or other logging
