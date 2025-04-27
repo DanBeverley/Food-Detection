@@ -54,8 +54,6 @@ def analyze_food_item(food_name: str, depth_map: np.ndarray, segmentation_mask: 
             print(f"Point cloud volume estimation error: {pc_ve}")
         except ImportError:
              print("Error: SciPy is required for point cloud volume estimation.")
-             # Decide if you want to stop or just fallback
-             # For now, we'll let it fall back
         except Exception as pc_e: # Catch other potential errors from point cloud method
             print(f"Unexpected error during point cloud volume estimation: {pc_e}")
 
@@ -135,7 +133,7 @@ if __name__ == '__main__':
     # Assume 1mm x 1mm pixel area
     simulated_pixel_area = 1.0 * 1.0 # mm²
 
-    # Placeholder Camera Intrinsics (MUST be replaced with actual values from your sensor)
+    # Placeholder for Camera Intrinsics (MUST be replaced with actual values from sensor)
     # Using values typical for a phone camera perhaps
     H, W = simulated_depth_map.shape
     sim_fx, sim_fy = 600.0, 600.0 # Example focal lengths in pixels

@@ -95,7 +95,7 @@ def ensemble_predict(models:list, dataset:tf.data.Dataset) -> np.ndarray:
         preds = model.predict(dataset)
         predictions.append(preds)
     averaged_preds = np.mean(predictions, axis=0)
-    return averaged_preds  # Can be used in evaluation for ensembling
+    return averaged_preds 
 
 def main():
     parser = argparse.ArgumentParser(description="Train classification model for food datasets.")
@@ -110,8 +110,7 @@ def main():
 
     args = parser.parse_args()
     
-    # Load config from YAML if available, otherwise use args
-    config_path = 'models/classification/config.yaml'  # Path to config file
+    config_path = 'models/classification/config.yaml' 
     try:
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
@@ -126,7 +125,7 @@ def main():
         image_size = tuple(args.image_size) if hasattr(args, 'image_size') else (224, 224)
         batch_size = args.batch_size if hasattr(args, 'batch_size') else 32
         epochs = args.epochs if hasattr(args, 'epochs') else 50
-        use_mixed_precision = False  # Default to off if no config
+        use_mixed_precision = False  
 
     if use_mixed_precision:
         from tensorflow.keras import mixed_precision

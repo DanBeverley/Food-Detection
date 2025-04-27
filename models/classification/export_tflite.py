@@ -40,7 +40,6 @@ def export_model_to_tflite(model_path:str, output_tflite_path:str):
 
         if quant_type == "int8":
             converter.optimizations = [tf.lite.Optimize.DEFAULT]
-            # Add representative dataset for full integer quantization if needed, but keeping simple for now
             logger.info("Applying 8-bit quantization.")
         elif quant_type == 'float16':
             converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS,
