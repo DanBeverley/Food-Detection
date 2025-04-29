@@ -1,25 +1,106 @@
-# Configuration file for classification model training and evaluation
+data:
+  metadata_path: "data/classification/metadata.json" 
+  data_dir: "data/classification/processed/"
+  batch_size: 32
+  validation_split_ratio: 0.2
 
-# General settings
-image_size: [224, 224]  # Height and width for input images
-batch_size: 32          # Batch size for data loading
-epochs: 50              # Number of training epochs
-split_ratio: 0.2        # Validation split ratio
+  augmentation:
+    enabled: true
+    rotation_range: 20 # degrees
+    width_shift_range: 0.1 # fraction of total width
+    height_shift_range: 0.1 # fraction of total height
+    shear_range: 0.1
+    zoom_range: 0.1
+    horizontal_flip: true
+    brightness_range: [0.8, 1.2] # Min/max brightness factor
 
-# Data paths
-metadata_path: "data/classification/processed/metadata.json"  # Path to metadata JSON from data loading
-data_dir: "data/classification/processed/"  # Root directory for processed images
+# Model Configuration 
+model:
+  architecture: "EfficientNetV2B0" # e.g., EfficientNetV2B0, EfficientNetV2S, ConvNeXtTiny
+  use_pretrained_weights: true 
+  fine_tune: false 
+  fine_tune_layers: 10 
 
-# Model parameters
-model_architecture: "EfficientNetV2B0"  # Base model to use (e.g., EfficientNetV2)
-num_classes: 256  # Number of classes (e.g., for UEC Food-256; adjust based on dataset)
-learning_rate: 0.001  # Initial learning rate for optimizer
-fine_tune_layers: 0.5  # Fraction of layers to fine-tune (e.g., 0.5 to unfreeze half)
+  # Classification Head Configuration
+  classification_head:
+    pooling: "GlobalAveragePooling2D" # 'GlobalAveragePooling2D' or 'GlobalMaxPooling2D' or 'Flatten'
+    dense_layers: [256] 
+    dropout: 0.5 
+    activation: "relu" 
+    final_activation: "softmax"
 
-# Optimization and hardware
-use_gpu: true  # Whether to use GPU if available
-quantization: "default"  # Default quantization for TFLite export (options: default, float16, int8)
+# --- Optimizer Configuration ---
+optimizer:
+  name: "Adam" # 'Adam', 'SGD', 'RMSprop' (potentially 'AdamW' if tensorflow-addons installed)
+  learning_rate: 0.001
+  # momentum: 0.9 # Only used for SGD
+  # weight_decay: 0.0001 # Only used for AdamW
 
-# Logging and checkpoints
+# Loss Function Configuration 
+loss:
+  name: "sparse_categorical_crossentropy" # 'sparse_categorical_crossentropy', 'categorical_crossentropy' (requires one-hot labels)
+
+# --- Metrics Configuration ---
+metrics: ["accuracy"] # List of metrics, e.g., ['accuracy', 'sparse_top_k_categorical_accuracy']
+  # top_k: 5 # Used if 'sparse_top_k_categorical_accuracy' is included
+
+# Training Configuration
+training:
+  epochs: 50
+  use_mixed_precision: false 
+
+  # Callbacks Configuration
+  callbacks:
+    model_checkpoint:
+      enabled: true
+      monitor: "val_loss"
+      mode: "min" 
+      save_best_only: true
+      save_weights_only: false 
+      filename_template: "model_epoch-{epoch:02d}_val_loss-{val_loss:.2f}.h5"
+
+    early_stopping:
+      enabled: true
+      monitor: "val_loss"
+      mode: "min"
+      patience: 10
+      restore_best_weights: true
+
+    reduce_lr_on_plateau:
+      enabled: true
+      monitor: "val_loss"
+      mode: "min"
+      factor: 0.2
+      patience: 5
+      min_lr: 0.000001
+
+    tensorboard:
+      enabled: true
+      log_dir: "logs/classification/" # Will be created relative to project root
+      histogram_freq: 0 # Set to 1 to enable histograms (can consume disk space)
+      write_graph: true
+      update_freq: "epoch"
+
+    lr_scheduler:
+      name: "cosine_decay"
+      alpha: 0.0
+# Paths Configuration (Used by Train and Export)
+paths:
+  model_save_dir: "trained_models/classification/"
+  log_dir: "logs/classification/"
+  label_map_filename: "label_map.json" 
+  tflite_export_dir: "trained_models/classification/exported/" 
+
+export:
+  tflite_filename: "classification_model.tflite"
+
+  # Quantization Settings
+  quantization:
+    type: "default"
+    representative_dataset: 
+      enabled: true 
+      num_samples: 100 
+
+# Logging and checkpoints (Potentially redundant if paths are covered above)
 checkpoint_dir: "trained_models/classification/checkpoints/"  # Directory for saving checkpoints
 log_dir: "logs/classification/"  # Directory for TensorBoard logs or other logging
