@@ -52,62 +52,71 @@ def get_metrics(config_metrics: list, num_classes: int) -> list:
             logger.warning(f"Unsupported metric specified in config: {metric_name}")
     return metrics
 
-def build_unet(input_shape: tuple, num_classes: int, activation: str) -> keras.Model:
-    """Builds a simple U-Net model."""
+# --- Model Building (Standard U-Net) ---
+
+def conv_block(input_tensor, num_filters):
+    """Convolutional block: Conv2D -> BatchNormalization -> ReLU -> Conv2D -> BatchNormalization -> ReLU"""
+    x = layers.Conv2D(num_filters, (3, 3), padding='same', kernel_initializer='he_normal')(input_tensor)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation('relu')(x)
+    x = layers.Conv2D(num_filters, (3, 3), padding='same', kernel_initializer='he_normal')(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation('relu')(x)
+    return x
+
+def encoder_block(input_tensor, num_filters):
+    """Encoder block: Convolutional block followed by MaxPooling"""
+    conv = conv_block(input_tensor, num_filters)
+    pool = layers.MaxPooling2D((2, 2))(conv)
+    return conv, pool
+
+def decoder_block(input_tensor, skip_tensor, num_filters):
+    """Decoder block: Upsampling (Conv2DTranspose), Concatenation with skip connection, Convolutional block"""
+    upsample = layers.Conv2DTranspose(num_filters, (2, 2), strides=(2, 2), padding='same')(input_tensor)
+    # Ensure skip tensor spatial dimensions match upsample tensor if needed (usually they do with 'same' padding)
+    # If there's a mismatch (e.g. due to pooling), cropping might be needed on skip_tensor
+    merged = layers.Concatenate()([upsample, skip_tensor])
+    conv = conv_block(merged, num_filters)
+    return conv
+
+def build_unet(input_shape: tuple, num_classes: int, final_activation: str) -> keras.Model:
+    """Builds a standard U-Net model."""
     inputs = keras.Input(shape=input_shape)
 
     # Encoder Path
-    c1 = layers.Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(inputs)
-    c1 = layers.Dropout(0.1)(c1)
-    c1 = layers.Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c1)
-    p1 = layers.MaxPooling2D((2, 2))(c1)
-
-    c2 = layers.Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(p1)
-    c2 = layers.Dropout(0.1)(c2)
-    c2 = layers.Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c2)
-    p2 = layers.MaxPooling2D((2, 2))(c2)
+    s1, p1 = encoder_block(inputs, 64)
+    s2, p2 = encoder_block(p1, 128)
+    s3, p3 = encoder_block(p2, 256)
+    s4, p4 = encoder_block(p3, 512)
 
     # Bottleneck
-    c3 = layers.Conv2D(256, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(p2)
-    c3 = layers.Dropout(0.2)(c3)
-    c3 = layers.Conv2D(256, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c3)
+    b1 = conv_block(p4, 1024)
 
     # Decoder Path
-    u4 = layers.Conv2DTranspose(128, (2, 2), strides=(2, 2), padding='same')(c3)
-    u4 = layers.concatenate([u4, c2])
-    c4 = layers.Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(u4)
-    c4 = layers.Dropout(0.1)(c4)
-    c4 = layers.Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c4)
+    d1 = decoder_block(b1, s4, 512)
+    d2 = decoder_block(d1, s3, 256)
+    d3 = decoder_block(d2, s2, 128)
+    d4 = decoder_block(d3, s1, 64)
 
-    u5 = layers.Conv2DTranspose(64, (2, 2), strides=(2, 2), padding='same')(c4)
-    u5 = layers.concatenate([u5, c1])
-    c5 = layers.Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(u5)
-    c5 = layers.Dropout(0.1)(c5)
-    c5 = layers.Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c5)
-
-    # Determine the number of output filters and activation based on num_classes
-    if num_classes == 2: # Binary segmentation (foreground/background)
-        output_channels = 1 # Single channel output
-        if activation not in ['sigmoid', 'softmax']: # Default to sigmoid for binary
-             logger.warning(f"Activation '{activation}' invalid for binary (num_classes=2). Using 'sigmoid'.")
-             final_activation = 'sigmoid'
-        else:
-            final_activation = activation
-    elif num_classes > 2: # Multi-class segmentation
-        output_channels = num_classes
-        if activation != 'softmax': # Default to softmax for multi-class
-            logger.warning(f"Activation '{activation}' invalid for multi-class (num_classes>2). Using 'softmax'.")
-            final_activation = 'softmax'
-        else:
-            final_activation = activation
-    else: 
-        logger.warning(f"num_classes={num_classes} treated as binary. Check config if multi-class needed.")
+    # Output Layer
+    if num_classes == 2:
+        # Binary segmentation (foreground/background)
         output_channels = 1
-        final_activation = 'sigmoid'
-        
-    outputs = layers.Conv2D(output_channels, (1, 1), activation=final_activation)(c5)
+        # Activation is already passed as final_activation ('sigmoid')
+    elif num_classes > 2:
+        # Multi-class segmentation
+        output_channels = num_classes
+        # Activation is already passed as final_activation ('softmax')
+    else: # num_classes = 1 implies single output channel
+        output_channels = 1
+        # Activation is likely 'sigmoid' or 'linear' depending on use case
+        final_activation = final_activation if final_activation else 'sigmoid' # Default to sigmoid if not specified
 
-    model = keras.Model(inputs=[inputs], outputs=[outputs])
+    outputs = layers.Conv2D(output_channels, (1, 1), activation=final_activation)(d4)
+
+    model = keras.Model(inputs, outputs, name="UNet")
+    logger.info(f"Built U-Net model with input shape {input_shape}, output channels {output_channels}, final activation '{final_activation}'")
+    # model.summary() # Optional: Print model summary
     return model
 
 def build_segmentation_model(config: dict) -> keras.Model:
