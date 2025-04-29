@@ -1,214 +1,350 @@
 import os
-import argparse
 import logging
+import yaml
+import pathlib
 import tensorflow as tf
 from tensorflow import keras
-from typing import Tuple
-from data import load_segmentation_data
-from transformers import TFSeiFormerForSemanticSegmentation
-import yaml
-import numpy as np
-import tensorflow_addons as tfa  # For potential additional metrics if needed
+from tensorflow.keras import layers
+from tensorflow.keras import backend as K
+
+from data import load_segmentation_datasets, _get_project_root
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-from tensorflow.keras import backend as K
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, UpSampling2D, Concatenate, Input, Dense
+# Loss Functions
+def dice_loss(y_true, y_pred, smooth=1e-6):
+    """Calculates Dice Loss.
 
-def dice_loss(y_true, y_pred):
+    Args:
+        y_true: Ground truth masks (Batch, H, W, C).
+        y_pred: Predicted masks (Batch, H, W, C), probabilities from sigmoid/softmax.
+        smooth: Smoothing factor to avoid division by zero.
+
+    Returns:
+        Dice loss score.
+    """
     y_true_f = K.flatten(y_true)
     y_pred_f = K.flatten(y_pred)
     intersection = K.sum(y_true_f * y_pred_f)
-    return 1 - (2. * intersection + 1) / (K.sum(y_true_f) + K.sum(y_pred_f) + 1)
+    # Formula: 1 - (2 * Intersection + smooth) / (Sum(A) + Sum(B) + smooth)
+    return 1 - (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
 
-def mean_iou(y_true, y_pred):
-    y_pred = tf.argmax(y_pred, axis=-1)
-    y_true = tf.cast(y_true, tf.int32)
-    intersection = tf.reduce_sum(y_true * tf.cast(tf.equal(y_true, y_pred), y_true.dtype))
-    union = tf.reduce_sum(y_true) + tf.reduce_sum(y_pred) - intersection
-    return tf.reduce_mean(intersection / (union + tf.keras.backend.epsilon()))
+def dice_coefficient(y_true, y_pred, smooth=1e-6):
+    """Calculates Dice Coefficient (complement of Dice Loss)."""
+    return 1 - dice_loss(y_true, y_pred, smooth)
 
-def build_segmentation_model(input_shape: Tuple[int, int, int] = (512, 512, 3), num_classes: int = 21, architecture: str = 'ResNet50', loss_function: str = 'dice_loss') -> keras.Model:
-    """
-    Build and compile a segmentation model (e.g., using a pre-trained backbone like ResNet50 for Mask R-CNN style).
-
-    Args:
-        input_shape: Tuple of (height, width, channels) for input images.
-        num_classes: Number of segmentation classes (e.g., 21 for COCO-like datasets).
-        architecture: Model architecture to use (e.g., ResNet50, SegFormer, BiSeNetV2).
-        loss_function: Loss function to use (e.g., dice_loss, sparse_categorical_crossentropy).
-
-    Returns:
-        Compiled Keras model for segmentation.
-
-    Raises:
-        ValueError: If invalid input shape or num_classes.
-    """
-    try:
-        if num_classes < 1:
-            raise ValueError("Number of classes must be at least 1")
-        
-        if architecture == 'ResNet50':
-            inputs = Input(shape=input_shape)
-            # Encoder
-            c1 = Conv2D(64, 3, activation='relu', padding='same')(inputs)
-            c1 = Conv2D(64, 3, activation='relu', padding='same')(c1)
-            p1 = MaxPooling2D((2, 2))(c1)
-            c2 = Conv2D(128, 3, activation='relu', padding='same')(p1)
-            c2 = Conv2D(128, 3, activation='relu', padding='same')(c2)
-            p2 = MaxPooling2D((2, 2))(c2)
-            # Bottleneck
-            c3 = Conv2D(256, 3, activation='relu', padding='same')(p2)
-            c3 = Conv2D(256, 3, activation='relu', padding='same')(c3)
-            # Decoder with skip connections
-            u4 = UpSampling2D((2, 2))(c3)
-            u4 = Concatenate()([u4, c2])
-            c4 = Conv2D(128, 3, activation='relu', padding='same')(u4)
-            c4 = Conv2D(128, 3, activation='relu', padding='same')(c4)
-            u5 = UpSampling2D((2, 2))(c4)
-            u5 = Concatenate()([u5, c1])
-            c5 = Conv2D(64, 3, activation='relu', padding='same')(u5)
-            c5 = Conv2D(64, 3, activation='relu', padding='same')(c5)
-            outputs = Conv2D(num_classes, 1, activation='softmax')(c5)
-            model = keras.Model(inputs=[inputs], outputs=[outputs])
-        elif architecture == 'SegFormer':
-            model = TFSeiFormerForSemanticSegmentation.from_pretrained('nvidia/segformer-b0-finetuned-ade-512-512', num_labels=num_classes)
-        elif architecture == 'BiSeNetV2':
-            # Improved BiSeNet V2-like architecture with efficiency in mind (using depthwise separable convolutions)
-            inputs = Input(shape=input_shape)
-            # Spatial path with depthwise separable convolutions for efficiency
-            x = keras.layers.SeparableConv2D(64, 3, padding='same', activation='relu')(inputs)
-            x = keras.layers.SeparableConv2D(64, 3, padding='same', activation='relu')(x)
-            # Context path
-            c = keras.layers.GlobalAveragePooling2D()(x)
-            c = keras.layers.Dense(128, activation='relu')(c)
-            c = keras.layers.Reshape((1, 1, 128))(c)
-            c = UpSampling2D(size=(input_shape[0]//8, input_shape[1]//8))(c)  # Approximate upsampling
-            c = Conv2D(64, 1, activation='relu')(c)
-            # Feature fusion (simplified)
-            fused = Concatenate()([x, c])
-            fused = Conv2D(64, 3, padding='same', activation='relu')(fused)
-            outputs = Conv2D(num_classes, 1, activation='softmax')(fused)
-            model = keras.Model(inputs=inputs, outputs=outputs)
+# Metrics 
+# Using Keras built-in MeanIoU is generally preferred
+def get_metrics(config_metrics: list, num_classes: int) -> list:
+    """Parses metric names from config and returns Keras metric objects."""
+    metrics = []
+    for metric_name in config_metrics:
+        if metric_name == 'iou_metric' or metric_name == 'mean_iou':
+            metrics.append(tf.keras.metrics.MeanIoU(num_classes=num_classes, name='mean_iou'))
+        elif metric_name == 'dice_coefficient':
+            metrics.append(dice_coefficient) # Add the function directly
+        elif metric_name == 'accuracy':
+             # For segmentation, sparse_categorical_accuracy might be more relevant if using integer masks
+             # Or use binary_accuracy for binary masks
+            metrics.append('accuracy') # Standard accuracy
         else:
-            raise ValueError(f"Unsupported architecture: {architecture}")
-        
-        # Compile with custom loss and metrics for production readiness
-        if loss_function == 'dice_loss':
-            loss = dice_loss
+            logger.warning(f"Unsupported metric specified in config: {metric_name}")
+    return metrics
+
+def build_unet(input_shape: tuple, num_classes: int, activation: str) -> keras.Model:
+    """Builds a simple U-Net model."""
+    inputs = keras.Input(shape=input_shape)
+
+    # Encoder Path
+    c1 = layers.Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(inputs)
+    c1 = layers.Dropout(0.1)(c1)
+    c1 = layers.Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c1)
+    p1 = layers.MaxPooling2D((2, 2))(c1)
+
+    c2 = layers.Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(p1)
+    c2 = layers.Dropout(0.1)(c2)
+    c2 = layers.Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c2)
+    p2 = layers.MaxPooling2D((2, 2))(c2)
+
+    # Bottleneck
+    c3 = layers.Conv2D(256, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(p2)
+    c3 = layers.Dropout(0.2)(c3)
+    c3 = layers.Conv2D(256, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c3)
+
+    # Decoder Path
+    u4 = layers.Conv2DTranspose(128, (2, 2), strides=(2, 2), padding='same')(c3)
+    u4 = layers.concatenate([u4, c2])
+    c4 = layers.Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(u4)
+    c4 = layers.Dropout(0.1)(c4)
+    c4 = layers.Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c4)
+
+    u5 = layers.Conv2DTranspose(64, (2, 2), strides=(2, 2), padding='same')(c4)
+    u5 = layers.concatenate([u5, c1])
+    c5 = layers.Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(u5)
+    c5 = layers.Dropout(0.1)(c5)
+    c5 = layers.Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c5)
+
+    # Determine the number of output filters and activation based on num_classes
+    if num_classes == 2: # Binary segmentation (foreground/background)
+        output_channels = 1 # Single channel output
+        if activation not in ['sigmoid', 'softmax']: # Default to sigmoid for binary
+             logger.warning(f"Activation '{activation}' invalid for binary (num_classes=2). Using 'sigmoid'.")
+             final_activation = 'sigmoid'
         else:
-            loss = 'sparse_categorical_crossentropy'
-        model.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3), loss=loss, metrics=['accuracy', mean_iou])  # Add IoU metric for better evaluation
-        return model
-    except ValueError as e:
-        logger.error(f"Model building error: {e}")
-        raise
+            final_activation = activation
+    elif num_classes > 2: # Multi-class segmentation
+        output_channels = num_classes
+        if activation != 'softmax': # Default to softmax for multi-class
+            logger.warning(f"Activation '{activation}' invalid for multi-class (num_classes>2). Using 'softmax'.")
+            final_activation = 'softmax'
+        else:
+            final_activation = activation
+    else: 
+        logger.warning(f"num_classes={num_classes} treated as binary. Check config if multi-class needed.")
+        output_channels = 1
+        final_activation = 'sigmoid'
+        
+    outputs = layers.Conv2D(output_channels, (1, 1), activation=final_activation)(c5)
 
-def train_segmentation_model(model: keras.Model, train_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset, epochs: int = 50, model_dir: str = 'trained_models/segmentation') -> None:
-    """
-    Train the segmentation model with checkpoints and early stopping.
+    model = keras.Model(inputs=[inputs], outputs=[outputs])
+    return model
 
-    Args:
-        model: Compiled Keras model for segmentation.
-        train_dataset: Training tf.data.Dataset yielding (image, mask) pairs.
-        val_dataset: Validation tf.data.Dataset yielding (image, mask) pairs.
-        epochs: Number of training epochs.
-        model_dir: Directory to save model checkpoints.
-
-    Raises:
-        RuntimeError: If training fails.
-    """
-    try:
-        # Check config for mixed precision
-        config_path = 'models/segmentation/config.yaml'
-        use_mixed_precision = False
-        try:
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
-            use_mixed_precision = config.get('use_mixed_precision', False)
-        except FileNotFoundError:
-            logger.warning("Config file not found, defaulting to no mixed precision.")
-        
-        if use_mixed_precision:
-            from tensorflow.keras import mixed_precision
-            mixed_precision.set_global_policy('mixed_float16')
-            logger.info("Mixed precision enabled.")
-        
-        lr_schedule = tf.keras.optimizers.schedules.CosineDecay(initial_learning_rate=1e-3, decay_steps=epochs * int(train_dataset.cardinality() or 1000))  # Fallback if cardinality is None
-        optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
-        if use_mixed_precision:
-            optimizer = mixed_precision.LossScaleOptimizer(optimizer)
-        
-        callbacks = [
-            keras.callbacks.LearningRateScheduler(lr_schedule),
-            keras.callbacks.ModelCheckpoint(os.path.join(model_dir, 'model_{epoch}.h5'), save_best_only=True, monitor='val_loss'),
-            keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
-            keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3),
-            keras.callbacks.TensorBoard(log_dir=os.path.join(model_dir, 'logs'), histogram_freq=1)
-        ]
-        
-        os.makedirs(model_dir, exist_ok=True)
-        history = model.fit(train_dataset, epochs=epochs, validation_data=val_dataset, callbacks=callbacks)
-        logger.info("Segmentation training completed. History saved.")
+def build_segmentation_model(config: dict) -> keras.Model:
+    """Builds the segmentation model based on config settings."""
+    model_config = config.get('model', {})
+    data_config = config.get('data', {})
     
+    architecture = model_config.get('architecture', 'UNet')
+    input_shape = tuple(model_config.get('input_shape', data_config.get('image_size', [256, 256]) + [3])) # H, W, C
+    num_classes = model_config.get('num_classes', data_config.get('num_classes', 2))
+    activation = model_config.get('activation', 'sigmoid') # Final layer activation
+    # backbone = model_config.get('backbone', None)
+    # use_pretrained = model_config.get('use_pretrained_backbone_weights', True)
+
+    logger.info(f"Building model: Architecture={architecture}, Input Shape={input_shape}, Num Classes={num_classes}, Activation={activation}")
+
+    if architecture.lower() == 'unet':
+        model = build_unet(input_shape, num_classes, activation)
+    # elif architecture.lower() == 'deeplabv3+':
+        # builder for DeepLab or other models 
+        # Consider using segmentation_models library: 
+        # import segmentation_models as sm
+        # model = sm.Unet(backbone_name=backbone, input_shape=input_shape, classes=num_classes, activation=activation, encoder_weights='imagenet' if use_pretrained else None)
+    else:
+        raise ValueError(f"Unsupported model architecture in config: {architecture}")
+
+    return model
+
+def get_optimizer(config: dict) -> keras.optimizers.Optimizer:
+    """Creates optimizer based on config."""
+    opt_config = config.get('optimizer', {})
+    opt_name = opt_config.get('name', 'Adam').lower()
+    lr = opt_config.get('learning_rate', 0.001)
+    
+    if opt_name == 'adam':
+        return keras.optimizers.Adam(learning_rate=lr)
+    elif opt_name == 'sgd':
+        momentum = opt_config.get('momentum', 0.9)
+        return keras.optimizers.SGD(learning_rate=lr, momentum=momentum)
+    elif opt_name == 'rmsprop':
+        return keras.optimizers.RMSprop(learning_rate=lr)
+    elif opt_name == 'adamw':
+        import tensorflow_addons as tfa
+        weight_decay = opt_config.get('weight_decay', 0.0001)
+        return tfa.optimizers.AdamW(learning_rate=lr, weight_decay=weight_decay)
+    else:
+        logger.warning(f"Unsupported optimizer '{opt_name}'. Defaulting to Adam.")
+        return keras.optimizers.Adam(learning_rate=lr)
+
+def get_loss(config: dict):
+    """Gets loss function based on config."""
+    loss_config = config.get('loss', {})
+    loss_name = loss_config.get('name', 'dice_loss').lower()
+    num_classes = config.get('model', {}).get('num_classes', config.get('data', {}).get('num_classes', 2))
+
+    if loss_name == 'dice_loss':
+        return dice_loss
+    elif loss_name == 'binary_crossentropy' or loss_name == 'bce':
+        return tf.keras.losses.BinaryCrossentropy(from_logits=False) # Assuming sigmoid output
+    elif loss_name == 'categorical_crossentropy' or loss_name == 'cce':
+        # Ensure output is softmax and masks are one-hot
+        return tf.keras.losses.CategoricalCrossentropy(from_logits=False) 
+    elif loss_name == 'sparse_categorical_crossentropy' or loss_name == 'scce':
+         # Ensure output is softmax and masks are integer labels (0, 1, ..., N-1)
+        return tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)
+    # Add combined losses or other custom losses here
+    # elif loss_name == 'focal_loss': ...
+    else:
+        logger.warning(f"Unsupported loss '{loss_name}'. Defaulting to Dice Loss.")
+        return dice_loss
+
+def get_callbacks(config: dict, model_save_dir: str) -> list:
+    """Creates Keras callbacks based on config."""
+    cb_config = config.get('training', {}).get('callbacks', {})
+    callbacks = []
+
+    # Model Checkpoint
+    mcp_conf = cb_config.get('model_checkpoint', {})
+    if mcp_conf.get('enabled', True):
+        monitor = mcp_conf.get('monitor', 'val_loss')
+        mode = mcp_conf.get('mode', 'auto') # Auto-detect min/max based on monitor name
+        save_best = mcp_conf.get('save_best_only', True)
+        save_weights = mcp_conf.get('save_weights_only', False)
+        filename = mcp_conf.get('filename_template', 'model_epoch-{epoch:02d}_val_loss-{val_loss:.4f}.h5')
+        filepath = os.path.join(model_save_dir, 'checkpoints', filename)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        callbacks.append(keras.callbacks.ModelCheckpoint(
+            filepath=filepath,
+            monitor=monitor,
+            mode=mode,
+            save_best_only=save_best,
+            save_weights_only=save_weights,
+            verbose=1
+        ))
+
+    # Early Stopping
+    es_conf = cb_config.get('early_stopping', {})
+    if es_conf.get('enabled', True):
+        monitor = es_conf.get('monitor', 'val_loss')
+        mode = es_conf.get('mode', 'auto')
+        patience = es_conf.get('patience', 10)
+        restore_best = es_conf.get('restore_best_weights', True)
+        callbacks.append(keras.callbacks.EarlyStopping(
+            monitor=monitor,
+            mode=mode,
+            patience=patience,
+            restore_best_weights=restore_best,
+            verbose=1
+        ))
+
+    # Reduce LR on Plateau
+    rlr_conf = cb_config.get('reduce_lr_on_plateau', {})
+    if rlr_conf.get('enabled', True):
+        monitor = rlr_conf.get('monitor', 'val_loss')
+        mode = rlr_conf.get('mode', 'auto')
+        factor = rlr_conf.get('factor', 0.1)
+        patience = rlr_conf.get('patience', 5)
+        min_lr = rlr_conf.get('min_lr', 0)
+        callbacks.append(keras.callbacks.ReduceLROnPlateau(
+            monitor=monitor,
+            mode=mode,
+            factor=factor,
+            patience=patience,
+            min_lr=min_lr,
+            verbose=1
+        ))
+        
+    # TensorBoard
+    tb_conf = cb_config.get('tensorboard', {})
+    if tb_conf.get('enabled', True):
+        log_dir_rel = tb_conf.get('log_dir', 'logs/segmentation/')
+        log_dir = os.path.join(_get_project_root(), log_dir_rel)
+        os.makedirs(log_dir, exist_ok=True)
+        hist_freq = tb_conf.get('histogram_freq', 0)
+        write_graph = tb_conf.get('write_graph', True)
+        update_freq = tb_conf.get('update_freq', 'epoch')
+        callbacks.append(keras.callbacks.TensorBoard(
+            log_dir=log_dir,
+            histogram_freq=hist_freq,
+            write_graph=write_graph,
+            update_freq=update_freq
+        ))
+
+    # Optional: Add LR Schedulers 
+    # scheduler_conf = cb_config.get('lr_scheduler', {})
+    # if scheduler_conf and scheduler_conf.get('name'): ... create and add scheduler callback
+
+    return callbacks
+
+def train(config_path: str):
+    # Load Config
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        logger.info(f"Loaded configuration from: {config_path}")
+    except FileNotFoundError:
+        logger.error(f"Configuration file not found at: {config_path}")
+        return
+    except yaml.YAMLError as e:
+        logger.error(f"Error parsing configuration file: {e}")
+        return
+
+    project_root = _get_project_root()
+    paths_config = config.get('paths', {})
+    model_save_dir_rel = paths_config.get('model_save_dir', 'trained_models/segmentation/')
+    model_save_dir = os.path.join(project_root, model_save_dir_rel)
+    os.makedirs(model_save_dir, exist_ok=True)
+    
+    # Load Data 
+    logger.info("Loading datasets...")
+    train_ds, val_ds, _ = load_segmentation_datasets(config_path)
+    if train_ds is None or val_ds is None:
+        logger.error("Failed to load datasets. Exiting training.")
+        return
+    logger.info("Datasets loaded successfully.")
+
+    # Build Model
+    logger.info("Building model...")
+    try:
+        model = build_segmentation_model(config)
+        model.summary(print_fn=logger.info)
     except Exception as e:
-        logger.error(f"Training error: {e}")
-        raise
+        logger.error(f"Failed to build model: {e}")
+        return
 
-def augment(image, mask):
-    image = tf.image.random_flip_left_right(image)
-    image = tf.image.random_flip_up_down(image)
-    image = tf.image.random_brightness(image, max_delta=0.1)
-    image = tf.image.random_contrast(image, lower=0.8, upper=1.2)
-    image = tf.image.random_saturation(image, lower=0.8, upper=1.2)
-    image = tf.image.rot90(image, k=tf.random.uniform(shape=[], minval=0, maxval=4, dtype=tf.int32))  # Add random rotation
-    image = tf.image.random_zoom(image, (0.8, 1.2))  # Add random zoom
-    return image, mask
+    #  Compile Model
+    logger.info("Compiling model...")
+    optimizer = get_optimizer(config)
+    loss = get_loss(config)
+    metrics_conf = config.get('metrics', ['iou_metric'])
+    num_classes = config.get('model', {}).get('num_classes', config.get('data', {}).get('num_classes', 2))
+    metrics = get_metrics(metrics_conf, num_classes)
+    
+    # Handle Mixed Precision
+    if config.get('training', {}).get('use_mixed_precision', False):
+        try:
+            policy = tf.keras.mixed_precision.Policy('mixed_float16')
+            tf.keras.mixed_precision.set_global_policy(policy)
+            logger.info("Mixed precision policy 'mixed_float16' set.")
+            # Loss scaling is handled automatically by model.fit with mixed precision policies
+        except Exception as e:
+            logger.warning(f"Could not enable mixed precision: {e}")
 
-def ensemble_predict(models:list, dataset:tf.data.Dataset) -> np.ndarray:
-    predictions = []
-    for model in models:
-        preds = model.predict(dataset)
-        predictions.append(preds)
-    averaged_preds = np.mean(predictions, axis=0)
-    return averaged_preds 
+    try:
+        model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
+        logger.info("Model compiled successfully.")
+    except Exception as e:
+        logger.error(f"Failed to compile model: {e}")
+        return
+
+    # Setup Callbacks 
+    logger.info("Setting up callbacks...")
+    callbacks = get_callbacks(config, model_save_dir)
+    logger.info(f"Callbacks configured: {[cb.__class__.__name__ for cb in callbacks]}")
+
+    # Train Model 
+    epochs = config.get('training', {}).get('epochs', 50)
+    logger.info(f"Starting training for {epochs} epochs...")
+    try:
+        history = model.fit(
+            train_ds,
+            epochs=epochs,
+            validation_data=val_ds,
+            callbacks=callbacks
+        )
+        logger.info("Training finished.")
+
+        # Save Final Model  
+        final_model_name = 'final_model.h5'
+        final_model_path = os.path.join(model_save_dir, final_model_name)
+        logger.info(f"Saving final model to: {final_model_path}")
+        model.save(final_model_path)
+        logger.info("Final model saved successfully.")
+
+    except Exception as e:
+        logger.error(f"An error occurred during training: {e}", exc_info=True)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Train segmentation model for food datasets.")
-    parser.add_argument('--metadata_path', required=True, help="Path to JSON metadata from data loading.")
-    parser.add_argument('--data_dir', required=True, help="Root directory of processed images and masks (e.g., data/segmentation/processed/).")
-    parser.add_argument('--epochs', type=int, default=50, help="Number of training epochs.")
-    parser.add_argument('--batch_size', type=int, default=16, help="Batch size for training.")
-    parser.add_argument('--image_size', nargs=2, type=int, default=[512, 512], help="Image and mask dimensions (height width).")
-    parser.add_argument('--split_ratio', type=float, default=0.2, help="Validation split ratio.")
-    parser.add_argument('--architecture', type=str, default='ResNet50', help='Model architecture to use (e.g., ResNet50, SegFormer, BiSeNetV2)')
-    parser.add_argument('--loss_function', type=str, default='dice_loss', help='Loss function to use (e.g., dice_loss, sparse_categorical_crossentropy)')
-    parser.add_argument('--augment_data', action='store_true', help='Enable data augmentation')
-    parser.add_argument('--use_mixed_precision', action='store_true', help='Enable mixed precision training if supported')
-    args = parser.parse_args()
-    
-    try:
-        config_path = 'models/segmentation/config.yaml'  
-        try:
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
-            architecture = config.get('model_architecture', 'ResNet50')
-            # Other params can be loaded similarly
-        except FileNotFoundError:
-            logger.warning("Config file not found, using command-line arguments.")
-            architecture = args.architecture if hasattr(args, 'architecture') else 'ResNet50'
-        
-        train_ds, val_ds = load_segmentation_data(args.metadata_path, args.data_dir, tuple(args.image_size), args.batch_size, args.split_ratio)
-        if args.augment_data:
-            train_ds = train_ds.map(augment, num_parallel_calls=tf.data.AUTOTUNE)
-        use_mixed_precision = args.use_mixed_precision or (config and config.get('use_mixed_precision', False))
-        if use_mixed_precision:
-            from tensorflow.keras import mixed_precision
-            mixed_precision.set_global_policy('mixed_float16')
-            logger.info("Mixed precision enabled.")
-        model = build_segmentation_model(input_shape=(train_ds.element_spec[0].shape[1], train_ds.element_spec[0].shape[2], 3), num_classes=config.get('num_classes', 21), architecture=architecture, loss_function=args.loss_function)
-        train_segmentation_model(model, train_ds, val_ds, args.epochs)
-    except Exception as e:
-        logger.error(f"Script error: {e}")
-        exit(1)
+    config_path = 'models/segmentation/config.yaml'
+    train(config_path)
