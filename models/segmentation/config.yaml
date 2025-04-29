@@ -1,0 +1,113 @@
+data:
+  image_dir: "data/segmentation/images/" 
+  mask_dir: "data/segmentation/masks/"
+  image_size: [256, 256] 
+  batch_size: 16
+  validation_split_ratio: 0.15 # Fraction of data for validation
+  test_split_ratio: 0.15 # Fraction of data for testing (from the original dataset)
+  num_classes: 2 # Number of segmentation classes (e.g., 1 for foreground + 1 for background, or N food classes + background)
+  # Add color mapping if masks are color-coded instead of integer-based
+  # color_map: 
+  #   background: [0, 0, 0]
+  #   food: [255, 255, 255]
+
+  # Data Augmentation (applied consistently to image and mask)
+  augmentation:
+    enabled: true
+    horizontal_flip: true
+    rotation_range: 15 
+    width_shift_range: 0.1
+    height_shift_range: 0.1
+    zoom_range: 0.1
+
+# Model Configuration
+model:
+  architecture: "UNet" # e.g., 'UNet', 'DeepLabV3+'
+  backbone: "EfficientNetB0" # Optional: Backbone for feature extraction (e.g., 'ResNet50', 'EfficientNetB0', 'None' for standard U-Net)
+  input_shape: [256, 256, 3] # Should match data.image_size + channels
+  num_classes: 2 # Must match data.num_classes
+  activation: "sigmoid" # or "softmax" if num_classes > 2 and mutually exclusive classes
+  use_pretrained_backbone_weights: true # If using a backbone
+
+# Optimizer Configuration 
+optimizer:
+  name: "Adam"
+  learning_rate: 0.001
+
+# Loss Function Configuration 
+loss:
+  # Common segmentation losses (can be combined)
+  name: "dice_loss" # e.g., 'dice_loss', 'jaccard_loss', 'binary_crossentropy', 'categorical_crossentropy'
+  # Optional: Combine losses, e.g., Dice + BCE
+  # combined_loss:
+  #   dice_weight: 0.5
+  #   bce_weight: 0.5
+
+# Metrics Configuration 
+metrics: ["iou_metric"] # e.g., ['iou_metric', 'dice_coefficient', 'accuracy']
+  # 'iou_metric' would typically be MeanIoU from tf.keras.metrics
+
+# Training Configuration
+training:
+  epochs: 100
+  use_mixed_precision: false
+
+  callbacks:
+    model_checkpoint:
+      enabled: true
+      monitor: "val_iou_metric" # Monitor MeanIoU on validation set
+      mode: "max" # maximize IoU
+      save_best_only: true
+      save_weights_only: false
+      filename_template: "unet_epoch-{epoch:02d}_val_iou-{val_iou_metric:.4f}.h5"
+
+    early_stopping:
+      enabled: true
+      monitor: "val_iou_metric"
+      mode: "max"
+      patience: 15
+      restore_best_weights: true
+
+    reduce_lr_on_plateau:
+      enabled: true
+      monitor: "val_iou_metric"
+      mode: "max"
+      factor: 0.1
+      patience: 7
+      min_lr: 0.000001
+
+    tensorboard:
+      enabled: true
+      log_dir: "logs/segmentation/"
+      histogram_freq: 0
+      write_graph: true
+      update_freq: "epoch"
+
+    # Optional LR Scheduler
+    # lr_scheduler:
+    #   name: "cosine_decay"
+    #   alpha: 0.0
+
+# Evaluation Configuration 
+evaluation:
+  # Optional: Specify model for evaluation, defaults to best checkpoint or final model
+  # keras_model_filename: "unet_best_model.h5"
+  batch_size: 16 
+
+# Paths Configuration 
+paths:
+  model_save_dir: "trained_models/segmentation/"
+  log_dir: "logs/segmentation/"
+  tflite_export_dir: "trained_models/segmentation/exported/"
+  # No label map needed for typical segmentation
+
+# Export Configuration
+export:
+  # keras_model_filename: "unet_epoch-XX_val_iou-X.XXXX.h5" # Optional: Specify Keras model file. Defaults to best/final model.
+  tflite_filename: "segmentation_model.tflite"
+
+  quantization:
+    type: "default" # 'none', 'default', 'float16', 'int8'
+    representative_dataset:
+      enabled: false 
+      num_samples: 50
