@@ -1,208 +1,230 @@
 import numpy as np
 import os
-import sys
+import logging
+import yaml
+from pathlib import Path
+import time 
 
-project_root = os.path.dirname(os.path.abspath(__file__))
-if project_root not in sys.path:
-    sys.path.append(project_root)
+try:
+    from models.segmentation.predict_segmentation import run_segmentation_inference, load_segmentation_model
+except ImportError:
+    logging.error("Failed to import segmentation functions. Ensure predict_segmentation.py is refactored.")
+    def load_segmentation_model(path): raise NotImplementedError("Segmentation model loading not implemented/imported.")
+    def run_segmentation_inference(*args): raise NotImplementedError("Segmentation inference not implemented/imported.")
 
-from volume_helpers.depth_volume_estimator import estimate_volume_from_depth, estimate_volume_point_cloud
-from volume_helpers.density_lookup import lookup_density
+try:
+    from models.classification.predict_classification import run_classification_inference, load_classification_model
+except ImportError:
+    logging.error("Failed to import classification functions. Ensure predict_classification.py is refactored.")
+    def load_classification_model(path): raise NotImplementedError("Classification model loading not implemented/imported.")
+    def run_classification_inference(*args): raise NotImplementedError("Classification inference not implemented/imported.")
+
+try:
+    from volume_helpers.volume_helpers import depth_map_to_masked_points, estimate_volume_convex_hull
+    from volume_helpers.density_lookup import lookup_density
+except ImportError as e:
+     logging.error(f"Failed to import local helpers: {e}. Ensure volume_helpers and density_lookup exist.")
+     def depth_map_to_masked_points(*args): raise NotImplementedError("depth_map_to_masked_points not implemented/imported.")
+     def estimate_volume_convex_hull(*args): raise NotImplementedError("estimate_volume_convex_hull not implemented/imported.")
+     def lookup_density(*args): raise NotImplementedError("lookup_density not implemented/imported.")
 
 
-def analyze_food_item(food_name: str, depth_map: np.ndarray, segmentation_mask: np.ndarray, 
-                      fx: float, fy: float, cx: float, cy: float, 
-                      pixel_area_mm2: float = 1.0) -> dict:
-    """
-    Analyzes a food item by estimating volume, looking up density, and calculating mass.
-    Uses a segmentation mask and attempts point cloud estimation first, falling back to depth summation.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-    Args:
-        food_name: The name of the food item (output from classification).
-        depth_map: 2D numpy array representing depth data (e.g., from LiDAR/ToF, in mm).
-        segmentation_mask: 2D boolean numpy array identifying food pixels in the depth map.
-        fx, fy, cx, cy: Camera intrinsic parameters.
-        pixel_area_mm2: The area of each pixel (used for fallback volume estimation).
+def _get_project_root() -> Path:
+    """Gets the project root directory."""
+    return Path(__file__).parent
 
-    Returns:
-        A dictionary containing the results: volume, density, mass, volume_method, and status.
-    """
-    results = {
-        'food_name': food_name,
-        'volume_mm3': None,
-        'volume_method': None, # 'PointCloud' or 'DepthSummation'
-        'density_g_cm3': None,
-        'mass_g': None,
-        'status': 'Processing failed'
-    }
+def load_pipeline_config(config_path: str) -> dict:
+    """Loads pipeline configuration."""
+    if not os.path.isabs(config_path):
+        config_path = os.path.join(_get_project_root(), config_path)
 
     try:
-        # --- 1. Estimate Volume --- 
-        volume_mm3 = None
-        volume_method = None
-
-        # Try Point Cloud method first
-        try:
-            pc_volume_mm3 = estimate_volume_point_cloud(depth_map, segmentation_mask, fx, fy, cx, cy)
-            if pc_volume_mm3 is not None and pc_volume_mm3 > 0:
-                volume_mm3 = pc_volume_mm3
-                volume_method = 'PointCloud'
-                print(f"Volume estimated using Point Cloud Convex Hull.")
-            else:
-                print("Point cloud volume estimation did not yield a valid positive volume.")
-        except ValueError as pc_ve:
-            print(f"Point cloud volume estimation error: {pc_ve}")
-        except ImportError:
-             print("Error: SciPy is required for point cloud volume estimation.")
-        except Exception as pc_e: # Catch other potential errors from point cloud method
-            print(f"Unexpected error during point cloud volume estimation: {pc_e}")
-
-        # Fallback to simple depth summation if point cloud method failed
-        if volume_mm3 is None:
-            print("Falling back to simple depth summation volume estimation.")
-            volume_mm3 = estimate_volume_from_depth(depth_map, segmentation_mask, pixel_area_mm2)
-            if volume_mm3 > 0:
-                volume_method = 'DepthSummation'
-            else:
-                 print("Warning: Depth summation method also resulted in zero or negative volume.")
-                 volume_mm3 = None # Ensure it's None if calculation fails
-
-        if volume_mm3 is None:
-            results['status'] = 'Volume Estimation Failed'
-            print("Error: Both volume estimation methods failed.")
-            return results # Cannot proceed without volume
-
-        results['volume_mm3'] = volume_mm3
-        results['volume_method'] = volume_method
-        
-        # Convert volume to cm³ (1 cm³ = 1000 mm³)
-        volume_cm3 = volume_mm3 / 1000.0
-        print(f"Estimated Volume for {food_name} ({volume_method}): {volume_cm3:.2f} cm³ ({volume_mm3:.2f} mm³)")
-
-        # --- 2. Lookup Density (g/cm³) ---
-        api_key = os.environ.get("USDA_API_KEY")
-        if not api_key:
-            print("Warning: USDA_API_KEY environment variable not set. USDA API lookups will be skipped.")
-
-        density_g_cm3 = lookup_density(food_name, api_key=api_key)
-        results['density_g_cm3'] = density_g_cm3
-
-        if density_g_cm3 is not None:
-            print(f"Density for {food_name}: {density_g_cm3:.2f} g/cm³")
-
-            # 3. Calculate Mass (Mass = Density * Volume)
-            mass_g = density_g_cm3 * volume_cm3
-            results['mass_g'] = mass_g
-            results['status'] = 'Success'
-            print(f"Calculated Mass for {food_name}: {mass_g:.2f} g")
-        else:
-            print(f"Density not found for {food_name}. Cannot calculate mass.")
-            results['status'] = 'Success (Volume only)'
-
-    except ValueError as ve:
-        print(f"Error processing {food_name}: {ve}")
-        results['status'] = f"Error: {ve}"
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        logging.info(f"Loaded pipeline configuration from: {config_path}")
+        return config
+    except FileNotFoundError:
+        logging.error(f"Pipeline configuration file not found: {config_path}")
+        raise
     except Exception as e:
-        print(f"An unexpected error occurred for {food_name}: {e}")
-        results['status'] = f"Unexpected Error: {e}"
+        logging.error(f"Error reading or parsing pipeline configuration {config_path}: {e}")
+        raise
+
+# Core Analysis Function
+
+def analyze_food_item(
+    image_path: str,
+    depth_map_path: str,
+    config: dict,
+    usda_api_key: str = None
+) -> dict | None:
+    """
+    Runs the full food analysis pipeline: segmentation, classification, volume, density, mass.
+
+    Args:
+        image_path (str): Path to the input RGB image.
+        depth_map_path (str): Path to the corresponding depth map (.npy format assumed).
+        config (dict): Loaded pipeline configuration dictionary.
+        usda_api_key (str, optional): USDA API key for density lookup fallback. Defaults to None.
+
+    Returns:
+        dict | None: A dictionary containing analysis results ('food_label', 'confidence',
+                     'volume_cm3', 'density_g_cm3', 'estimated_mass_g', 'segmentation_mask_shape'),
+                     or None if a critical step fails.
+    """
+    results = {}
+    timing = {} # For simple profiling
+    project_root = _get_project_root()
+    start_time = time.time()
+
+    #1. Load Input Data 
+    try:
+        t0 = time.time()
+        # Depth map loaded here, image loading might happen inside inference functions
+        depth_map = np.load(depth_map_path)
+        logging.info(f"Loaded depth map from {depth_map_path}, shape: {depth_map.shape}")
+        # Basic validation - Assuming depth in mm
+        if depth_map.ndim != 2:
+             logging.error("Depth map must be a 2D NumPy array.")
+             return None
+        timing['load_depth'] = time.time() - t0
+    except FileNotFoundError:
+        logging.error(f"Depth map file not found: {depth_map_path}")
+        return None
+    except Exception as e:
+        logging.error(f"Error loading depth map {depth_map_path}: {e}")
+        return None
+
+    #2. Load Models (Consider loading once if analyzing multiple items)
+    # This part might be better outside this function if running in a loop
+    try:
+        t0 = time.time()
+        seg_model_path = os.path.join(project_root, config['models']['segmentation_tflite'])
+        # Assume load_segmentation_model returns the interpreter & input/output details
+        seg_interpreter, seg_input_details, seg_output_details = load_segmentation_model(seg_model_path)
+
+        clf_model_path = os.path.join(project_root, config['models']['classification_tflite'])
+        # Assume load_classification_model returns interpreter, details, and class labels
+        clf_interpreter, clf_input_details, clf_output_details, class_labels = load_classification_model(clf_model_path)
+        logging.info("Loaded segmentation and classification models.")
+        timing['load_models'] = time.time() - t0
+    except FileNotFoundError as e:
+         logging.error(f"Model file not found: {e}. Check paths in config_pipeline.yaml.")
+         return None
+    except Exception as e:
+        logging.error(f"Failed to load models: {e}")
+        return None
+    try:
+        t0 = time.time()
+        # run_segmentation_inference takes interpreter, details, image_path, target_size
+        # and returns the final processed mask (resized to original image/depth size)
+        target_seg_size = tuple(config['model_params']['segmentation_input_size'])
+        segmentation_mask = run_segmentation_inference(
+            seg_interpreter, seg_input_details, seg_output_details,
+            image_path, target_seg_size, depth_map.shape # Pass depth map shape for resizing mask
+        )
+        if segmentation_mask is None:
+            logging.error("Segmentation failed.")
+            return None
+        # Ensure mask is boolean
+        segmentation_mask = segmentation_mask.astype(bool)
+        # Avoid storing large mask in results dict, just store shape for info
+        results['segmentation_mask_shape'] = segmentation_mask.shape
+        logging.info(f"Segmentation successful. Mask shape: {segmentation_mask.shape}")
+        timing['segmentation'] = time.time() - t0
+    except Exception as e:
+        logging.exception(f"Error during segmentation: {e}") # Log traceback
+        return None
+
+    # 4. Run Classification 
+    try:
+        t0 = time.time()
+        #  run_classification_inference takes interpreter, details, image_path, target_size, labels
+        # and returns the top class label and confidence score
+        target_clf_size = tuple(config['model_params']['classification_input_size'])
+        food_label, confidence = run_classification_inference(
+            clf_interpreter, clf_input_details, clf_output_details,
+            image_path, target_clf_size, class_labels
+        )
+        if food_label is None:
+            logging.error("Classification failed.")
+            
+            return None
+        results['food_label'] = food_label
+        results['confidence'] = float(confidence) # Ensure float
+        logging.info(f"Classification successful: {food_label} (Confidence: {confidence:.4f})")
+        timing['classification'] = time.time() - t0
+    except Exception as e:
+        logging.exception(f"Error during classification: {e}") # Log traceback
+        return None
+
+    # 5. Estimate Volume 
+    try:
+        t0 = time.time()
+        intrinsics = config['camera_intrinsics']
+        fx, fy = intrinsics['fx'], intrinsics['fy']
+        cx, cy = intrinsics['cx'], intrinsics['cy']
+
+        # Convert depth map to points using the segmentation mask
+        masked_points_mm = depth_map_to_masked_points(depth_map, segmentation_mask, fx, fy, cx, cy)
+
+        if masked_points_mm is None:
+            logging.warning("Could not generate points from depth map and mask for volume estimation.")
+            volume_mm3 = 0.0
+        else:
+            # Estimate volume using convex hull
+            volume_mm3 = estimate_volume_convex_hull(masked_points_mm)
+
+        # Convert volume from mm³ to cm³ (1 cm³ = 1000 mm³)
+        volume_cm3 = volume_mm3 / 1000.0
+        results['volume_cm3'] = volume_cm3
+        logging.info(f"Estimated volume: {volume_cm3:.2f} cm³")
+        timing['volume_estimation'] = time.time() - t0
+    except KeyError as e:
+         logging.error(f"Missing camera intrinsics ('fx', 'fy', 'cx', 'cy') in config: {e}")
+         return None
+    except Exception as e:
+        logging.exception(f"Error during volume estimation: {e}") # Log traceback
+        # Allow continuation without volume? For now, stop.
+        return None
+
+    # 6. Look Up Density
+    density_g_cm3 = None
+    if food_label: # Only lookup if classification was successful
+        try:
+            t0 = time.time()
+            # Pass the API key if available
+            density_g_cm3 = lookup_density(food_label, api_key=usda_api_key)
+            if density_g_cm3 is not None:
+                results['density_g_cm3'] = density_g_cm3
+                logging.info(f"Found density for {food_label}: {density_g_cm3} g/cm³")
+            else:
+                results['density_g_cm3'] = None # Explicitly store None if not found
+                logging.warning(f"Density not found for {food_label}.")
+            timing['density_lookup'] = time.time() - t0
+        except Exception as e:
+            logging.exception(f"Error during density lookup for {food_label}: {e}") # Log traceback
+            results['density_g_cm3'] = None # Store None on error
+    else:
+        logging.warning("Skipping density lookup because classification failed.")
+        results['density_g_cm3'] = None
+
+    # 7. Estimate Mass 
+    estimated_mass_g = None
+    if volume_cm3 > 0 and density_g_cm3 is not None and density_g_cm3 > 0:
+        t0 = time.time()
+        estimated_mass_g = volume_cm3 * density_g_cm3
+        results['estimated_mass_g'] = estimated_mass_g
+        logging.info(f"Estimated mass: {estimated_mass_g:.2f} g")
+        timing['mass_calculation'] = time.time() - t0
+    else:
+        results['estimated_mass_g'] = None
+        logging.warning("Could not estimate mass (volume or density unavailable/invalid).")
+
+    total_time = time.time() - start_time
+    logging.info(f"Total analysis time: {total_time:.2f} seconds")
+    logging.debug(f"Timing breakdown: {timing}")
 
     return results
-
-
-if __name__ == '__main__':
-    print("--- Food Analyzer Simulation ---")
-
-    # Simulate classification output
-    classified_food = "apple" # Try changing this to 'orange' or 'cooked white rice'
-
-    # Simulate depth map data (e.g., from a sensor, in mm)
-    simulated_depth_map = np.array([
-        [0, 50, 0],
-        [50, 100, 50],
-        [0, 50, 0]
-    ]) * 1.0 # Ensure float
-
-    # Simulate segmentation mask (True where the food item is)
-    # This would normally come from your segmentation model
-    simulated_mask = np.array([
-        [False, True, False],
-        [True, True, True],
-        [False, True, False]
-    ])
-
-    # Assume 1mm x 1mm pixel area
-    simulated_pixel_area = 1.0 * 1.0 # mm²
-
-    # Placeholder for Camera Intrinsics (MUST be replaced with actual values from sensor)
-    # Using values typical for a phone camera perhaps
-    H, W = simulated_depth_map.shape
-    sim_fx, sim_fy = 600.0, 600.0 # Example focal lengths in pixels
-    sim_cx, sim_cy = W / 2, H / 2 # Example principal point (image center)
-
-    print(f"\nAnalyzing item: '{classified_food}'")
-    # Run Analysis
-    analysis_result = analyze_food_item(
-        food_name=classified_food,
-        depth_map=simulated_depth_map,
-        segmentation_mask=simulated_mask,
-        fx=sim_fx, fy=sim_fy, cx=sim_cx, cy=sim_cy, # Pass intrinsics
-        pixel_area_mm2=simulated_pixel_area # Still needed for fallback
-    )
-
-    print(f"\n--- Analysis Complete for '{classified_food}' --- ")
-    print(f"Status: {analysis_result['status']}")
-    if analysis_result['volume_method']:
-        print(f"Volume Method: {analysis_result['volume_method']}")
-    if analysis_result['volume_mm3'] is not None:
-        print(f"Volume: {analysis_result['volume_mm3'] / 1000.0:.2f} cm³ ({analysis_result['volume_mm3']:.2f} mm³)")
-    if analysis_result['density_g_cm3'] is not None:
-        print(f"Density: {analysis_result['density_g_cm3']:.2f} g/cm³")
-    if analysis_result['mass_g'] is not None:
-        print(f"Mass: {analysis_result['mass_g']:.2f} g")
-
-    # Example with a food likely not in custom DB initially
-    classified_food_2 = "cheddar cheese"
-    simulated_depth_map_2 = np.array([
-        [0, 0, 0, 0],
-        [60, 70, 60, 0],
-        [70, 80, 70, 0],
-        [60, 70, 60, 0],
-        [0, 0, 0, 0]
-    ]) * 1.0
-
-    # Simulate mask for the second item
-    simulated_mask_2 = np.array([
-        [False, False, False, False],
-        [True, True, True, False],
-        [True, True, True, False],
-        [True, True, True, False],
-        [False, False, False, False]
-    ])
-
-    # Use same intrinsics for simplicity in example
-    H2, W2 = simulated_depth_map_2.shape
-    sim_fx2, sim_fy2 = 600.0, 600.0
-    sim_cx2, sim_cy2 = W2 / 2, H2 / 2
-
-    print(f"\nAnalyzing item: '{classified_food_2}'")
-    # Run analysis for the second food item
-    analysis_result_2 = analyze_food_item(
-        food_name=classified_food_2,
-        depth_map=simulated_depth_map_2,
-        segmentation_mask=simulated_mask_2,
-        fx=sim_fx2, fy=sim_fy2, cx=sim_cx2, cy=sim_cy2,
-        pixel_area_mm2=simulated_pixel_area # For fallback
-    )
-
-    print(f"\n--- Analysis Complete for '{classified_food_2}' --- ")
-    print(f"Status: {analysis_result_2['status']}")
-    if analysis_result_2['volume_method']:
-        print(f"Volume Method: {analysis_result_2['volume_method']}")
-    if analysis_result_2['volume_mm3'] is not None:
-        print(f"Volume: {analysis_result_2['volume_mm3'] / 1000.0:.2f} cm³ ({analysis_result_2['volume_mm3']:.2f} mm³)")
-    if analysis_result_2['density_g_cm3'] is not None:
-        print(f"Density: {analysis_result_2['density_g_cm3']:.2f} g/cm³")
-    if analysis_result_2['mass_g'] is not None:
-        print(f"Mass: {analysis_result_2['mass_g']:.2f} g")
-
-    print("\nCheck 'data/databases/custom_density_db.json' to see if new items were added.")
