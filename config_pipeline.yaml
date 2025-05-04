@@ -1,0 +1,23 @@
+# Configuration for the main food analysis pipeline
+
+models:
+  # Relative paths from the project root (where main.py is)
+  segmentation_tflite: "trained_models/segmentation/exported/segmentation_model.tflite" # Check if this is the correct exported model path/name
+  classification_tflite: "trained_models/classification/exported/classification_model.tflite" # Check if this is the correct exported model path/name
+
+model_params:
+  # Input sizes expected by the TFLite models (Height, Width)
+  segmentation_input_size: [256, 256] # Verify from segmentation training config
+  classification_input_size: [224, 224] # Verify from classification training config
+
+camera_intrinsics:
+  # IMPORTANT: Replace with your actual camera intrinsics
+  fx: 150.0    # Focal length x (pixels)
+  fy: 150.0    # Focal length y (pixels)
+  cx: 60.0     # Principal point x (pixels) - Should be near width/2
+  cy: 50.0     # Principal point y (pixels) - Should be near height/2
+  # Note: These values (fx, fy, cx, cy) heavily influence volume estimation accuracy.
+  # Use values calibrated for the specific depth sensor/camera being used.
+
+# Optional: Add other pipeline settings if needed
+# e.g., default confidence thresholds, volume estimation method flags, etc.
