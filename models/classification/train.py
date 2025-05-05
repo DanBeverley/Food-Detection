@@ -7,18 +7,10 @@ import tensorflow as tf
 from tensorflow.keras import models, layers, optimizers, losses, callbacks, applications, metrics
 from typing import Dict, Tuple
 
-# Assuming data.py is in the same directory or PYTHONPATH is set
 from data import load_classification_data, _get_project_root
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-
-# Optional: Add tensorflow-addons if specific loss/optimizers are used
-# try:
-#     import tensorflow_addons as tfa
-# except ImportError:
-#     tfa = None
-#     logger.warning("TensorFlow Addons not installed. Some loss functions/optimizers might be unavailable.")
 
 def build_model(num_classes: int, config: Dict) -> models.Model:
     """
@@ -308,7 +300,8 @@ def main():
 
     try:
         logger.info("Loading and preparing datasets...")
-        train_dataset, val_dataset, index_to_label_map = load_classification_data(config)
+        # Pass only the 'data' sub-configuration
+        train_dataset, val_dataset, index_to_label_map = load_classification_data(config['data'])
         num_classes = len(index_to_label_map)
         if num_classes == 0:
              logger.error("No classes found in the dataset. Check metadata and data paths.")
@@ -319,12 +312,14 @@ def main():
         return
 
     try:
-        model = build_model(num_classes=num_classes, config=config)
+        # Pass only the 'model' sub-configuration (and num_classes)
+        model = build_model(num_classes=num_classes, config=config['model'])
     except Exception as e:
         logger.error(f"Failed to build model: {e}")
         return
     try:
-        train_model(model, train_dataset, val_dataset, config, index_to_label_map)
+        # Pass only the 'training' sub-configuration (and others)
+        train_model(model, train_dataset, val_dataset, config['training'], index_to_label_map)
     except Exception as e:
         # Error already logged in train_model
         logger.info("Training process terminated due to error.")

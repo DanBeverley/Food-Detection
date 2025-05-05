@@ -1,8 +1,9 @@
 data:
-  metadata_path: "data/classification/metadata.json" 
-  data_dir: "data/classification/processed/"
+  metadata_path: "C:/Users/ADMIN/Documents/GitHub/Food-Detection/data/dummy_classification/metadata.json" # Point to dummy metadata
+  data_dir: "C:/Users/ADMIN/Documents/GitHub/Food-Detection/data/dummy_classification/processed"      # Point to dummy processed data
+  image_size: [224, 224]
   batch_size: 32
-  validation_split_ratio: 0.2
+  split_ratio: 0.2
 
   augmentation:
     enabled: true
@@ -46,7 +47,7 @@ metrics: ["accuracy"] # List of metrics, e.g., ['accuracy', 'sparse_top_k_catego
 
 # Training Configuration
 training:
-  epochs: 50
+  epochs: 1 # Set epochs to 1 for a quick test
   use_mixed_precision: false 
 
   # Callbacks Configuration

@@ -6,9 +6,13 @@ import numpy as np
 import logging
 from sklearn.model_selection import train_test_split # For stratified splitting
 from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
+import pathlib
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+def _get_project_root() -> pathlib.Path:
+    return pathlib.Path(__file__).parent.parent.parent
 
 def _build_augmentation_pipeline(config: Dict) -> Optional[tf.keras.Sequential]:
     """Builds a data augmentation pipeline from the config."""
@@ -30,11 +34,13 @@ def _build_augmentation_pipeline(config: Dict) -> Optional[tf.keras.Sequential]:
     if 'brightness_range' in aug_config:
         pipeline.add(tf.keras.layers.RandomBrightness(factor=max(abs(1 - aug_config['brightness_range'][0]), abs(aug_config['brightness_range'][1] - 1))))
     if aug_config.get("width_shift_range", 0) > 0:
-        pipeline.add(tf.keras.layers.RandomWidth(width_shift_range=aug_config['width_shift_range']))
+        pipeline.add(tf.keras.layers.RandomWidth(factor=aug_config['width_shift_range']))
     if aug_config.get("height_shift_range", 0) > 0:
-        pipeline.add(tf.keras.layers.RandomHeight(height_shift_range=aug_config['height_shift_range']))
-    if aug_config.get("shear_range", 0) > 0:
-        pipeline.add(tf.keras.layers.RandomShear(shear_range=aug_config['shear_range']))
+        # Correct argument name is 'factor'
+        pipeline.add(tf.keras.layers.RandomHeight(factor=aug_config['height_shift_range']))
+    # if aug_config.get("shear_range", 0) > 0:
+        # RandomShear does not exist in tf.keras.layers in this version
+        # pipeline.add(tf.keras.layers.RandomShear(intensity=aug_config['shear_range']))
     pipeline.add(tf.keras.layers.Resizing(config['image_size'][0], config['image_size'][1]))
 
     logger.info(f"Built augmentation pipeline with {len(pipeline.layers)-1} layers.")
@@ -151,7 +157,6 @@ def load_classification_data(config: Dict) -> Tuple[tf.data.Dataset, tf.data.Dat
         val_dataset = tf.data.Dataset.from_tensor_slices((val_paths, val_labels))
         # Use a lambda to pass the 'augment=False' flag
         val_dataset = val_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=False), num_parallel_calls=AUTOTUNE)
-        val_dataset = val_dataset.filter(lambda img, lbl: lbl != -1)
         val_dataset = val_dataset.batch(batch_size)
         val_dataset = val_dataset.prefetch(buffer_size=AUTOTUNE)
         logger.info("Validation dataset created.")
@@ -239,7 +244,6 @@ def load_test_data(config: Dict, index_to_label_map: Optional[Dict[int, str]] = 
         AUTOTUNE = tf.data.AUTOTUNE
         dataset = tf.data.Dataset.from_tensor_slices((image_paths, integer_labels))
         dataset = dataset.map(load_and_preprocess_test, num_parallel_calls=AUTOTUNE)
-        # dataset = dataset.filter(lambda img, lbl: lbl != -1) # Filter unknowns if needed
         dataset = dataset.batch(batch_size)
         dataset = dataset.prefetch(buffer_size=AUTOTUNE)
         logger.info("Test dataset created.")
