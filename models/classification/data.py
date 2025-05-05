@@ -5,6 +5,7 @@ from typing import Tuple, List, Dict, Optional
 import numpy as np
 import logging
 from sklearn.model_selection import train_test_split # For stratified splitting
+from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -123,15 +124,18 @@ def load_classification_data(config: Dict) -> Tuple[tf.data.Dataset, tf.data.Dat
                 image = tf.image.decode_image(image, channels=3, expand_animations=False)
                 image = tf.image.resize(image, image_size)
                 image.set_shape([*image_size, 3]) # Explicitly set shape
+                # Ensure input is float32 in [0, 255] range BEFORE preprocess_input
+                image = tf.cast(image, tf.float32)
 
                 if augment and augmentation_pipeline is not None:
                     image = augmentation_pipeline(image, training=True)
 
-                image = image / 255.0 # Normalize
+                # <<< Apply EfficientNetV2 preprocessing >>>
+                image = preprocess_input(image)
                 return image, label
             except Exception as e:
-                 logger.error(f"Error processing image {path}: {e}")
-                 raise
+                logger.error(f"Error processing image {path}: {e}")
+                raise
 
         AUTOTUNE = tf.data.AUTOTUNE
 

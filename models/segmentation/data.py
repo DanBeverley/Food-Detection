@@ -4,6 +4,7 @@ import tensorflow as tf
 import numpy as np
 import logging
 from typing import Tuple, Dict, Optional, List
+from tensorflow.keras.applications.efficientnet import preprocess_input
 from sklearn.model_selection import train_test_split
 import pathlib
 
@@ -81,7 +82,10 @@ def load_and_preprocess(image_path: tf.Tensor, mask_path: tf.Tensor, target_size
     image = tf.io.read_file(image_path_str)
     image = tf.image.decode_image(image, channels=3, expand_animations=False)
     image = tf.image.resize(image, target_size)
-    image = tf.cast(image, tf.float32) / 255.0 # Normalize image
+    # Ensure float32 in [0, 255] range for preprocess_input
+    image = tf.cast(image, tf.float32)
+    # Apply EfficientNet preprocessing
+    image = preprocess_input(image) 
 
     # Load Mask
     mask = tf.io.read_file(mask_path_str)

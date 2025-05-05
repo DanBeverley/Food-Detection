@@ -7,6 +7,7 @@ from PIL import Image
 import logging
 from pathlib import Path
 import json
+from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -94,11 +95,14 @@ def preprocess_classification_image(image_path: str, target_size_hw: tuple) -> n
         target_size_wh = (target_size_hw[1], target_size_hw[0])
         img_resized = img.resize(target_size_wh, Image.BILINEAR) # Or other interpolation like ANTIALIAS
 
+        # Ensure image is float32 in [0, 255] range before preprocessing
         img_array = np.array(img_resized, dtype=np.float32)
-        img_array = img_array / 255.0
+        
+        # Apply EfficientNetV2 preprocessing
+        preprocessed_img = preprocess_input(img_array)
 
         # Add batch dimension
-        input_data = np.expand_dims(img_array, axis=0)
+        input_data = np.expand_dims(preprocessed_img, axis=0)
         return input_data
 
     except FileNotFoundError:
