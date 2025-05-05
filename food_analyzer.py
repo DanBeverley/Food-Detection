@@ -118,12 +118,14 @@ def analyze_food_item(
         return None
     try:
         t0 = time.time()
-        # run_segmentation_inference takes interpreter, details, image_path, target_size
-        # and returns the final processed mask (resized to original image/depth size)
-        target_seg_size = tuple(config['model_params']['segmentation_input_size'])
+        # Read segmentation params from config
+        seg_input_size = tuple(config['model_params']['segmentation_input_size'])
+        seg_num_classes = config['model_params'].get('segmentation_num_classes', 2) # Default to 2 if missing
+        
         segmentation_mask = run_segmentation_inference(
             seg_interpreter, seg_input_details, seg_output_details,
-            image_path, target_seg_size, depth_map.shape # Pass depth map shape for resizing mask
+            image_path, seg_input_size, depth_map.shape, # Pass depth map shape for resizing mask
+            num_classes=seg_num_classes # Pass num_classes
         )
         if segmentation_mask is None:
             logging.error("Segmentation failed.")
@@ -164,12 +166,20 @@ def analyze_food_item(
     try:
         t0 = time.time()
         intrinsics = config['camera_intrinsics']
+        volume_params = config.get('volume_params', {}) # Use .get for safety
+        min_depth = volume_params.get('min_depth', None) # Allow None if not specified
+        max_depth = volume_params.get('max_depth', None)
+        
         fx, fy = intrinsics['fx'], intrinsics['fy']
         cx, cy = intrinsics['cx'], intrinsics['cy']
 
-        # Convert depth map to points using the segmentation mask
-        masked_points_mm = depth_map_to_masked_points(depth_map, segmentation_mask, fx, fy, cx, cy)
-
+        # Convert depth map to points using the segmentation mask, applying depth filters
+        masked_points_mm = depth_map_to_masked_points(
+            depth_map, segmentation_mask, 
+            fx, fy, cx, cy, 
+            min_depth_m=min_depth, max_depth_m=max_depth # Pass min/max depth
+        )
+ 
         if masked_points_mm is None:
             logging.warning("Could not generate points from depth map and mask for volume estimation.")
             volume_mm3 = 0.0
