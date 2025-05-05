@@ -3,20 +3,17 @@ import json
 from PIL import Image
 from pathlib import Path
 
-# Define paths relative to the script's location (project root)
 PROJECT_ROOT = Path(__file__).parent
 METADATA_PATH = PROJECT_ROOT / "data" / "dummy_classification" / "metadata.json"
 PROCESSED_DIR = PROJECT_ROOT / "data" / "dummy_classification" / "processed"
 CLASSES = ["dummy_class_a", "dummy_class_b"]
 IMAGES_PER_CLASS = 4
-IMAGE_SIZE = (32, 32) # Small dummy images
+IMAGE_SIZE = (32, 32) 
 
 def create_dummy_data():
-    """Creates dummy directories, images, and metadata JSON for classification testing."""
     print("Creating dummy classification data...")
     metadata = []
 
-    # Ensure parent directory for metadata exists
     METADATA_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     for class_name in CLASSES:
@@ -36,11 +33,10 @@ def create_dummy_data():
 
             # Add entry to metadata
             metadata.append({
-                "image_path": abs_image_path_str, # Use absolute path as data.py might expect it
+                "image_path": abs_image_path_str, 
                 "label": class_name
             })
 
-    # Write metadata JSON
     try:
         with open(METADATA_PATH, 'w') as f:
             json.dump(metadata, f, indent=2)
