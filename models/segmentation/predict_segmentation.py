@@ -4,9 +4,11 @@ import yaml
 import numpy as np
 import tensorflow as tf
 from PIL import Image
+from tensorflow.keras.applications.efficientnet import preprocess_input
+import cv2 
 import logging
 from pathlib import Path
-import cv2 
+from typing import Tuple, Optional, Dict, Any
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -35,7 +37,10 @@ def load_and_preprocess_image(image_path:str, target_size_hw:tuple) -> tuple[np.
         target_size_wh = (target_size_hw[1], target_size_hw[0])
         img_resized = img.resize(target_size_wh, Image.BILINEAR)
         img_array = np.array(img_resized, dtype = np.float32)
-        img_array = img_array/255.0
+        # Ensure float32 [0, 255] before preprocessing
+        img_array = img_array
+        # <<< Apply EfficientNet preprocessing >>>
+        img_array = preprocess_input(img_array)
         # Add batch dimension
         input_data = np.expand_dims(img_array, axis = 0)
         return input_data, original_size_hw
@@ -93,8 +98,8 @@ def overlay_mask_on_image(image_path:str, mask:np.ndarray, alpha:float=0.5) -> n
             return None
         # Ensure mask and image has the same (h, w)
         if original_image.shape[:2] != mask.shape[:2]:
-            logging.warning(f"Original image size {original_image.shape[:2]} and mask size {masks.shape[:2]} differ. Resizing mask for overlay")
-            mask = cv2.resize(mask.astype(np.uint8), original_image.shape[1], original_image.shape[0], interpolation=cv2.INTER_NEAREST)
+            logging.warning(f"Original image size {original_image.shape[:2]} and mask size {mask.shape[:2]} differ. Resizing mask for overlay")
+            mask = cv2.resize(mask.astype(np.uint8), (original_image.shape[1], original_image.shape[0]), interpolation=cv2.INTER_NEAREST)
         # Ensure mask is single channel 0 or 1 for simple overlay
         if mask.max() > 1: # If mask has class indices > 1, use non-zero as mask
             binary_mask = (mask>0).astype(np.uint8)
@@ -105,7 +110,7 @@ def overlay_mask_on_image(image_path:str, mask:np.ndarray, alpha:float=0.5) -> n
         colored_mask[binary_mask == 1] = [0, 255, 0] # Green color for mask
         # Blend images
         overlayed_image = cv2.addWeighted(original_image, 1, colored_mask, alpha, 0)
-        overlayed_image = cv2.cvtColor(overlayed_image, cv2.COLOR_BGR2RBG)
+        overlayed_image = cv2.cvtColor(overlayed_image, cv2.COLOR_BGR2RGB)
         return overlayed_image
     except Exception as e:
         logging.error(f"Error overlaying mask: {e}")
@@ -158,18 +163,18 @@ def run_segmentation_inference(
         input_dtype = input_details[0]["dtype"]
         if input_dtype == np.uint8:
             scale, zero_point = input_details[0]["quantization"]
-            input_data = (input_data/scale+zero_point).astype(input_dtypes)
+            input_data = (input_data/scale+zero_point).astype(input_dtype)
         # Run inference
         interpreter.set_tensor(input_details[0]['index'], input_data)
         interpreter.invoke()
         raw_mask = interpreter.get_tensor(output_details[0]["index"])
         # Handle quantized output 
         output_dtype = output_details[0]["dtype"]
-        if output_dtypes == np.uint8:
+        if output_dtype == np.uint8:
             scale, zero_point = output_details[0]["quantization"]
             # Dequantize - check scale and zero point are valid
             if scale != 0:
-                raw_mask = (raw_mask.astype(np.float32)-zero_points)*scale
+                raw_mask = (raw_mask.astype(np.float32)-zero_point)*scale
             else:
                 logging.warning("Output tensor is quantized (UINT8) but scale is zero. Using raw values")
                 raw_mask = raw_mask.astype(np.float32)
@@ -187,7 +192,7 @@ def run_segmentation_inference(
 def predict_standalone(config_path:str, image_path:str, output_path:str = None, show_overlay:bool=False):
     """Loads TFLite model and performs segmentation prediction (Standalone mode)."""
     try:
-        project_root = _get_project_root()
+        project_root = get_project_root()
         if not os.path.isabs(config_path):
             config_path = os.path.join(project_root, config_path)
         with open(config_path, "r")as f:

@@ -2,12 +2,15 @@ import numpy as np
 import logging
 from scipy.spatial import ConvexHull
 from scipy.spatial.qhull import QhullError 
+from typing import Optional
 
 logging.basicConfig(level = logging.INFO, format = "%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 def depth_map_to_masked_points(depth_map:np.ndarray, segmentation_mask:np.ndarray,
-                               fx:float, fy:float, cx:float, cy:float) -> np.ndarray | None:
+                               fx:float, fy:float, cx:float, cy:float,
+                               min_depth_m: Optional[float] = None,
+                               max_depth_m: Optional[float] = None) -> Optional[np.ndarray]:
     """
     Converts a depth map region (defined by a mask) to a 3D point cloud.
 
@@ -20,6 +23,8 @@ def depth_map_to_masked_points(depth_map:np.ndarray, segmentation_mask:np.ndarra
         fy (float): Camera focal length in y (pixels).
         cx (float): Camera principal point x (pixels).
         cy (float): Camera principal point y (pixels).
+        min_depth_m (Optional[float]): Minimum valid depth in METERS. Points below this are discarded.
+        max_depth_m (Optional[float]): Maximum valid depth in METERS. Points above this are discarded.
 
     Returns:
         np.ndarray | None: An (N, 3) numpy array of 3D points (x, y, z) in mm,
@@ -43,14 +48,22 @@ def depth_map_to_masked_points(depth_map:np.ndarray, segmentation_mask:np.ndarra
     jj_masked = jj[mask_indices]
     depth_value_masked = depth_map[mask_indices]
 
-    # Filter out invalid depth values (e.g., <= 0)
-    valid_depth_filter = depth_value_masked > 0
+    # Convert min/max depth from meters (config) to millimeters (depth map unit)
+    min_depth_mm = min_depth_m * 1000 if min_depth_m is not None else 0 # Default min to 0 if None
+    max_depth_mm = max_depth_m * 1000 if max_depth_m is not None else np.inf # Default max to infinity if None
+
+    # Filter out invalid depth values (e.g., <= 0) and values outside min/max range
+    valid_depth_filter = (
+        (depth_value_masked > min_depth_mm) & 
+        (depth_value_masked < max_depth_mm)
+    )
+
     ii_final = ii_masked[valid_depth_filter]
     jj_final = jj_masked[valid_depth_filter]
     depth_final = depth_value_masked[valid_depth_filter]
 
     if depth_final.size == 0:
-        logger.warning(f"No vald depth pixels found within the segmentation mask")
+        logger.warning(f"No valid depth pixels found within the segmentation mask")
         return None
     # Convert pixel coordinates and depth to 3D points (mm)
     # Follows standard pinhole camera model projection equations inverted
