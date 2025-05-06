@@ -140,7 +140,7 @@ def run_segmentation_inference(
     image_path:str,
     model_input_size_hw:tuple,
     output_resize_shape_hw:tuple, # e.g., original image shape or depth map shape
-    num_classes:int = 2) -> np.ndarray|None:
+    num_classes:int = 2):
     """
     Runs segmentation inference on a single image.
 
@@ -157,30 +157,78 @@ def run_segmentation_inference(
         Processed segmentation mask (resized to output_resize_shape_hw) or None on failure.
     """
     try:
-        # Preprocess image
-        input_data, _ = load_and_preprocess_image(image_path, model_input_size_hw)
-        # Check input tensor type and scale if necessary (e.g. for UINT8 models)
-        input_dtype = input_details[0]["dtype"]
-        if input_dtype == np.uint8:
-            scale, zero_point = input_details[0]["quantization"]
-            input_data = (input_data/scale+zero_point).astype(input_dtype)
+        logging.debug(f"Running inference for image: {image_path}")
+        logging.debug(f"Model Input Size (H,W): {model_input_size_hw}, Output Resize Shape (H,W): {output_resize_shape_hw}, Num Classes: {num_classes}")
+
+        # Load and preprocess image
+        try:
+            preprocessed_image, _ = load_and_preprocess_image(image_path, model_input_size_hw)
+            if preprocessed_image is None:
+                logging.error(f"Preprocessing failed for image: {image_path}")
+                return None
+            logging.debug(f"Image preprocessed successfully. Shape: {preprocessed_image.shape}, Dtype: {preprocessed_image.dtype}")
+        except Exception as preproc_e:
+            logging.exception(f"Error during preprocessing for {image_path}: {preproc_e}")
+            return None
+
+        # Set input tensor
+        input_index = input_details[0]['index']
+        expected_input_dtype = input_details[0]['dtype']
+        logging.debug(f"Setting input tensor at index {input_index}. Expected dtype: {expected_input_dtype}, Actual dtype: {preprocessed_image.dtype}")
+        if preprocessed_image.dtype != expected_input_dtype:
+            logging.warning(f"Casting preprocessed image dtype {preprocessed_image.dtype} to match model expected dtype {expected_input_dtype}")
+            preprocessed_image = tf.cast(preprocessed_image, expected_input_dtype)
+        
+        try:
+            interpreter.set_tensor(input_index, preprocessed_image)
+            logging.debug("Input tensor set successfully.")
+        except Exception as set_tensor_e:
+            logging.exception(f"Error setting input tensor for {image_path}: {set_tensor_e}")
+            return None
+
         # Run inference
-        interpreter.set_tensor(input_details[0]['index'], input_data)
-        interpreter.invoke()
-        raw_mask = interpreter.get_tensor(output_details[0]["index"])
-        # Handle quantized output 
-        output_dtype = output_details[0]["dtype"]
-        if output_dtype == np.uint8:
-            scale, zero_point = output_details[0]["quantization"]
-            # Dequantize - check scale and zero point are valid
-            if scale != 0:
-                raw_mask = (raw_mask.astype(np.float32)-zero_point)*scale
-            else:
-                logging.warning("Output tensor is quantized (UINT8) but scale is zero. Using raw values")
-                raw_mask = raw_mask.astype(np.float32)
-        logging.debug("Inference completed")
-        # Postprocess output mask
-        final_mask = postprocess_mask(raw_mask, output_resize_shape_hw, num_classes)
+        logging.debug("Invoking TFLite interpreter...")
+        try:
+            interpreter.invoke()
+            logging.debug("Interpreter invoked successfully.")
+        except Exception as invoke_e:
+            logging.exception(f"Error invoking TFLite interpreter for {image_path}: {invoke_e}")
+            return None
+
+        # Get output tensor
+        output_index = output_details[0]['index']
+        logging.debug(f"Getting output tensor from index {output_index}.")
+        try:
+            raw_mask = interpreter.get_tensor(output_index)
+            logging.debug(f"Raw mask obtained. Shape: {raw_mask.shape}, Dtype: {raw_mask.dtype}")
+        except Exception as get_tensor_e:
+            logging.exception(f"Error getting output tensor for {image_path}: {get_tensor_e}")
+            return None
+
+        # Postprocess mask
+        # Remove batch dimension if exist
+        if raw_mask.ndim > 3:
+            raw_mask = np.squeeze(raw_mask, axis=0) # (b, h, w, c) -> (h, w, c)
+        model_output_size_hw = raw_mask.shape[:2]
+        # Process based on number of classes
+        if num_classes == 2 or raw_mask.shape[-1] == 1:
+            # Binary classification (single channel output) - Apply threshold
+            processed_mask = (raw_mask > 0.5).astype(np.uint8)
+            if processed_mask.ndim > 2 and processed_mask.shape[-1] == 1:
+                processed_mask = np.squeeze(processed_mask, axis =- 1) # (h, w)
+        elif num_classes > 2:
+            # Multi-class classification - argmax
+            processed_mask = np.argmax(raw_mask, axis=-1).astype(np.uint8) # (h, w)
+        else:
+            logging.error(f"Invalid num_classes ({num_classes}) for mask postprocessing")
+            # Default to thresholding single channel if available
+            processed_mask = (raw_mask > 0.5).astype(np.uint8)
+            if processed_mask.ndim > 2 and processed_mask.shape[-1] == 1:
+                processed_mask = np.squeeze(processed_mask, axis =-1)
+        # Resize mask back to target size using NEAREST
+        # OpenCV resize takes (w, h)
+        target_size_wh = (output_resize_shape_hw[1], output_resize_shape_hw[0])
+        final_mask = cv2.resize(processed_mask, target_size_wh, interpolation=cv2.INTER_NEAREST)
         logging.debug(f"Mask postprocessed to size: {final_mask.shape}")
         # Mask values should be class indices (0, 1, ... N - 1)
         logging.debug(f"Unique values in final mask: {np.unique(final_mask)}")
@@ -205,7 +253,8 @@ def predict_standalone(config_path:str, image_path:str, output_path:str = None, 
         return
     try:
         tflite_model_rel_path = config["models"]["segmentation_tflite"]
-        model_input_size_hw = tuple(config["model_params"]["segmentation_input_size"])
+        # Read input size from the 'model' section, taking Height and Width
+        model_input_size_hw = tuple(config["model"]["input_shape"][:2]) 
         num_classes = config.get("model", {}).get("num_classes", 2)
     except KeyError as e:
         logging.error(f"Missing key in configuration file {config_path}: {e}")
