@@ -7,6 +7,7 @@ from typing import Tuple, Dict, Optional, List
 from tensorflow.keras.applications.efficientnet import preprocess_input
 from sklearn.model_selection import train_test_split
 import pathlib
+import traceback
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -73,31 +74,56 @@ def split_data(image_mask_pairs: List[Tuple[str, str]], val_ratio: float, test_r
     logger.info(f"Split complete: Train={len(train_pairs)}, Val={len(val_pairs)}, Test={len(test_pairs)}")
     return train_pairs, val_pairs, test_pairs
 
-def load_and_preprocess(image_path: tf.Tensor, mask_path: tf.Tensor, target_size: Tuple[int, int], num_classes: int) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Loads and preprocesses a single image-mask pair."""
-    image_path_str = tf.compat.as_str_any(image_path.numpy())
-    mask_path_str = tf.compat.as_str_any(mask_path.numpy())
+def load_and_preprocess(image_path_tensor, mask_path_tensor, target_size: Tuple[int, int], num_classes: int):
+    """Loads and preprocesses a single image and mask."""
+    try: # Add outer try block
+        # Decode tensor paths to strings
+        image_path = image_path_tensor.numpy().decode('utf-8')
+        mask_path = mask_path_tensor.numpy().decode('utf-8')
 
-    # Load Image
-    image = tf.io.read_file(image_path_str)
-    image = tf.image.decode_image(image, channels=3, expand_animations=False)
-    image = tf.image.resize(image, target_size)
-    # Ensure float32 in [0, 255] range for preprocess_input
-    image = tf.cast(image, tf.float32)
-    # Apply EfficientNet preprocessing
-    image = preprocess_input(image) 
+        # Load Image
+        try:
+            image = tf.io.read_file(image_path)
+            image = tf.image.decode_image(image, channels=3, expand_animations=False)
+            image = tf.image.resize(image, target_size)
+            # Ensure float32 in [0, 255] range for preprocess_input
+            image = tf.cast(image, tf.float32)
+            # Apply EfficientNet preprocessing
+            image = preprocess_input(image) 
+        except Exception as img_e:
+            logger.error(f"Error loading/processing image {image_path}: {img_e}")
+            # Return dummy tensors on error to avoid crashing the whole pipeline?
+            # This might hide errors but allow processing other files.
+            # Or raise the exception:
+            raise # Re-raise the exception to be caught by the outer block
 
-    # Load Mask
-    mask = tf.io.read_file(mask_path_str)
-    mask = tf.image.decode_image(mask, channels=1, expand_animations=False)
-    mask = tf.image.resize(mask, target_size, method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
+        # Load Mask
+        try:
+            mask = tf.io.read_file(mask_path)
+            mask = tf.image.decode_image(mask, channels=1, expand_animations=False)
+            mask = tf.image.resize(mask, target_size, method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
 
-    # Handle mask values (ensure float32 [0, 1] for common losses like Dice/BCE with sigmoid)
-    if tf.reduce_max(mask) > 1:
-        mask = mask / 255.0
-    mask = tf.cast(mask, tf.float32)
+            # Handle mask values (ensure float32 [0, 1] for common losses like Dice/BCE with sigmoid)
+            if tf.reduce_max(mask) > 1:
+                mask = mask / 255.0
+            mask = tf.cast(mask, tf.float32)
 
-    return image, mask
+        except Exception as mask_e:
+            logger.error(f"Error loading/processing mask {mask_path}: {mask_e}")
+            raise # Re-raise the exception
+
+        return image, mask
+
+    except BaseException as e: # Catch any exception during preprocessing
+        # Log the error with traceback
+        image_path_str = image_path_tensor.numpy().decode('utf-8') if hasattr(image_path_tensor, 'numpy') else 'unknown'
+        mask_path_str = mask_path_tensor.numpy().decode('utf-8') if hasattr(mask_path_tensor, 'numpy') else 'unknown'
+        logger.error(f"Unhandled error processing image '{image_path_str}' or mask '{mask_path_str}': {e}", exc_info=True)
+        print(f"--- TRACEBACK FROM load_and_preprocess ({image_path_str}) ---")
+        print(traceback.format_exc())
+        print("----------------------------------------------------------")
+        # Re-raise the exception to ensure the dataset pipeline fails clearly
+        raise e
 
 @tf.function
 def apply_augmentations(image: tf.Tensor, mask: tf.Tensor, config: Dict) -> Tuple[tf.Tensor, tf.Tensor]:
@@ -245,8 +271,22 @@ def load_segmentation_datasets(config_path: str) -> Tuple[Optional[tf.data.Datas
         dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
         return dataset
 
-    train_ds = create_dataset(img_train, mask_train, is_training=True)
-    val_ds = create_dataset(img_val, mask_val, is_training=False)
-    test_ds = create_dataset(img_test, mask_test, is_training=False)
+    try:
+        train_ds = create_dataset(img_train, mask_train, is_training=True)
+        val_ds = create_dataset(img_val, mask_val, is_training=False)
+        test_ds = create_dataset(img_test, mask_test, is_training=False)
+        
+        # Force execution of the pipeline for one element to catch errors early
+        if train_ds:
+            logger.info("Forcing dataset iteration to check for loading errors...")
+            _ = next(iter(train_ds))
+            logger.info("Dataset iteration check passed.")
+            
+    except BaseException as e: # Catch BaseException and log details
+        logger.error(f"Error creating or iterating dataset: {e}", exc_info=True) # Modified log message
+        print("--- TRACEBACK FROM create_dataset/iteration ---") # Modified print message
+        print(traceback.format_exc())
+        print("-------------------------------------------")
+        return None, None, None # Return None as before
 
     return train_ds, val_ds, test_ds
