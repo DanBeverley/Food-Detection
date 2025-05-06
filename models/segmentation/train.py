@@ -6,6 +6,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow.keras import backend as K
+from datetime import datetime
 
 from data import load_segmentation_datasets, _get_project_root
 
@@ -288,8 +289,8 @@ def train(config_path: str):
     # Load Data 
     logger.info("Loading datasets...")
     train_ds, val_ds, _ = load_segmentation_datasets(config_path)
-    if train_ds is None or val_ds is None:
-        logger.error("Failed to load datasets. Exiting training.")
+    if train_ds is None:
+        logger.error("Failed to load training dataset. Exiting training.")
         return
     logger.info("Datasets loaded successfully.")
 
@@ -327,29 +328,58 @@ def train(config_path: str):
         logger.error(f"Failed to compile model: {e}")
         return
 
-    # Setup Callbacks 
-    logger.info("Setting up callbacks...")
-    callbacks = get_callbacks(config, model_save_dir)
-    logger.info(f"Callbacks configured: {[cb.__class__.__name__ for cb in callbacks]}")
+    # Callbacks setup
+    log_dir = config.get('log_dir', 'logs/segmentation/')
+    checkpoint_dir = config.get('checkpoint_dir', 'checkpoints/segmentation/')
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    # Ensure unique checkpoint path per run if needed, e.g., using timestamp
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    tensorboard_callback = keras.callbacks.TensorBoard(log_dir=os.path.join(log_dir, run_id), histogram_freq=1)
 
-    # Train Model 
-    epochs = config.get('training', {}).get('epochs', 50)
-    logger.info(f"Starting training for {epochs} epochs...")
+    callbacks_list = [tensorboard_callback]
+    patience = config.get('early_stopping_patience', 10)
+
+    if val_ds: # Check if validation data exists
+        logger.info("Validation dataset provided. Setting up validation callbacks (EarlyStopping, ModelCheckpoint on val_loss).")
+        # Use val_loss based checkpointing and early stopping
+        checkpoint_path = os.path.join(checkpoint_dir, f"run_{run_id}_best_val_loss.h5")
+        callbacks_list.extend([
+            keras.callbacks.ModelCheckpoint(filepath=checkpoint_path, save_best_only=True, monitor='val_loss', mode='min', verbose=1),
+            keras.callbacks.EarlyStopping(monitor='val_loss', patience=patience, verbose=1, mode='min', restore_best_weights=True)
+            # Add ReduceLROnPlateau(monitor='val_loss', ...) if needed
+        ])
+    else:
+        logger.warning("No validation dataset provided. Setting up callbacks based on training loss (ModelCheckpoint on loss).")
+        # Use loss based checkpointing. Early stopping on training loss might stop too early.
+        checkpoint_path = os.path.join(checkpoint_dir, f"run_{run_id}_best_loss.h5")
+        callbacks_list.extend([
+            keras.callbacks.ModelCheckpoint(filepath=checkpoint_path, save_best_only=True, monitor='loss', mode='min', verbose=1)
+            # Consider adding EarlyStopping monitoring 'loss' if desired, but be cautious.
+            # EarlyStopping(monitor='loss', patience=patience*2, verbose=1, mode='min') # Example: longer patience for train loss
+        ])
+
+    # --- Training ---
+    logger.info("Starting model training...")
     try:
         history = model.fit(
             train_ds,
-            epochs=epochs,
-            validation_data=val_ds,
-            callbacks=callbacks
+            epochs=config.get('training', {}).get('epochs', 50),
+            # Pass validation data only if it exists
+            validation_data=val_ds if val_ds else None,
+            callbacks=callbacks_list,
+            # steps_per_epoch=steps_per_epoch, # steps_per_epoch might need adjustment if None (calculated earlier)
+            # Pass validation steps only if validation data exists
+            # validation_steps=validation_steps if val_ds else None
         )
         logger.info("Training finished.")
 
-        # Save Final Model  
-        final_model_name = 'final_model.h5'
-        final_model_path = os.path.join(model_save_dir, final_model_name)
+        # Save the final model
+        final_model_name = f'final_model_run_{run_id}.h5'
+        final_model_path = os.path.join(checkpoint_dir, final_model_name)
         logger.info(f"Saving final model to: {final_model_path}")
         model.save(final_model_path)
-        logger.info("Final model saved successfully.")
+        logger.info("Final model saved.")
 
     except Exception as e:
         logger.error(f"An error occurred during training: {e}", exc_info=True)
