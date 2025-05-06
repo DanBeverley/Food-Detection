@@ -43,30 +43,25 @@ loss:
 
 # --- Metrics Configuration ---
 metrics: ["accuracy"] # List of metrics, e.g., ['accuracy', 'sparse_top_k_categorical_accuracy']
-  # top_k: 5 # Used if 'sparse_top_k_categorical_accuracy' is included
 
 # Training Configuration
 training:
   epochs: 1 # Set epochs to 1 for a quick test
-  use_mixed_precision: false 
-
-  # Callbacks Configuration
+  use_mixed_precision: false
   callbacks:
     model_checkpoint:
       enabled: true
       monitor: "val_loss"
-      mode: "min" 
+      mode: "min"
       save_best_only: true
-      save_weights_only: false 
+      save_weights_only: false
       filename_template: "model_epoch-{epoch:02d}_val_loss-{val_loss:.2f}.h5"
-
     early_stopping:
       enabled: true
       monitor: "val_loss"
       mode: "min"
       patience: 10
       restore_best_weights: true
-
     reduce_lr_on_plateau:
       enabled: true
       monitor: "val_loss"
@@ -74,17 +69,16 @@ training:
       factor: 0.2
       patience: 5
       min_lr: 0.000001
-
     tensorboard:
       enabled: true
       log_dir: "logs/classification/" # Will be created relative to project root
       histogram_freq: 0 # Set to 1 to enable histograms (can consume disk space)
       write_graph: true
       update_freq: "epoch"
-
     lr_scheduler:
       name: "cosine_decay"
       alpha: 0.0
+
 # Paths Configuration (Used by Train and Export)
 paths:
   model_save_dir: "trained_models/classification/"
