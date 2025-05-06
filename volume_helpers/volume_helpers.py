@@ -36,8 +36,9 @@ def depth_map_to_masked_points(depth_map:np.ndarray, segmentation_mask:np.ndarra
     if depth_map.shape != segmentation_mask.shape:
         logger.error(f"Depth map shape {depth_map.shape} and mask shape {segmentation_mask.shape} must have the same shape")
         return None
-    if not np.issubdtype(segmentation_mask, np.bool_):
-        logger.warning("Segmentation mask is not boolean, attempting conversion")
+    # Ensure mask is boolean type for indexing
+    if not np.issubdtype(segmentation_mask.dtype, np.bool_):
+        logging.debug(f"Converting segmentation mask from {segmentation_mask.dtype} to bool.")
         segmentation_mask = segmentation_mask.astype(bool)
     height, width = depth_map.shape
     # Create pixel indices
