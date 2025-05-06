@@ -154,7 +154,8 @@ def analyze_food_item(
             logging.error("Classification failed.")
             
             return None
-        results['food_label'] = food_label
+        # Ensure label is JSON serializable (str or int)
+        results['food_label'] = int(food_label) if isinstance(food_label, (np.integer, int)) else food_label
         results['confidence'] = float(confidence) # Ensure float
         logging.info(f"Classification successful: {food_label} (Confidence: {confidence:.4f})")
         timing['classification'] = time.time() - t0
