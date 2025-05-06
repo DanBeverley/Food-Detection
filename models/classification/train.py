@@ -6,6 +6,7 @@ import json
 import tensorflow as tf
 from tensorflow.keras import models, layers, optimizers, losses, callbacks, applications, metrics
 from typing import Dict, Tuple
+import traceback
 
 from data import load_classification_data, _get_project_root
 
@@ -184,7 +185,8 @@ def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset
     logger.info(f"TensorBoard logs will be saved to: {log_dir}")
 
     callbacks_list = []
-    callbacks_config = training_config.get('callbacks', {})
+    callbacks_config = config.get('callbacks', {})
+    print(f"DEBUG: callbacks_config = {callbacks_config}") 
 
     # Model Checkpoint
     if callbacks_config.get('model_checkpoint', {}).get('enabled', True):
@@ -267,6 +269,10 @@ def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset
 
     except Exception as e:
         logger.error(f"An error occurred during model training: {e}", exc_info=True)
+        # Force print traceback to stdout
+        print("--- DETAILED TRACEBACK ---")
+        print(traceback.format_exc())
+        print("-------------------------")
         raise RuntimeError("Model training failed.") from e
 
 def main():
@@ -320,9 +326,13 @@ def main():
     try:
         # Pass only the 'training' sub-configuration (and others)
         train_model(model, train_dataset, val_dataset, config['training'], index_to_label_map)
-    except Exception as e:
-        # Error already logged in train_model
-        logger.info("Training process terminated due to error.")
+    except BaseException as e: # Catch BaseException to include things like SystemExit
+        # Error already logged in train_model # This comment might be wrong
+        # logger.info("Training process terminated due to error.") # Replace this
+        logger.error(f"Error caught in main during training: {e}", exc_info=True) # Add detailed log
+        print("--- TRACEBACK FROM MAIN ---") # Add print for redundancy
+        print(traceback.format_exc())
+        print("-------------------------")
         return
 
     logger.info("Classification training script finished.")
