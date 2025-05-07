@@ -96,7 +96,7 @@ def estimate_volume_convex_hull(points:np.ndarray) -> float:
         logger.warning(f"Need at least 4 points for ConvexHull volume estimation but got {num_points}")
         return 0.0
     try:
-        hull = ConvexHull(points)
+        hull = ConvexHull(points, qhull_options="QJ") # Added qhull_options
         volume = hull.volume 
         logger.info(f"Estimated volume using ConvexHull: {volume:.4f}")
         # Volume unit is cubic unit of input points (e.g., mm^3 if points are in mm)
