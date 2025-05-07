@@ -1,42 +1,127 @@
 # Food Detection & Calorie Estimator
 
-A cross-platform mobile app (iOS & Android) that performs food segmentation, classification, depth-based volume estimation, and calorie calculation. MVP focuses on common foods, using device depth sensors (LiDAR/ToF) or manual volume entry fallback. Models are trained in TensorFlow/PyTorch and exported to TensorFlow Lite & Core ML.
+This project provides a Python-based pipeline for analyzing food images. It performs food segmentation, classification, volume estimation (using a depth map or a fallback dummy depth map), density lookup, and mass calculation. The system is designed to be configurable and extensible.
 
-## Folder Structure
+## Key Features of the Python Pipeline
+
+*   **Food Segmentation**: Identifies and masks the food item in an image using a TFLite segmentation model.
+*   **Food Classification**: Classifies the segmented food item using a TFLite classification model and a label map.
+*   **Volume Estimation**:
+    *   Calculates the 3D volume of the food item using a depth map and camera intrinsic parameters.
+    *   Supports fallback to a dummy depth map if a real one is not provided, allowing the pipeline to run end-to-end.
+    *   Utilizes `scipy.spatial.ConvexHull` with `qhull_options="QJ"` to handle potentially flat depth data.
+*   **Density Lookup**:
+    *   Retrieves food density from a local custom JSON database (`data/databases/custom_density_db.json`).
+    *   Optionally queries the USDA FoodData Central API for densities if not found locally (requires an API key).
+    *   Caches density results to minimize redundant lookups.
+*   **Mass Calculation**: Estimates the mass of the food item based on its calculated volume and looked-up density.
+*   **Configurable**: Pipeline parameters (model paths, camera intrinsics, API keys) are managed through a YAML configuration file (`config_pipeline.yaml`).
+
+## How the Python Pipeline Works
+
+The analysis is orchestrated by `main.py` and `food_analyzer.py`:
+
+1.  **Initialization (`main.py`)**:
+    *   Parses command-line arguments: paths to the input image, depth map (optional), configuration file, and USDA API key (optional).
+    *   Calls the main analysis function in `food_analyzer.py`.
+
+2.  **Core Analysis (`food_analyzer.py` - `analyze_food_item` function)**:
+    *   **Load Configuration**: Reads `config_pipeline.yaml`.
+    *   **Load Inputs**: Loads the RGB image. Attempts to load the provided depth map; if unavailable or invalid, creates a dummy depth map based on image dimensions.
+    *   **Load Models**: Loads TFLite segmentation and classification models, along with the classification `label_map.json`.
+    *   **Segmentation**: Runs inference with the segmentation model to produce a food mask.
+    *   **Classification**: Runs inference with the classification model on the (potentially masked) image to get a food label and confidence.
+    *   **Volume Estimation**:
+        *   Converts the masked region of the depth map into a 3D point cloud using camera intrinsics.
+        *   Calculates the volume of this point cloud using `ConvexHull`.
+    *   **Density Lookup**: Queries local database and/or USDA API for the density of the classified food label.
+    *   **Mass Calculation**: Computes mass (volume × density).
+    *   **Output**: Returns a dictionary containing all results (mask shape, food label, confidence, volume, density, mass).
+
+## Project Structure
+
+The repository is organized as follows:
 
 ```text
 .
-├── .gitignore
-├── README.md
-├── data/
-├── notebooks/
-├── models/
-├── src/
-├── scripts/
-└── tests/
+├── .git/                   # Git version control files
+├── .gitignore             
+├── README.md               # This file
+├── main.py                 # Main script to run the food analysis pipeline
+├── food_analyzer.py        # Core logic for the food analysis pipeline
+├── config_pipeline.yaml    # Configuration file for the pipeline
+├── requirements.txt        # Python package dependencies
+├── create_dummy_classification_data.py # Script (enerating placeholder data/models)
+├── data/                   # Data files used by the pipeline
+│   ├── databases/          # Custom databases (e.g., for density)
+│   │   └── custom_density_db.json
+│   ├── cache/              # Cached data (e.g., from API lookups) - (Verify if used and path)
+│   └── sample_data/        # Sample images, depth maps for testing
+├── models/                 # Python scripts for model definition, loading, and inference logic
+│   ├── segmentation/
+│   │   └── predict_segmentation.py
+│   └── classification/
+│       └── predict_classification.py
+├── trained_models/         # Pre-trained model files (e.g., .tflite) and label maps
+│   ├── segmentation/
+│   │   └── segmentation_model.tflite
+│   └── classification/
+│       ├── classification_model.tflite
+│       └── label_map.json
+├── volume_helpers/         # Utility modules for volume estimation and density lookup
+│   ├── volume_helpers.py
+│   └── density_lookup.py
+├── scripts/                # Additional helper scripts 
+├── logs/                   # Log files generated by the application
+├── checkpoints/            # Model training checkpoints
+└── __pycache__/            # Python bytecode cache
 ```
 
 ## Getting Started
 
-1. Clone the repo
+1.  **Clone the repository:**
+    ```bash
+    git clone <your-repo-url>
+    cd Food-Detection
+    ```
+
+2.  **Create a Python environment and install dependencies:**
+    It's recommended to use a virtual environment.
+    ```bash
+    python -m venv venv
+    # On Windows
+    venv\\Scripts\\activate
+    # On macOS/Linux
+    # source venv/bin/activate
+    pip install -r requirements.txt
+    ```
+
+3.  **Prepare Data and Models:**
+    *   Ensure your TFLite models (`segmentation_model.tflite`, `classification_model.tflite`) and `label_map.json` are placed in the `trained_models/` subdirectories as specified in `config_pipeline.yaml`.
+    *   Update `config_pipeline.yaml` with correct paths and camera intrinsic values if necessary.
+    *   Populate `data/databases/custom_density_db.json` with any custom food densities.
+
+## Configuration
+
+The main configuration for the pipeline is done via `config_pipeline.yaml`. This file includes:
+*   Paths to segmentation and classification models.
+*   Path to the classification label map.
+*   Camera intrinsic parameters (`fx`, `fy`, `cx`, `cy`) for accurate 3D conversions.
+*   Depth processing parameters (e.g., min/max depth cutoffs).
+
+## How to Run
+
+Execute the `main.py` script with the required arguments. Example:
 
 ```bash
-git clone <repo-url>
-cd Food-Detection
+python main.py --image "path/to/your/image.jpg" --depth "path/to/your/depth_map.npy_or_png" --config "config_pipeline.yaml" --api_key "YOUR_USDA_API_KEY_IF_NEEDED"
 ```
+*   `--depth`: Optional. If not provided or the path is invalid, a dummy depth map will be used.
+*   `--api_key`: Optional. Needed if you want to use the USDA API for density lookups and the food item isn't in your custom DB.
 
-2. Create Python env and install dependencies
+## Future Enhancements (from original vision)
 
-```bash
-python -m venv venv
-venv\\Scripts\\activate
-pip install -r requirements.txt
-```
-
-3. Populate data folders as described in docs.
-
-## Next Steps
-
-- Load and preprocess data (scripts)
-- Train and export models (models/*)
-- Integrate with mobile apps (src/ios, src/android)
+*   Train models on comprehensive datasets like FoodSeg-103 for real food recognition.
+*   Develop more sophisticated dummy depth map generation for better volume estimation when real depth is unavailable.
+*   Integrate the pipeline into a cross-platform mobile application (iOS & Android).
+*   Explore using device-specific depth sensors (LiDAR/ToF on mobile devices).
