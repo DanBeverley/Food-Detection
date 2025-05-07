@@ -4,6 +4,7 @@ import logging
 import yaml
 from pathlib import Path
 import time 
+import cv2
 
 try:
     from models.segmentation.predict_segmentation import run_segmentation_inference, load_segmentation_model
@@ -79,26 +80,51 @@ def analyze_food_item(
     project_root = _get_project_root()
     start_time = time.time()
 
-    #1. Load Input Data 
+    #1. Load Input Data
     try:
         t0 = time.time()
-        # Depth map loaded here, image loading might happen inside inference functions
-        depth_map = np.load(depth_map_path)
-        logging.info(f"Loaded depth map from {depth_map_path}, shape: {depth_map.shape}")
-        # Basic validation - Assuming depth in mm
-        if depth_map.ndim != 2:
-             logging.error("Depth map must be a 2D NumPy array.")
+        # Load image first to get dimensions for dummy depth map if needed
+        image = cv2.imread(image_path)
+        if image is None:
+            logging.error(f"Failed to load input image: {image_path}")
+            return None
+        logging.debug(f"Loaded image from {image_path}, shape: {image.shape}") # Use debug for less verbose success
+
+        # Attempt to load depth map
+        depth_map = None
+        if depth_map_path and os.path.exists(depth_map_path):
+            try:
+                if depth_map_path.lower().endswith('.npy'):
+                    depth_map = np.load(depth_map_path)
+                    logging.debug(f"Loaded .npy depth map from {depth_map_path}, shape: {depth_map.shape if depth_map is not None else 'None'}")
+                else: # Assume image format for cv2
+                    depth_map = cv2.imread(depth_map_path, cv2.IMREAD_UNCHANGED)
+                    logging.debug(f"Loaded image-based depth map from {depth_map_path}, shape: {depth_map.shape if depth_map is not None else 'None'}")
+
+                if depth_map is None: # If cv2.imread failed silently for a bad image file, or np.load returned None (though unlikely)
+                    logging.warning(f"Failed to load depth map from existing file {depth_map_path} (e.g. unsupported format or corrupted). Will use default.")
+            except Exception as e:
+                logging.warning(f"Error loading depth map {depth_map_path}: {e}. Will use default.")
+                depth_map = None # Ensure it's None to trigger fallback in next step
+
+        if depth_map is None: # Triggered if path not provided, path doesn't exist, or loading failed
+            logging.warning(
+                f"Depth map at '{depth_map_path}' not found or failed to load. "
+                f"Using a default dummy depth map (all pixels at 1m depth, matching image size {image.shape[0]}x{image.shape[1]})."
+            )
+            depth_map = np.ones((image.shape[0], image.shape[1]), dtype=np.uint16) * 1000 # Default depth: 1000mm = 1m
+
+        # Basic validation for the final depth_map (either loaded or dummy)
+        if not isinstance(depth_map, np.ndarray) or depth_map.ndim != 2:
+             logging.error(f"Final depth map is not a 2D NumPy array (type: {type(depth_map)}, ndim: {depth_map.ndim if isinstance(depth_map, np.ndarray) else 'N/A'}). Cannot proceed.")
              return None
-        timing['load_depth'] = time.time() - t0
-    except FileNotFoundError:
-        logging.error(f"Depth map file not found: {depth_map_path}")
-        return None
-    except Exception as e:
-        logging.error(f"Error loading depth map {depth_map_path}: {e}")
+        logging.info(f"Using depth map of shape: {depth_map.shape}") # Log final depth map shape
+        timing['load_inputs'] = time.time() - t0
+    except Exception as e: # Catch-all for image loading or other unexpected issues here
+        logging.error(f"Critical error during input data loading: {e}", exc_info=True)
         return None
 
     #2. Load Models (Consider loading once if analyzing multiple items)
-    # This part might be better outside this function if running in a loop
     try:
         t0 = time.time()
         seg_model_path = os.path.join(project_root, config['models']['segmentation_tflite'])
@@ -106,8 +132,13 @@ def analyze_food_item(
         seg_interpreter, seg_input_details, seg_output_details = load_segmentation_model(seg_model_path)
 
         clf_model_path = os.path.join(project_root, config['models']['classification_tflite'])
+        class_labels_path_rel = config['models'].get('classification_labels') # Get relative path from config
+        class_labels_path = None
+        if class_labels_path_rel:
+            class_labels_path = os.path.join(project_root, class_labels_path_rel) # Make it absolute
+        
         # Assume load_classification_model returns interpreter, details, and class labels
-        clf_interpreter, clf_input_details, clf_output_details, class_labels = load_classification_model(clf_model_path)
+        clf_interpreter, clf_input_details, clf_output_details, class_labels = load_classification_model(clf_model_path, labels_path=class_labels_path)
         logging.info("Loaded segmentation and classification models.")
         timing['load_models'] = time.time() - t0
     except FileNotFoundError as e:
