@@ -63,16 +63,63 @@ def load_classification_model(tflite_model_path: str, labels_path: str = None):
                     class_labels = [line.strip() for line in f.readlines() if line.strip()]
             elif ext == '.json':
                 with open(labels_path, 'r') as f:
-                     # Assume JSON contains a list of labels directly or under a key like 'labels'
-                     data = json.load(f)
-                     if isinstance(data, list):
-                          class_labels = data
-                     elif isinstance(data, dict) and 'labels' in data and isinstance(data['labels'], list):
-                          class_labels = data['labels']
-                     else:
-                          logging.warning(f"Could not find a list of labels in JSON file: {labels_path}")
-            else:
-                 logging.warning(f"Unsupported labels file format: {ext}")
+                    loaded_json = json.load(f)
+                    if isinstance(loaded_json, list):
+                        class_labels = loaded_json
+                    elif isinstance(loaded_json, dict):
+                        logging.info(f"Attempting to parse labels from dictionary in {labels_path}")
+                        try:
+                            # Convert keys to int for sorting, then get values in order
+                            # Create a list of the correct size, initially with Nones
+                            # Example: if keys are "0", "1", "3", max_key = 3, list size = 4
+                            int_keys = sorted([int(k) for k in loaded_json.keys()])
+                            if not int_keys or int_keys[0] != 0: # Ensure keys start from 0 if expecting dense list
+                                logging.warning(f"Label dictionary keys in {labels_path} do not seem to start from 0 or are non-sequential in a way that might be problematic.")
+                                # Decide on behavior: error, or try to build sparse list, or use as is if order doesn't strictly matter for model output mapping
+                            
+                            # Assuming we want a dense list corresponding to model output indices 0...N-1
+                            # If keys are e.g. 0, 1, 3 -> creates list of size 4 with labels[0], labels[1], labels[3] filled.
+                            # Model output must align with this interpretation.
+                            max_idx = -1
+                            if int_keys:
+                                max_idx = int_keys[-1]
+                            
+                            temp_labels = [None] * (max_idx + 1)
+                            valid_parse = True
+                            for key_str, value_str in loaded_json.items():
+                                try:
+                                    idx = int(key_str)
+                                    if 0 <= idx <= max_idx:
+                                        if temp_labels[idx] is not None:
+                                            logging.warning(f"Duplicate key {idx} in label map {labels_path}. Overwriting.")
+                                        temp_labels[idx] = value_str
+                                    else:
+                                        logging.warning(f"Key {key_str} is out of expected range [0, {max_idx}] in {labels_path}. Skipping.")
+                                        valid_parse = False # Or handle as error
+                                except ValueError:
+                                    logging.warning(f"Non-integer key '{key_str}' found in label map {labels_path}. Skipping.")
+                                    valid_parse = False # Or handle as error
+                            
+                            # Check if all positions were filled (e.g. if keys were "0", "2", labels[1] would be None)
+                            # For a model outputting indices 0 to N-1, we need a dense list.
+                            if None in temp_labels and valid_parse: # Only warn if parse itself was valid but resulted in gaps
+                                logging.warning(f"Parsed labels from dict in {labels_path}, but some indices are missing (resulting in None). This might be an issue if model outputs these indices.")
+                                # Option: filter out Nones if model output range is smaller or sparse
+                                # class_labels = [lbl for lbl in temp_labels if lbl is not None]
+                                # For now, keep Nones to match potential model output range
+                                class_labels = temp_labels
+                            elif valid_parse:
+                                class_labels = temp_labels
+                                logging.info(f"Successfully parsed labels from dictionary in {labels_path}")
+                            else:
+                                class_labels = None # Parsing had issues with keys/values
+                                logging.warning(f"Failed to create a consistent label list from dictionary in {labels_path} due to key issues.")
+
+                        except (ValueError, TypeError) as e_parse:
+                            logging.warning(f"Error trying to parse dictionary from {labels_path} into an ordered list: {e_parse}")
+                            class_labels = None
+                    else:
+                        logging.warning(f"Could not find a list or dictionary of labels in JSON file: {labels_path}")
 
             if class_labels:
                 logging.info(f"Loaded {len(class_labels)} class labels from {labels_path}")
