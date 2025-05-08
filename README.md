@@ -1,20 +1,22 @@
 # Food Detection & Calorie Estimator
 
-This project provides a Python-based pipeline for analyzing food images. It performs food segmentation, classification, volume estimation (using a depth map or a fallback dummy depth map), density lookup, and mass calculation. The system is designed to be configurable and extensible.
+This project provides a Python-based pipeline for analyzing food images. It performs food segmentation, classification, volume estimation (using a depth map, a 3D mesh file, or a fallback dummy depth map), density lookup, calorie estimation, and mass calculation. The system is designed to be configurable and extensible.
 
 ## Key Features of the Python Pipeline
 
 *   **Food Segmentation**: Identifies and masks the food item in an image using a TFLite segmentation model.
 *   **Food Classification**: Classifies the segmented food item using a TFLite classification model and a label map.
 *   **Volume Estimation**:
-    *   Calculates the 3D volume of the food item using a depth map and camera intrinsic parameters.
-    *   Supports fallback to a dummy depth map if a real one is not provided, allowing the pipeline to run end-to-end.
-    *   Utilizes `scipy.spatial.ConvexHull` with `qhull_options="QJ"` to handle potentially flat depth data.
-*   **Density Lookup**:
-    *   Retrieves food density from a local custom JSON database (`data/databases/custom_density_db.json`).
-    *   Optionally queries the USDA FoodData Central API for densities if not found locally (requires an API key).
-    *   Caches density results to minimize redundant lookups.
-*   **Mass Calculation**: Estimates the mass of the food item based on its calculated volume and looked-up density.
+    *   Calculates the 3D volume of the food item using either a depth map (and camera intrinsics) or a direct 3D mesh file (e.g., `.obj`).
+    *   Supports fallback to a dummy depth map if a real one or a mesh file is not provided.
+    *   Utilizes `scipy.spatial.ConvexHull` (for depth maps) or `trimesh` (for mesh files).
+*   **Nutritional Information Lookup (Density & Calories)**:
+    *   Retrieves food density (g/cm³) and calories (kcal/100g) from a local custom JSON database (`data/databases/custom_density_db.json`). The database supports entries with both density and calories, or density alone.
+    *   Optionally queries the USDA FoodData Central API for this information if not found locally (requires an API key).
+    *   Caches API results to minimize redundant lookups.
+*   **Mass & Calorie Calculation**:
+    *   Estimates the mass of the food item based on its calculated volume and looked-up density.
+    *   Estimates the total calories of the food item based on its mass and calories per 100g.
 *   **Configurable**: Pipeline parameters (model paths, camera intrinsics, API keys) are managed through a YAML configuration file (`config_pipeline.yaml`).
 
 ## How the Python Pipeline Works
@@ -22,21 +24,22 @@ This project provides a Python-based pipeline for analyzing food images. It perf
 The analysis is orchestrated by `main.py` and `food_analyzer.py`:
 
 1.  **Initialization (`main.py`)**:
-    *   Parses command-line arguments: paths to the input image, depth map (optional), configuration file, and USDA API key (optional).
+    *   Parses command-line arguments: paths to the input image, depth map (optional), mesh file path (optional), configuration file, and USDA API key (optional).
     *   Calls the main analysis function in `food_analyzer.py`.
 
 2.  **Core Analysis (`food_analyzer.py` - `analyze_food_item` function)**:
     *   **Load Configuration**: Reads `config_pipeline.yaml`.
-    *   **Load Inputs**: Loads the RGB image. Attempts to load the provided depth map; if unavailable or invalid, creates a dummy depth map based on image dimensions.
+    *   **Load Inputs**: Loads the RGB image. Attempts to load the provided depth map or mesh file; if unavailable or invalid, creates a dummy depth map based on image dimensions.
     *   **Load Models**: Loads TFLite segmentation and classification models, along with the classification `label_map.json`.
     *   **Segmentation**: Runs inference with the segmentation model to produce a food mask.
     *   **Classification**: Runs inference with the classification model on the (potentially masked) image to get a food label and confidence.
-    *   **Volume Estimation**:
-        *   Converts the masked region of the depth map into a 3D point cloud using camera intrinsics.
-        *   Calculates the volume of this point cloud using `ConvexHull`.
-    *   **Density Lookup**: Queries local database and/or USDA API for the density of the classified food label.
-    *   **Mass Calculation**: Computes mass (volume × density).
-    *   **Output**: Returns a dictionary containing all results (mask shape, food label, confidence, volume, density, mass).
+    *   **Volume Estimation** (orchestrated by `food_analyzer.py`, implemented in `volume_helpers.py`):
+        *   If a mesh file path is provided, its volume is calculated using `trimesh` and used directly.
+        *   Otherwise, if a depth map is provided, it's converted into a 3D point cloud using camera intrinsics. The volume of this point cloud is calculated using `ConvexHull`.
+        *   If neither is available, a dummy volume might be assumed or an error/warning logged.
+    *   **Nutritional Lookup (`density_lookup.py`)**: Queries local `custom_density_db.json` and/or USDA API for density (g/cm³) and calories (kcal/100g) of the classified food label.
+    *   **Mass & Calorie Calculation**: Computes mass (volume × density) and then total estimated calories (mass × calories_per_100g / 100).
+    *   **Output**: Returns a dictionary containing all results (mask shape, food label, confidence, volume, density, mass, calories_kcal_per_100g, estimated_total_calories).
 
 ## Project Structure
 
@@ -53,8 +56,8 @@ The repository is organized as follows:
 ├── requirements.txt        # Python package dependencies
 ├── create_dummy_classification_data.py # Script (enerating placeholder data/models)
 ├── data/                   # Data files used by the pipeline
-│   ├── databases/          # Custom databases (e.g., for density)
-│   │   └── custom_density_db.json
+│   ├── databases/          # Custom databases (e.g., for density and calories)
+│   │   └── custom_density_db.json  # Stores food items with their density (g/cm³) and calories (kcal/100g)
 │   ├── cache/              # Cached data (e.g., from API lookups) - (Verify if used and path)
 │   └── sample_data/        # Sample images, depth maps for testing
 ├── models/                 # Python scripts for model definition, loading, and inference logic
@@ -99,7 +102,7 @@ The repository is organized as follows:
 3.  **Prepare Data and Models:**
     *   Ensure your TFLite models (`segmentation_model.tflite`, `classification_model.tflite`) and `label_map.json` are placed in the `trained_models/` subdirectories as specified in `config_pipeline.yaml`.
     *   Update `config_pipeline.yaml` with correct paths and camera intrinsic values if necessary.
-    *   Populate `data/databases/custom_density_db.json` with any custom food densities.
+    *   Populate `data/databases/custom_density_db.json` with any custom food densities and calories.
 
 ## Configuration
 
@@ -114,10 +117,12 @@ The main configuration for the pipeline is done via `config_pipeline.yaml`. This
 Execute the `main.py` script with the required arguments. Example:
 
 ```bash
-python main.py --image "path/to/your/image.jpg" --depth "path/to/your/depth_map.npy_or_png" --config "config_pipeline.yaml" --api_key "YOUR_USDA_API_KEY_IF_NEEDED"
+python main.py --image "path/to/your/image.jpg" --depth "path/to/your/depth_map.npy_or_png" --mesh_file_path "path/to/your/mesh.obj" --config "config_pipeline.yaml" --api_key "YOUR_USDA_API_KEY_IF_NEEDED"
 ```
-*   `--depth`: Optional. If not provided or the path is invalid, a dummy depth map will be used.
-*   `--api_key`: Optional. Needed if you want to use the USDA API for density lookups and the food item isn't in your custom DB.
+*   `--depth`: Optional. Path to the depth map. If a `--mesh_file_path` is also provided, the mesh file will take precedence for volume estimation.
+*   `--mesh_file_path`: Optional. Path to a 3D mesh file (e.g., `.obj`). Takes precedence over `--depth` for volume estimation.
+*   If neither `--depth` nor `--mesh_file_path` is valid, a dummy depth map might be used for basic pipeline flow, but volume/mass/calorie estimates will be unreliable.
+*   `--api_key`: Optional. Needed if you want to use the USDA API for density and calorie lookups if the food item isn't in your custom DB.
 
 ## Future Enhancements (from original vision)
 
