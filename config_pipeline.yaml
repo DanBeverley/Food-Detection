@@ -1,11 +1,8 @@
-# Configuration for the main food analysis pipeline
-
 models:
-  # Relative paths from the project root (where main.py is)
   segmentation_tflite: "trained_models/segmentation/exported/segmentation_model.tflite" # Check if this is the correct exported model path/name
   classification_tflite: "trained_models/classification/exported/classification_model.tflite" # Check if this is the correct exported model path/name
-  # Add the path to your classification labels file (e.g., labels.txt or labels.json)
-  classification_labels: "trained_models/classification/exported/labels.txt" # Verify this path and filename
+  classification_labels: "trained_models/classification/label_map.json" # Path to the label map
+  # classification_labels: "trained_models/classification/exported/labels.txt" # Verify this path and filename
 
 model_params:
   # Input sizes expected by the TFLite models (Height, Width)
@@ -25,8 +22,8 @@ camera_intrinsics:
 
 volume_params:
   # Optional: Define min/max depth range (in meters) for filtering point cloud
-  min_depth: 0.1 # Adjust based on typical distance to food
-  max_depth: 1.5 # Adjust based on typical distance/sensor range
+  min_depth_m: 0.1 # Adjust based on typical distance to food
+  max_depth_m: 1.5 # Adjust based on typical distance/sensor range
 
 # Optional: Add other pipeline settings if needed
 # e.g., default confidence thresholds, volume estimation method flags, etc.
