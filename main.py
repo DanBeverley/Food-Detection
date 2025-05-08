@@ -20,7 +20,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 def main():
     parser = argparse.ArgumentParser(description="Food Analysis Pipeline - Main Entry Point")
     parser.add_argument("--image", required=True, help="Path to the input RGB image file.")
-    parser.add_argument("--depth", required=True, help="Path to the input depth map file (.npy).")
+    parser.add_argument("--depth", required=False, help="Path to the input depth map file (.npy or image format).")
+    parser.add_argument("--mesh_file_path", help="Optional path to a 3D mesh file for volume calculation.")
+    parser.add_argument("--known_food_class", help="Optional known food class string (e.g., 'Apple').")
     parser.add_argument("--config", default="config_pipeline.yaml",
                         help="Path to the pipeline configuration YAML file (relative to project root).")
     parser.add_argument("--output", help="Optional path to save the results as a JSON file.")
@@ -37,9 +39,6 @@ def main():
     if not os.path.exists(args.image):
         logging.error(f"Input image not found: {args.image}")
         return
-    if not os.path.exists(args.depth):
-        logging.error(f"Input depth map not found: {args.depth}")
-        return
 
     try:
         # Load pipeline configuration
@@ -49,8 +48,10 @@ def main():
         # Run the analysis
         analysis_results = analyze_food_item(
             image_path=args.image,
-            depth_map_path=args.depth,
             config=config,
+            depth_map_path=args.depth,
+            mesh_file_path=args.mesh_file_path,
+            known_food_class=args.known_food_class,
             usda_api_key=args.api_key
         )
 
