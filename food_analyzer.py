@@ -17,18 +17,19 @@ try:
     from models.classification.predict_classification import run_classification_inference, load_classification_model
 except ImportError:
     logging.error("Failed to import classification functions. Ensure predict_classification.py is refactored.")
-    def load_classification_model(path): raise NotImplementedError("Classification model loading not implemented/imported.")
-    def run_classification_inference(*args): raise NotImplementedError("Classification inference not implemented/imported.")
+    def load_classification_model(path): return None, None, None # type: ignore
+    def run_classification_inference(*args): return None, 0.0 # type: ignore
 
 try:
     from volume_helpers.volume_helpers import depth_map_to_masked_points, estimate_volume_convex_hull, estimate_volume_from_mesh
-    from volume_helpers.density_lookup import lookup_density
+    from volume_helpers.density_lookup import lookup_nutritional_info
 except ImportError as e:
-     logging.error(f"Failed to import local helpers: {e}. Ensure volume_helpers and density_lookup exist.")
-     def depth_map_to_masked_points(*args): raise NotImplementedError("depth_map_to_masked_points not implemented/imported.")
-     def estimate_volume_convex_hull(*args): raise NotImplementedError("estimate_volume_convex_hull not implemented/imported.")
-     def estimate_volume_from_mesh(*args): raise NotImplementedError("estimate_volume_from_mesh not implemented/imported.")
-     def lookup_density(*args): raise NotImplementedError("lookup_density not implemented/imported.")
+    logging.error(f"Failed to import helper functions: {e}")
+    # Define dummy functions or re-raise to prevent execution if critical
+    def depth_map_to_masked_points(*args, **kwargs): return None # type: ignore
+    def estimate_volume_convex_hull(*args, **kwargs): return None # type: ignore
+    def estimate_volume_from_mesh(*args, **kwargs): return None # type: ignore
+    def lookup_nutritional_info(*args, **kwargs): return None # and ensure it matches signature
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -76,10 +77,23 @@ def analyze_food_item(
 
     Returns:
         dict | None: A dictionary containing analysis results ('food_label', 'confidence',
-                     'volume_cm3', 'density_g_cm3', 'estimated_mass_g', 'segmentation_mask_shape'),
+                     'volume_cm3', 'density_g_cm3', 'estimated_mass_g', 'calories_kcal_per_100g', 'estimated_total_calories', 'segmentation_mask_shape'),
                      or None if a critical step fails.
     """
-    results = {}
+    results = {
+        'food_label': None,
+        'confidence': 0.0,
+        'volume_cm3': 0.0,
+        'volume_method': "N/A",
+        'density_g_cm3': None,
+        'estimated_mass_g': None,
+        'calories_kcal_per_100g': None,  
+        'estimated_total_calories': None, 
+        'segmentation_mask_shape': None,
+        'segmentation_mask_path': None, 
+        'error_message': None,
+        'timing': {}
+    }
     timing = {} 
     project_root = _get_project_root()
     start_time = time.time()
@@ -244,37 +258,63 @@ def analyze_food_item(
         logging.exception(f"Error during volume estimation: {e}") 
         return None
 
-    # 6. Look Up Density
+    # 6. Look Up Nutritional Info (Density & Calories)
     density_g_cm3 = None
+    calories_kcal_per_100g = None 
     if food_label: 
         try:
             t0 = time.time()
-            density_g_cm3 = lookup_density(food_label, api_key=usda_api_key)
-            if density_g_cm3 is not None:
-                results['density_g_cm3'] = density_g_cm3
-                logging.info(f"Found density for {food_label}: {density_g_cm3} g/cm³")
-            else:
-                results['density_g_cm3'] = None 
-                logging.warning(f"Density not found for {food_label}.")
-            timing['density_lookup'] = time.time() - t0
-        except Exception as e:
-            logging.exception(f"Error during density lookup for {food_label}: {e}") 
-            results['density_g_cm3'] = None 
-    else:
-        logging.warning("Skipping density lookup because classification failed.")
-        results['density_g_cm3'] = None
+            logging.info(f"Looking up nutritional info for: {food_label}")
+            # Use the API key passed to analyze_food_item
+            nutritional_info = lookup_nutritional_info(food_label, api_key=usda_api_key) 
 
-    # 7. Estimate Mass 
+            if nutritional_info:
+                density_g_cm3 = nutritional_info.get('density')
+                calories_kcal_per_100g = nutritional_info.get('calories_kcal_per_100g')
+                
+                if density_g_cm3 is not None:
+                    results['density_g_cm3'] = float(density_g_cm3)
+                    logging.info(f"Density for {food_label}: {density_g_cm3:.2f} g/cm³")
+                else:
+                    logging.warning(f"Density not found for {food_label}.")
+                
+                if calories_kcal_per_100g is not None: 
+                    results['calories_kcal_per_100g'] = float(calories_kcal_per_100g)
+                    logging.info(f"Calories for {food_label}: {calories_kcal_per_100g:.2f} kcal/100g")
+                else:
+                    logging.warning(f"Calories (kcal/100g) not found for {food_label}.")
+            else:
+                logging.warning(f"Nutritional info (density/calories) lookup returned None for {food_label}.")
+            timing['nutritional_lookup'] = time.time() - t0 
+        except Exception as e:
+            logging.exception(f"Error during nutritional info lookup for {food_label}: {e}")
+            results['error_message'] = results.get('error_message', "") + f"NutritionalLookupError: {e}; "
+
+    # 7. Estimate Mass and Total Calories
     estimated_mass_g = None
-    if volume_cm3 > 0 and density_g_cm3 is not None and density_g_cm3 > 0:
+    estimated_total_calories = None 
+    try:
         t0 = time.time()
-        estimated_mass_g = volume_cm3 * density_g_cm3
-        results['estimated_mass_g'] = estimated_mass_g
-        logging.info(f"Estimated mass: {estimated_mass_g:.2f} g")
-        timing['mass_calculation'] = time.time() - t0
-    else:
-        results['estimated_mass_g'] = None
-        logging.warning("Could not estimate mass (volume or density unavailable/invalid).")
+        if density_g_cm3 is not None and volume_cm3 is not None and volume_cm3 > 0:
+            estimated_mass_g = density_g_cm3 * volume_cm3
+            results['estimated_mass_g'] = float(estimated_mass_g)
+            logging.info(f"Estimated mass for {food_label}: {estimated_mass_g:.2f} g")
+
+            if calories_kcal_per_100g is not None: 
+                estimated_total_calories = (estimated_mass_g / 100.0) * calories_kcal_per_100g
+                results['estimated_total_calories'] = float(estimated_total_calories)
+                logging.info(f"Estimated total calories for {food_label}: {estimated_total_calories:.2f} kcal")
+            else:
+                logging.info(f"Cannot estimate total calories for {food_label} as calories/100g is unknown.")
+
+        elif volume_cm3 == 0.0:
+             logging.info(f"Cannot estimate mass or total calories for {food_label} as volume is 0 cm³.")
+        else:
+            logging.info(f"Cannot estimate mass or total calories for {food_label} as density or volume is unknown/invalid.")
+        timing['mass_calorie_estimation'] = time.time() - t0 
+    except Exception as e:
+        logging.exception(f"Error during mass and calorie estimation: {e}")
+        results['error_message'] = results.get('error_message', "") + f"MassCalorieError: {e}; "
 
     total_time = time.time() - start_time
     logging.info(f"Total analysis time: {total_time:.2f} seconds")
