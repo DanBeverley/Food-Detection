@@ -120,14 +120,19 @@ def estimate_volume_from_mesh(mesh_file_path: str) -> float | None:
                       Returns None if the mesh can't be loaded or volume calculation fails.
     """
     try:
-        # Load the mesh
         mesh = trimesh.load_mesh(mesh_file_path)
 
         # It's often good practice to ensure the mesh is "watertight" for accurate volume.
         if not mesh.is_watertight:
-            # For MetaFood3D, many meshes are not perfectly watertight but volume is often still reasonable.
-            # For production, one might add: mesh.fill_holes()
-            print(f"Warning: Mesh {mesh_file_path} is not watertight. Volume calculation might be affected.")
+            logger.info(f"Mesh {mesh_file_path} is not watertight. Attempting to fill holes...")
+            from trimesh.repair import fill_holes
+            fill_holes(mesh) # Modifies the mesh in-place
+            if mesh.is_watertight:
+                logger.info(f"Mesh {mesh_file_path} is now watertight after filling holes.")
+            else:
+                logger.warning(f"Mesh {mesh_file_path} is still not watertight after attempting to fill holes. Volume may be approximate.")
+        else:
+            logger.info(f"Mesh {mesh_file_path} is already watertight.")
 
         # Assume mesh units from trimesh.load_mesh() are in meters for MetaFood3D.
         volume_m3 = mesh.volume
