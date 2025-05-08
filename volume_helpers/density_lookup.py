@@ -126,6 +126,27 @@ def lookup_nutritional_info(food_item: str, api_key: str = None) -> dict | None:
                 return None # Food item not found by API
 
             # Iterate through found foods to find relevant nutrients
+            # Log details for the first few food items from the API response for debugging
+            MAX_FOODS_TO_DEBUG_LOG = 3
+            for i, food_data_item_debug in enumerate(foods[:MAX_FOODS_TO_DEBUG_LOG]):
+                debug_description = food_data_item_debug.get('description', 'N/A')
+                debug_fdcId = food_data_item_debug.get('fdcId', 'N/A')
+                print(f"DEBUG USDA API: Checking food item {i+1}/{len(foods)}: '{debug_description}' (FDC ID: {debug_fdcId})")
+                debug_nutrients = food_data_item_debug.get('foodNutrients', [])
+                if not debug_nutrients:
+                    print(f"DEBUG USDA API:   No nutrients listed for '{debug_description}'.")
+                else:
+                    for nutrient_debug in debug_nutrients[:15]: # Log first 15 nutrients to avoid excessive output
+                        nutrient_info_name = nutrient_debug.get('nutrient', {}).get('name', 'N/A')
+                        nutrient_info_id = nutrient_debug.get('nutrient', {}).get('id', 'N/A')
+                        nutrient_info_unit = nutrient_debug.get('nutrient', {}).get('unitName', 'N/A') # FDC API standard
+                        if not nutrient_info_unit or nutrient_info_unit == 'N/A': # Fallback for SR Legacy style if needed
+                            nutrient_info_unit = nutrient_debug.get('unitName', 'N/A') 
+                        nutrient_value = nutrient_debug.get('value', nutrient_debug.get('amount', 'N/A'))
+                        print(f"DEBUG USDA API:   Nutrient: {nutrient_info_name} (ID: {nutrient_info_id}), Unit: {nutrient_info_unit}, Value: {nutrient_value}")
+                    if len(debug_nutrients) > 15:
+                        print(f"DEBUG USDA API:   ... and {len(debug_nutrients) - 15} more nutrients not logged for brevity.")
+
             for food_data_item in foods: # Renamed 'food' to 'food_data_item' to avoid conflict
                 # Only process if we still need density or calories
                 if api_found_density is not None and api_found_calories is not None:
@@ -155,8 +176,8 @@ def lookup_nutritional_info(food_item: str, api_key: str = None) -> dict | None:
                         nutrient_name = nutrient.get('nutrient', {}).get('name', '').lower()
                         nutrient_id = nutrient.get('nutrient', {}).get('id')
                         unit_name = nutrient.get('nutrient', {}).get('unitName', '').upper() # FDC API often uses nutrient.unitName
-                        if nutrient.get('unitName','').upper() == 'KCAL': # Check unitName at nutrient level for FDC v1
-                             unit_name = 'KCAL' # Normalize if found directly
+                        if not unit_name or unit_name == 'N/A': # Fallback for SR Legacy style if needed
+                            unit_name = nutrient.get('unitName', 'N/A') # Normalize if found directly
 
                         # Check for Nutrient ID 208 (Energy in kcal) or name 'Energy' and unit 'KCAL'
                         # Nutrient ID 1008 is also sometimes used for Energy in kcal in SR Legacy
