@@ -134,14 +134,16 @@ def load_classification_data(config: Dict) -> Tuple[tf.data.Dataset, tf.data.Dat
                 image = tf.cast(image, tf.float32)
 
                 if augment and augmentation_pipeline is not None:
-                    image = augmentation_pipeline(image, training=True)
-
-                # <<< Apply EfficientNetV2 preprocessing >>>
-                image = preprocess_input(image)
-                return image, label
+                    image = tf.expand_dims(image, axis=0)  # Add batch dimension
+                    image = augmentation_pipeline(image, training=True) # Apply augmentation
+                    image = tf.squeeze(image, axis=0)     # Remove batch dimension
             except Exception as e:
-                logger.error(f"Error processing image {path}: {e}")
-                raise
+                logger.error(f"Error applying augmentation to image {path}: {e}")
+                raise # Re-raise after logging
+
+            # <<< Apply EfficientNetV2 preprocessing >>>
+            image = preprocess_input(image)
+            return image, label
 
         AUTOTUNE = tf.data.AUTOTUNE
 
