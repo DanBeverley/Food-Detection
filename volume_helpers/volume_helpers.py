@@ -1,8 +1,8 @@
 import numpy as np
 import logging
-from scipy.spatial import ConvexHull
-from scipy.spatial.qhull import QhullError 
+from scipy.spatial import ConvexHull, QhullError
 from typing import Optional
+import trimesh 
 
 logging.basicConfig(level = logging.INFO, format = "%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -108,6 +108,43 @@ def estimate_volume_convex_hull(points:np.ndarray) -> float:
         logger.error(f"An unexpected error occured during ConvexHull volume estimation: {e}")
         return 0.0
 
+def estimate_volume_from_mesh(mesh_file_path: str) -> float | None:
+    """
+    Estimates the volume of a 3D model from its mesh file.
+
+    Args:
+        mesh_file_path (str): The absolute path to the 3D mesh file (e.g., .obj, .ply).
+
+    Returns:
+        float | None: The calculated volume of the mesh in cubic centimeters (cm^3).
+                      Returns None if the mesh can't be loaded or volume calculation fails.
+    """
+    try:
+        # Load the mesh
+        mesh = trimesh.load_mesh(mesh_file_path)
+
+        # It's often good practice to ensure the mesh is "watertight" for accurate volume.
+        if not mesh.is_watertight:
+            # For MetaFood3D, many meshes are not perfectly watertight but volume is often still reasonable.
+            # For production, one might add: mesh.fill_holes()
+            print(f"Warning: Mesh {mesh_file_path} is not watertight. Volume calculation might be affected.")
+
+        # Assume mesh units from trimesh.load_mesh() are in meters for MetaFood3D.
+        volume_m3 = mesh.volume
+
+        # Convert volume to cubic centimeters (cm^3) as it's a more common unit for food.
+        # 1 m^3 = 1,000,000 cm^3
+        volume_cm3 = volume_m3 * 1_000_000
+        
+        logger.info(f"Successfully loaded mesh: {mesh_file_path}")
+        logger.info(f"Raw volume from trimesh (assumed m^3): {volume_m3}")
+        logger.info(f"Calculated volume: {volume_cm3} cm^3")
+        return float(volume_cm3)
+
+    except Exception as e:
+        logger.error(f"Error loading or processing mesh {mesh_file_path}: {e}")
+        return None
+
 # Example usage:
 if __name__ == '__main__':
     print("Testing volume_helpers (Convex Hull method)...")
@@ -151,5 +188,18 @@ if __name__ == '__main__':
             planar_points[:, 2] = np.mean(planar_points[:, 2]) # Set all Z to the average Z
             vol_planar = estimate_volume_convex_hull(planar_points)
             print(f"Volume estimate with co-planar points: {vol_planar}") # Expect 0.0 or error
+
     else:
         print("Failed to extract masked points from dummy data.")
+
+    # Example usage for estimate_volume_from_mesh
+    example_mesh_path = r"E:\_MetaFood3D_new_3D_Mesh\3D_Mesh\Apple\apple_1\apple_1.obj" # Using raw string for Windows path
+
+    mesh_vol_cm3 = estimate_volume_from_mesh(example_mesh_path)
+    if mesh_vol_cm3 is not None:
+        print(f"The estimated volume of the mesh '{example_mesh_path}' is: {mesh_vol_cm3:.2f} cm^3")
+
+    # You can also test the convex hull volume estimation if you have a point cloud
+    # dummy_points_for_convex_hull = np.random.rand(100, 3) * 10 # Example 100 points in a 10x10x10 cube
+    # convex_hull_vol = estimate_volume_convex_hull(dummy_points_for_convex_hull)
+    # print(f"Example convex hull volume: {convex_hull_vol}")
