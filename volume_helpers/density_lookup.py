@@ -137,11 +137,11 @@ def lookup_nutritional_info(food_item: str, api_key: str = None) -> dict | None:
                     print(f"DEBUG USDA API:   No nutrients listed for '{debug_description}'.")
                 else:
                     for nutrient_debug in debug_nutrients[:15]: # Log first 15 nutrients to avoid excessive output
-                        nutrient_info_name = nutrient_debug.get('nutrient', {}).get('name', 'N/A')
-                        nutrient_info_id = nutrient_debug.get('nutrient', {}).get('id', 'N/A')
-                        nutrient_info_unit = nutrient_debug.get('nutrient', {}).get('unitName', 'N/A') # FDC API standard
+                        nutrient_info_name = nutrient_debug.get('nutrientName', '').lower()
+                        nutrient_info_id = nutrient_debug.get('nutrientId', 'N/A')
+                        nutrient_info_unit = nutrient_debug.get('unitName', '').upper() # FDC API often uses nutrient.unitName
                         if not nutrient_info_unit or nutrient_info_unit == 'N/A': # Fallback for SR Legacy style if needed
-                            nutrient_info_unit = nutrient_debug.get('unitName', 'N/A') 
+                            nutrient_info_unit = nutrient_debug.get('nutrient', {}).get('unitName', 'N/A') 
                         nutrient_value = nutrient_debug.get('value', nutrient_debug.get('amount', 'N/A'))
                         print(f"DEBUG USDA API:   Nutrient: {nutrient_info_name} (ID: {nutrient_info_id}), Unit: {nutrient_info_unit}, Value: {nutrient_value}")
                     if len(debug_nutrients) > 15:
@@ -158,9 +158,17 @@ def lookup_nutritional_info(food_item: str, api_key: str = None) -> dict | None:
                 # Try to find density if still needed
                 if api_found_density is None:
                     for nutrient in nutrients:
-                        nutrient_name = nutrient.get('nutrient', {}).get('name', '').lower()
-                        nutrient_id = nutrient.get('nutrient', {}).get('id')
-                        if nutrient_id in [271, 1137] or 'specific gravity' in nutrient_name:
+                        # Try direct access first (common in newer FDC API responses)
+                        parsed_nutrient_name = nutrient.get('nutrientName', '').lower()
+                        parsed_nutrient_id = nutrient.get('nutrientId')
+                        
+                        # Fallback to nested 'nutrient' object (common in SR Legacy or older formats)
+                        if not parsed_nutrient_name and parsed_nutrient_id is None: # Check ID is None, as 0 is a valid ID
+                            nutrient_details_obj = nutrient.get('nutrient', {})
+                            parsed_nutrient_name = nutrient_details_obj.get('name', '').lower()
+                            parsed_nutrient_id = nutrient_details_obj.get('id')
+
+                        if parsed_nutrient_id in [271, 1137] or 'specific gravity' in parsed_nutrient_name:
                             value = nutrient.get('value', nutrient.get('amount')) # Some API versions use 'amount'
                             if value is not None:
                                 try:
@@ -173,15 +181,24 @@ def lookup_nutritional_info(food_item: str, api_key: str = None) -> dict | None:
                 # Try to find calories if still needed
                 if api_found_calories is None:
                     for nutrient in nutrients:
-                        nutrient_name = nutrient.get('nutrient', {}).get('name', '').lower()
-                        nutrient_id = nutrient.get('nutrient', {}).get('id')
-                        unit_name = nutrient.get('nutrient', {}).get('unitName', '').upper() # FDC API often uses nutrient.unitName
-                        if not unit_name or unit_name == 'N/A': # Fallback for SR Legacy style if needed
-                            unit_name = nutrient.get('unitName', 'N/A') # Normalize if found directly
+                        # Try direct access first
+                        parsed_nutrient_name = nutrient.get('nutrientName', '').lower()
+                        parsed_nutrient_id = nutrient.get('nutrientId')
+                        parsed_unit_name = nutrient.get('unitName', '').upper()
 
+                        # Fallback to nested 'nutrient' object
+                        if not parsed_nutrient_name and parsed_nutrient_id is None: # If primary name/id failed, try nested for all
+                            nutrient_details_obj = nutrient.get('nutrient', {})
+                            parsed_nutrient_name = nutrient_details_obj.get('name', '').lower()
+                            parsed_nutrient_id = nutrient_details_obj.get('id')
+                            # If unit name was also not found directly, try nested for it too
+                            if not parsed_unit_name: # Covers empty string and None
+                                 parsed_unit_name = nutrient_details_obj.get('unitName', '').upper()
+                        
                         # Check for Nutrient ID 208 (Energy in kcal) or name 'Energy' and unit 'KCAL'
                         # Nutrient ID 1008 is also sometimes used for Energy in kcal in SR Legacy
-                        if nutrient_id in [208, 1008] or ('energy' in nutrient_name and unit_name == 'KCAL'):
+                        if (parsed_nutrient_id in [208, 1008]) or \
+                           ('energy' in parsed_nutrient_name and parsed_unit_name == 'KCAL'):
                             value = nutrient.get('value', nutrient.get('amount'))
                             if value is not None:
                                 try:
