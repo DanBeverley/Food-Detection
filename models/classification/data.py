@@ -197,7 +197,26 @@ def load_classification_data(config: Dict) -> Tuple[tf.data.Dataset, tf.data.Dat
         val_dataset = None 
         logger.info("Validation dataset is None as there are no validation samples.")
 
+    # Limit dataset size for development/testing if specified
+    max_train_samples = config.get('dev_max_train_samples')
+    if train_dataset and max_train_samples and isinstance(max_train_samples, int) and max_train_samples > 0:
+        # Calculate number of batches to take. Ensure at least 1 if max_train_samples < batch_size but > 0
+        num_batches = max_train_samples // batch_size + (1 if (max_train_samples % batch_size) > 0 else 0)
+        if num_batches == 0 and max_train_samples > 0: # Handle case where max_samples < batch_size
+            num_batches = 1
+        train_dataset = train_dataset.take(num_batches)
+        logger.info(f"Limiting training dataset to approximately {max_train_samples} samples ({num_batches} batches).")
+
+    max_val_samples = config.get('dev_max_val_samples')
+    if val_dataset and max_val_samples and isinstance(max_val_samples, int) and max_val_samples > 0:
+        num_batches = max_val_samples // batch_size + (1 if (max_val_samples % batch_size) > 0 else 0)
+        if num_batches == 0 and max_val_samples > 0: # Handle case where max_samples < batch_size
+            num_batches = 1
+        val_dataset = val_dataset.take(num_batches)
+        logger.info(f"Limiting validation dataset to approximately {max_val_samples} samples ({num_batches} batches).")
+
     return train_dataset, val_dataset, index_to_label
+
 
 def load_test_data(config: Dict, index_to_label_map: Optional[Dict[int, str]] = None) -> Tuple[tf.data.Dataset, Dict[int, str]]:
     """
@@ -277,7 +296,3 @@ def load_test_data(config: Dict, index_to_label_map: Optional[Dict[int, str]] = 
         logger.info("Test dataset created.")
 
         return dataset, index_to_label_map
-
-    except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Test data loading failed: {e}")
-        raise
