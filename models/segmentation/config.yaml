@@ -3,8 +3,8 @@ data:
   mask_dir: "data/segmentation/masks/"
   image_size: [256, 256] 
   batch_size: 16
-  validation_split_ratio: 0.15 # Fraction of data for validation
-  test_split_ratio: 0.15 # Fraction of data for testing (from the original dataset)
+  validation_split_ratio: 0.0 # Set to 0.0 for dummy run
+  test_split_ratio: 0.0 # Set to 0.0 for dummy run
   num_classes: 2 # Number of segmentation classes (e.g., 1 for foreground + 1 for background, or N food classes + background)
   # Add color mapping if masks are color-coded instead of integer-based
   # color_map: 
@@ -19,6 +19,11 @@ data:
     width_shift_range: 0.1
     height_shift_range: 0.1
     zoom_range: 0.1
+
+# Model file paths (used by prediction/pipeline scripts)
+models:
+  segmentation_tflite: "trained_models/segmentation/exported/segmentation_model.tflite"
+  # Add classification_tflite here when ready
 
 # Model Configuration
 model:
@@ -49,7 +54,7 @@ metrics: ["iou_metric"] # e.g., ['iou_metric', 'dice_coefficient', 'accuracy']
 
 # Training Configuration
 training:
-  epochs: 100
+  epochs: 1 # Set to 1 for a quick test
   use_mixed_precision: false
 
   callbacks:
