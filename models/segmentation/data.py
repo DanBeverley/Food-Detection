@@ -516,81 +516,43 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
     augmentation_ops = _build_segmentation_augmentation_pipeline(config)
     AUTOTUNE = tf.data.AUTOTUNE
 
-    def create_dataset(img_paths: List[str], mask_paths: List[str], augment: bool) -> tf.data.Dataset:
-        dataset = tf.data.Dataset.from_tensor_slices((img_paths, mask_paths))
-        dataset = dataset.map(
-            lambda img_p, msk_p: load_and_preprocess_segmentation(img_p, msk_p, image_size, augmentation_ops, augment=augment),
-            num_parallel_calls=AUTOTUNE
-        )
-        if augment:
-            dataset = dataset.shuffle(buffer_size=max(100, len(img_paths)))
-        dataset = dataset.batch(batch_size)
-        dataset = dataset.prefetch(buffer_size=AUTOTUNE)
-        return dataset
+    train_paths_ds = tf.data.Dataset.from_tensor_slices((list(train_img_paths), list(train_mask_paths)))
+    logger.info(f"Train image-mask pairs: {len(train_img_paths)}, Validation image-mask pairs: {len(val_img_paths)}")
 
-    train_dataset = create_dataset(train_img_paths, train_mask_paths, augment=True)
+    # Build augmentation pipeline if enabled
+    augmentation_pipeline = _build_segmentation_augmentation_pipeline(config.get('augmentation', {}))
+    if augmentation_pipeline:
+        logger.info(f"Built segmentation augmentation pipeline with {len(augmentation_pipeline.layers)} operations.")
+    else:
+        logger.info("Segmentation augmentation is disabled or no operations configured.")
+
+    # Prepare training dataset
+    train_dataset = (train_paths_ds
+                     .shuffle(buffer_size=len(train_img_paths), seed=config.get('random_seed', None))
+                     .map(lambda img_path, mask_path: load_and_preprocess_segmentation(img_path, mask_path, tuple(config['image_size']), augmentation_pipeline, augment=True), num_parallel_calls=AUTOTUNE)
+                     .batch(config['batch_size'])
+                     .prefetch(AUTOTUNE))
     logger.info("Training dataset for segmentation created.")
 
     val_dataset = None
     if val_img_paths:
-        val_dataset = create_dataset(val_img_paths, val_mask_paths, augment=False)
+        val_paths_ds = tf.data.Dataset.from_tensor_slices((list(val_img_paths), list(val_mask_paths)))
+        val_dataset = (val_paths_ds
+                       .map(lambda img_path, mask_path: load_and_preprocess_segmentation(img_path, mask_path, tuple(config['image_size']), augment=False), num_parallel_calls=AUTOTUNE) # No augmentation for validation
+                       .batch(config['batch_size'])
+                       .prefetch(AUTOTUNE))
         logger.info("Validation dataset for segmentation created.")
-    else:
-        logger.info("No validation data for segmentation, val_dataset is None.")
+
+    # Limit dataset size for development/testing if specified
+    max_train_samples = config.get('dev_max_train_samples')
+    if max_train_samples and isinstance(max_train_samples, int) and max_train_samples > 0:
+        train_dataset = train_dataset.take(max_train_samples // config['batch_size'] + (1 if (max_train_samples % config['batch_size']) > 0 else 0) )
+        # The above ensures we take enough batches to cover max_train_samples
+        logger.info(f"Limiting training dataset to approximately {max_train_samples} samples ({max_train_samples // config['batch_size'] + (1 if (max_train_samples % config['batch_size']) > 0 else 0)} batches).")
+
+    max_val_samples = config.get('dev_max_val_samples')
+    if val_dataset and max_val_samples and isinstance(max_val_samples, int) and max_val_samples > 0:
+        val_dataset = val_dataset.take(max_val_samples // config['batch_size'] + (1 if (max_val_samples % config['batch_size']) > 0 else 0) )
+        logger.info(f"Limiting validation dataset to approximately {max_val_samples} samples ({max_val_samples // config['batch_size'] + (1 if (max_val_samples % config['batch_size']) > 0 else 0)} batches).")
 
     return train_dataset, val_dataset
-
-
-if __name__ == '__main__':
-    # Example usage (for testing this script directly)
-    logger.info("Testing segmentation data loading...")
-    test_config = {
-        'dataset_root_dir': 'E:/_MetaFood3D_new_RGBD_videos/RGBD_videos', # Adjust this path!
-        'image_size': (256, 256),
-        'batch_size': 4,
-        'split_ratio': 0.2,
-        'random_seed': 42,
-        'augmentation': {
-            'enabled': True,
-            'horizontal_flip': True,
-            'rotation_range': 15, # degrees
-            'zoom_range': 0.1, # 10% zoom in/out
-            'width_shift_range': 0.1, # fraction of total width
-            'height_shift_range': 0.1 # fraction of total height
-        }
-    }
-
-    # Ensure the test_config points to a valid dataset_root_dir for testing
-    # Create a dummy dataset for local testing if MetaFood3D is not available in CI/testing environment
-    # For example:
-    # dummy_root = _get_project_root() / 'data' / 'dummy_segmentation_dataset'
-    # dummy_root.mkdir(parents=True, exist_ok=True)
-    # (Create Apple/apple_1/original/0.jpg, Apple/apple_1/masks/0.jpg etc.)
-    # test_config['dataset_root_dir'] = str(dummy_root)
-
-    try:
-        train_ds, val_ds = load_segmentation_data(test_config)
-        
-        if train_ds:
-            logger.info(f"Train dataset element spec: {train_ds.element_spec}")
-            for images, masks in train_ds.take(1):
-                logger.info(f"Sample batch - Images shape: {images.shape}, Masks shape: {masks.shape}")
-                logger.info(f"Image dtype: {images.dtype}, Mask dtype: {masks.dtype}")
-                logger.info(f"Image min/max: {tf.reduce_min(images[0]).numpy()}/{tf.reduce_max(images[0]).numpy()}")
-                logger.info(f"Mask min/max: {tf.reduce_min(masks[0]).numpy()}/{tf.reduce_max(masks[0]).numpy()}")
-                # Check if mask is binary
-                unique_mask_values = tf.unique(tf.reshape(masks[0], [-1]))[0].numpy()
-                logger.info(f"Unique values in sample mask: {unique_mask_values}")
-                assert np.all(np.isin(unique_mask_values, [0., 1.])), "Mask is not binary!"
-
-        if val_ds:
-            logger.info(f"Validation dataset element spec: {val_ds.element_spec}")
-            for images, masks in val_ds.take(1):
-                logger.info(f"Sample validation batch - Images shape: {images.shape}, Masks shape: {masks.shape}")
-
-        logger.info("Segmentation data loading test completed successfully.")
-
-    except FileNotFoundError as e:
-        logger.error(f"Test failed: Dataset not found. Please set 'dataset_root_dir' in test_config. Error: {e}")
-    except Exception as e:
-        logger.error(f"An error occurred during segmentation data loading test: {e}", exc_info=True)
