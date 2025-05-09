@@ -3,11 +3,12 @@ import yaml
 import tensorflow as tf
 import numpy as np
 import logging
-from typing import Tuple, Dict, Optional, List
+from typing import Tuple, Dict, Optional, List, Any
 from tensorflow.keras.applications.efficientnet import preprocess_input
 from sklearn.model_selection import train_test_split
 import pathlib
-import traceback
+import glob
+import json
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -290,3 +291,298 @@ def load_segmentation_datasets(config_path: str) -> Tuple[Optional[tf.data.Datas
         return None, None, None # Return None as before
 
     return train_ds, val_ds, test_ds
+
+def _build_segmentation_augmentation_pipeline(config: Dict[str, Any]) -> Optional[tf.keras.Sequential]:
+    """Builds a data augmentation pipeline for segmentation (image and mask)."""
+    if not config.get('augmentation', {}).get('enabled', False):
+        return None
+
+    aug_config = config['augmentation']
+    pipeline_ops = [] # Store ops to apply to both image and mask
+
+    # Geometric transformations need to be applied consistently
+    if aug_config.get('horizontal_flip', False):
+        pipeline_ops.append(tf.keras.layers.RandomFlip("horizontal"))
+    
+    if aug_config.get('rotation_range', 0) > 0:
+        factor = aug_config['rotation_range'] / 360.0
+        pipeline_ops.append(tf.keras.layers.RandomRotation(factor, fill_mode='nearest'))
+    
+    if aug_config.get('zoom_range', 0) > 0:
+        # zoom_range could be a float (e.g., 0.2 for [0.8, 1.2]) or [low, high]
+        if isinstance(aug_config['zoom_range'], list):
+            zoom_factors = aug_config['zoom_range']
+        else:
+            zoom_factors = (1.0 - aug_config['zoom_range'], 1.0 + aug_config['zoom_range'])
+        pipeline_ops.append(tf.keras.layers.RandomZoom(height_factor=zoom_factors, width_factor=zoom_factors, fill_mode='nearest'))
+
+    if aug_config.get("width_shift_range", 0) > 0 or aug_config.get("height_shift_range", 0) > 0:
+        width_factor = aug_config.get("width_shift_range", 0)
+        height_factor = aug_config.get("height_shift_range", 0)
+        pipeline_ops.append(tf.keras.layers.RandomTranslation(height_factor=height_factor, width_factor=width_factor, fill_mode='nearest'))
+
+    # Photometric augmentations (applied only to image typically, or carefully to mask if needed)
+    # For simplicity, this example focuses on geometric ones for image-mask pairs.
+    # If adding brightness etc., apply only to image tensor in load_and_preprocess_segmentation.
+
+    if not pipeline_ops:
+        return None
+
+    # Create a model that applies these ops. Input will be a stacked image and mask.
+    # We'll apply it by passing image and mask separately and concatenating.
+    logger.info(f"Built segmentation augmentation pipeline with {len(pipeline_ops)} operations.")
+    return pipeline_ops # Return list of layers to be applied
+
+def load_and_preprocess_segmentation(
+    image_path: tf.Tensor,
+    mask_path: tf.Tensor,
+    image_size: Tuple[int, int],
+    augmentation_ops: Optional[List[tf.keras.layers.Layer]] = None,
+    augment: bool = False
+) -> Tuple[tf.Tensor, tf.Tensor]:
+    """Loads, decodes, resizes, and preprocesses an image and its mask."""
+    try:
+        # Load Image
+        image_string = tf.io.read_file(image_path)
+        image = tf.image.decode_jpeg(image_string, channels=3) # Assuming JPG
+        image = tf.image.resize(image, image_size, method=tf.image.ResizeMethod.BILINEAR)
+        image = tf.cast(image, tf.float32) / 255.0  # Normalize to [0, 1]
+
+        # Load Mask
+        mask_string = tf.io.read_file(mask_path)
+        mask = tf.image.decode_jpeg(mask_string, channels=1) # Assuming JPG, load as grayscale
+        mask = tf.image.resize(mask, image_size, method=tf.image.ResizeMethod.NEAREST_NEIGHBOR) # Use nearest for masks
+        
+        # Convert mask to binary: pixel > threshold becomes 1 (foreground), else 0 (background)
+        # Common threshold is 128 for 8-bit images, or 0.5 if normalized.
+        # Assuming masks are simple (e.g., white object on black background or vice-versa)
+        threshold = 127.5 # For 0-255 range pixel values
+        mask = tf.cast(mask > threshold, tf.float32) # Binary mask [0.0, 1.0]
+        mask.set_shape([*image_size, 1])
+
+        if augment and augmentation_ops:
+            # Apply augmentations consistently. Stack image and mask, augment, then unstack.
+            # Some augmentations might need separate handling if they affect color vs. geometry.
+            # For geometric ops, this is a common approach.
+            
+            # For layers like RandomBrightness, apply only to image.
+            # This simplified example applies all ops to a concatenated tensor then splits.
+            # More robust: separate image-only augs from geometric (image+mask) augs.
+
+            # Ensure image is in [0,1] for augmentation if ops expect that.
+            # Mask is already [0,1] binary.
+            stacked_data = tf.concat([image, mask], axis=-1) # H, W, C_img+C_mask
+            
+            for op in augmentation_ops:
+                # Augmentation layers expect batch dimension
+                stacked_data_batch = tf.expand_dims(stacked_data, axis=0)
+                augmented_batch = op(stacked_data_batch, training=True)
+                stacked_data = tf.squeeze(augmented_batch, axis=0)
+            
+            image, mask = tf.split(stacked_data, [3, 1], axis=-1) # Split back
+            
+            # Ensure mask remains binary after geometric transformations (e.g. rotation might introduce non-binary values)
+            mask = tf.round(mask) # or mask = tf.cast(mask > 0.5, tf.float32)
+            image = tf.clip_by_value(image, 0.0, 1.0) # Ensure image stays in [0,1]
+
+        image.set_shape([*image_size, 3])
+        mask.set_shape([*image_size, 1])
+        
+        return image, mask
+    except Exception as e:
+        tf.print(f"Error in load_and_preprocess_segmentation for image {image_path}, mask {mask_path}: {e}")
+        # Return dummy data or raise error. For now, re-raise to catch issues.
+        raise
+
+def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset]]:
+    """
+    Loads segmentation data (image-mask pairs) from the specified directory structure.
+
+    Args:
+        config: Dictionary containing parameters:
+            - dataset_root_dir: Path to the segmentation dataset (e.g., 'E:/.../RGBD_videos').
+            - image_size: Tuple (height, width) for resizing.
+            - batch_size: Integer batch size.
+            - split_ratio: Float ratio for validation set (e.g., 0.2).
+            - augmentation: Dictionary for augmentation settings.
+            - random_seed: (Optional) Integer for reproducible splits.
+
+    Returns:
+        Tuple of (train_dataset, val_dataset). Datasets yield (image, mask) pairs.
+    """
+    project_root = _get_project_root()
+
+    dataset_root_dir_str = config['dataset_root_dir']
+    image_size = tuple(config['image_size'])
+    batch_size = config['batch_size']
+    split_ratio = config.get('split_ratio', 0.2) # Default to 0.2 if not provided
+    random_seed = config.get('random_seed', 42)
+
+    if not os.path.isabs(dataset_root_dir_str):
+        dataset_root_dir = project_root / dataset_root_dir_str
+    else:
+        dataset_root_dir = pathlib.Path(dataset_root_dir_str)
+
+    if not dataset_root_dir.exists():
+        raise FileNotFoundError(f"Segmentation dataset root directory not found: {dataset_root_dir}")
+    if not 0 <= split_ratio < 1:
+        raise ValueError("Split ratio must be between 0 (no validation) and 1 (exclusive).")
+
+    all_image_mask_pairs = [] # List of {'image_path': str, 'mask_path': str, 'instance_id': str}
+    logger.info(f"Scanning segmentation dataset directory: {dataset_root_dir}")
+
+    class_dirs = [d for d in dataset_root_dir.iterdir() if d.is_dir()]
+    for class_dir in class_dirs:
+        class_name = class_dir.name
+        instance_dirs = [d for d in class_dir.iterdir() if d.is_dir()]
+        for instance_dir in instance_dirs:
+            instance_id = f"{class_name}_{instance_dir.name}"
+            original_dir = instance_dir / "original"
+            masks_dir = instance_dir / "masks"
+
+            if original_dir.is_dir() and masks_dir.is_dir():
+                # Get all image files (jpg, png) from original
+                original_files = list(original_dir.glob('*.jpg')) + list(original_dir.glob('*.png'))
+                
+                for img_path in original_files:
+                    # Construct corresponding mask path (assuming same filename, could be jpg or png)
+                    mask_path_jpg = masks_dir / (img_path.stem + '.jpg')
+                    mask_path_png = masks_dir / (img_path.stem + '.png')
+                    
+                    mask_path = None
+                    if mask_path_jpg.exists():
+                        mask_path = mask_path_jpg
+                    elif mask_path_png.exists():
+                        mask_path = mask_path_png
+                    
+                    if mask_path:
+                        all_image_mask_pairs.append({
+                            'image_path': str(img_path),
+                            'mask_path': str(mask_path),
+                            'instance_id': instance_id
+                        })
+                    else:
+                        logger.debug(f"Mask not found for image {img_path.name} in instance {instance_id}")
+            else:
+                logger.debug(f"'original' or 'masks' folder missing in {instance_dir}")
+
+    if not all_image_mask_pairs:
+        raise FileNotFoundError(f"No image-mask pairs found in the dataset structure at {dataset_root_dir}.")
+    logger.info(f"Found {len(all_image_mask_pairs)} total image-mask pairs across all instances.")
+
+    unique_instance_ids = sorted(list(set(item['instance_id'] for item in all_image_mask_pairs)))
+    if not unique_instance_ids:
+        raise ValueError("No instances found to perform train/val split.")
+
+    train_instance_ids, val_instance_ids = [], []
+    if split_ratio > 0:
+        logger.info(f"Performing instance-aware split for {len(unique_instance_ids)} unique instances with ratio {split_ratio}.")
+        train_instance_ids, val_instance_ids = train_test_split(
+            unique_instance_ids,
+            test_size=split_ratio,
+            random_state=random_seed
+        )
+        logger.info(f"Train instances: {len(train_instance_ids)}, Validation instances: {len(val_instance_ids)}")
+    else:
+        train_instance_ids = unique_instance_ids # All data for training if split_ratio is 0
+        logger.info(f"All {len(unique_instance_ids)} instances will be used for training (split_ratio=0).")
+
+    train_img_paths, train_mask_paths = [], []
+    val_img_paths, val_mask_paths = [], []
+
+    for item in all_image_mask_pairs:
+        if item['instance_id'] in train_instance_ids:
+            train_img_paths.append(item['image_path'])
+            train_mask_paths.append(item['mask_path'])
+        elif item['instance_id'] in val_instance_ids:
+            val_img_paths.append(item['image_path'])
+            val_mask_paths.append(item['mask_path'])
+    
+    if not train_img_paths:
+        raise ValueError("Training set is empty after split. Check dataset structure or split_ratio.")
+    if split_ratio > 0 and not val_img_paths:
+        logger.warning("Validation set is empty after split. This might be intended if split_ratio is very small, the dataset is tiny, or all instances went to train.")
+    
+    logger.info(f"Train image-mask pairs: {len(train_img_paths)}, Validation image-mask pairs: {len(val_img_paths)}")
+
+    augmentation_ops = _build_segmentation_augmentation_pipeline(config)
+    AUTOTUNE = tf.data.AUTOTUNE
+
+    def create_dataset(img_paths: List[str], mask_paths: List[str], augment: bool) -> tf.data.Dataset:
+        dataset = tf.data.Dataset.from_tensor_slices((img_paths, mask_paths))
+        dataset = dataset.map(
+            lambda img_p, msk_p: load_and_preprocess_segmentation(img_p, msk_p, image_size, augmentation_ops, augment=augment),
+            num_parallel_calls=AUTOTUNE
+        )
+        if augment:
+            dataset = dataset.shuffle(buffer_size=max(100, len(img_paths)))
+        dataset = dataset.batch(batch_size)
+        dataset = dataset.prefetch(buffer_size=AUTOTUNE)
+        return dataset
+
+    train_dataset = create_dataset(train_img_paths, train_mask_paths, augment=True)
+    logger.info("Training dataset for segmentation created.")
+
+    val_dataset = None
+    if val_img_paths:
+        val_dataset = create_dataset(val_img_paths, val_mask_paths, augment=False)
+        logger.info("Validation dataset for segmentation created.")
+    else:
+        logger.info("No validation data for segmentation, val_dataset is None.")
+
+    return train_dataset, val_dataset
+
+
+if __name__ == '__main__':
+    # Example usage (for testing this script directly)
+    logger.info("Testing segmentation data loading...")
+    test_config = {
+        'dataset_root_dir': 'E:/_MetaFood3D_new_RGBD_videos/RGBD_videos', # Adjust this path!
+        'image_size': (256, 256),
+        'batch_size': 4,
+        'split_ratio': 0.2,
+        'random_seed': 42,
+        'augmentation': {
+            'enabled': True,
+            'horizontal_flip': True,
+            'rotation_range': 15, # degrees
+            'zoom_range': 0.1, # 10% zoom in/out
+            'width_shift_range': 0.1, # fraction of total width
+            'height_shift_range': 0.1 # fraction of total height
+        }
+    }
+
+    # Ensure the test_config points to a valid dataset_root_dir for testing
+    # Create a dummy dataset for local testing if MetaFood3D is not available in CI/testing environment
+    # For example:
+    # dummy_root = _get_project_root() / 'data' / 'dummy_segmentation_dataset'
+    # dummy_root.mkdir(parents=True, exist_ok=True)
+    # (Create Apple/apple_1/original/0.jpg, Apple/apple_1/masks/0.jpg etc.)
+    # test_config['dataset_root_dir'] = str(dummy_root)
+
+    try:
+        train_ds, val_ds = load_segmentation_data(test_config)
+        
+        if train_ds:
+            logger.info(f"Train dataset element spec: {train_ds.element_spec}")
+            for images, masks in train_ds.take(1):
+                logger.info(f"Sample batch - Images shape: {images.shape}, Masks shape: {masks.shape}")
+                logger.info(f"Image dtype: {images.dtype}, Mask dtype: {masks.dtype}")
+                logger.info(f"Image min/max: {tf.reduce_min(images[0]).numpy()}/{tf.reduce_max(images[0]).numpy()}")
+                logger.info(f"Mask min/max: {tf.reduce_min(masks[0]).numpy()}/{tf.reduce_max(masks[0]).numpy()}")
+                # Check if mask is binary
+                unique_mask_values = tf.unique(tf.reshape(masks[0], [-1]))[0].numpy()
+                logger.info(f"Unique values in sample mask: {unique_mask_values}")
+                assert np.all(np.isin(unique_mask_values, [0., 1.])), "Mask is not binary!"
+
+        if val_ds:
+            logger.info(f"Validation dataset element spec: {val_ds.element_spec}")
+            for images, masks in val_ds.take(1):
+                logger.info(f"Sample validation batch - Images shape: {images.shape}, Masks shape: {masks.shape}")
+
+        logger.info("Segmentation data loading test completed successfully.")
+
+    except FileNotFoundError as e:
+        logger.error(f"Test failed: Dataset not found. Please set 'dataset_root_dir' in test_config. Error: {e}")
+    except Exception as e:
+        logger.error(f"An error occurred during segmentation data loading test: {e}", exc_info=True)
