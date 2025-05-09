@@ -38,6 +38,8 @@ segmentation_training_data:
   epochs: 2                    # Number of epochs for training (reduced for quick test)
   learning_rate: 0.0001        # Learning rate for the Adam optimizer
   early_stopping_patience: 5   # Patience for early stopping (reduced for quick test)
+  dev_max_train_samples: 100     # Max training samples for quick dev run (set to null or remove for full training)
+  dev_max_val_samples: 20        # Max validation samples for quick dev run (set to null or remove for full training)
   augmentation:
     enabled: True              # Master switch for augmentation
     horizontal_flip: True      # Enable random horizontal flips
@@ -50,19 +52,24 @@ segmentation_training_data:
     # contrast_range: [0.8, 1.2]
 
 # --- Classification Model Training Data Configuration (Example - adjust as needed) ---
-# classification_training_data: # You might already have a similar setup or load config differently for classification
-#   dataset_root_dir: "E:/_MetaFood3D_new_RGBD_videos_flipped_food/RGBD_videos_flipped_food" # Path to classification dataset
-#   label_map_path: "models/classification/label_map.json"
-#   image_size: [224, 224]
-#   batch_size: 32
-#   split_ratio: 0.2
-#   random_seed: 42
-#   augmentation:
-#     enabled: True
-#     horizontal_flip: True
-#     rotation_range: 10
-#     zoom_range: 0.1
-#     width_shift_range: 0.1
-#     height_shift_range: 0.1
-#     brightness_range: [0.8, 1.2] # Applied only to images
-#     contrast_range: [0.8, 1.2]   # Applied only to images
+classification_training_data:
+  dataset_root_dir: "E:/_MetaFood3D_new_RGBD_videos_flipped_food/RGBD_videos_flipped_food" # Path to classification dataset
+  label_map_path: "models/classification/label_map.json" # Path to the label map file
+  image_size: [224, 224]       # Target image size (height, width) for training
+  batch_size: 16               # Batch size for training (adjusted for potential GPU memory constraints)
+  split_ratio: 0.2             # Proportion of data for validation set
+  random_seed: 42              # Seed for reproducible train/validation splits
+  epochs: 2                    # Number of epochs for quick testing
+  learning_rate: 0.0001        # Learning rate for the optimizer
+  early_stopping_patience: 5   # Patience for early stopping
+  dev_max_train_samples: 100     # Max training samples for quick dev run
+  dev_max_val_samples: 20        # Max validation samples for quick dev run
+  augmentation:
+    enabled: True              # Master switch for augmentation
+    horizontal_flip: True      # Enable random horizontal flips
+    rotation_range: 10         # Max rotation angle in degrees
+    zoom_range: 0.1            # Zoom factor
+    width_shift_range: 0.1     # Fraction of total width for random horizontal shifts
+    height_shift_range: 0.1    # Fraction of total height for random vertical shifts
+    brightness_range: [0.8, 1.2] # Applied only to images
+    contrast_range: [0.8, 1.2]   # Applied only to images
