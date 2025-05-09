@@ -124,12 +124,12 @@ def main():
     model_dir.mkdir(parents=True, exist_ok=True)
     
     # Save the best model based on validation IoU
-    checkpoint_filepath_obj = model_dir / f'unet_segmentation_best_iou_{timestamp}.keras'
+    checkpoint_filepath_obj = model_dir / f'unet_segmentation_best_iou_{timestamp}.h5' 
     model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-        filepath=str(checkpoint_filepath_obj), # Convert Path object to string
-        save_weights_only=False, # Save entire model in Keras format
-        monitor='val_mean_iou',  # Monitor validation IoU
-        mode='max',              # We want to maximize IoU
+        filepath=str(checkpoint_filepath_obj), 
+        save_weights_only=False, 
+        monitor='val_mean_iou',  
+        mode='max',             
         save_best_only=True,
         verbose=1
     )
@@ -138,7 +138,7 @@ def main():
         monitor='val_loss', 
         patience=early_stopping_patience,
         verbose=1,
-        restore_best_weights=True # Restores model weights from the epoch with the best value of the monitored quantity.
+        restore_best_weights=True 
     )
     
     tensorboard_log_dir = project_root / 'logs' / 'segmentation' / timestamp
@@ -155,20 +155,20 @@ def main():
         train_dataset,
         epochs=epochs,
         callbacks=callbacks_list,
-        validation_data=val_dataset, # Pass validation data here
+        validation_data=val_dataset, 
         verbose=1
     )
 
     logger.info("Training finished.")
 
     # Save the final model (could be the one with restored best weights due to EarlyStopping)
-    final_model_path_obj = model_dir / f'unet_segmentation_final_{timestamp}.keras'
-    model.save(str(final_model_path_obj)) # Convert Path object to string
+    final_model_path_obj = model_dir / f'unet_segmentation_final_{timestamp}.h5' 
+    model.save(str(final_model_path_obj)) 
     logger.info(f"Final trained model saved to: {str(final_model_path_obj)}")
 
     # Optionally, load the best saved model and evaluate on a test set
     # logger.info(f"Loading best model from: {str(checkpoint_filepath_obj)}")
-    # best_model = tf.keras.models.load_model(str(checkpoint_filepath_obj))
+    # best_model = tf.keras.models.load_model(str(checkpoint_filepath_obj)) 
     # if test_dataset:
     #     logger.info("Evaluating best model on test set...")
     #     test_loss, test_accuracy, test_iou = best_model.evaluate(test_dataset)
