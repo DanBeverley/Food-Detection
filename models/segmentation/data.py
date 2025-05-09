@@ -308,13 +308,18 @@ def _build_segmentation_augmentation_pipeline(config: Dict[str, Any]) -> Optiona
         factor = aug_config['rotation_range'] / 360.0
         pipeline_ops.append(tf.keras.layers.RandomRotation(factor, fill_mode='nearest'))
     
-    if aug_config.get('zoom_range', 0) > 0:
-        # zoom_range could be a float (e.g., 0.2 for [0.8, 1.2]) or [low, high]
-        if isinstance(aug_config['zoom_range'], list):
-            zoom_factors = aug_config['zoom_range']
-        else:
-            zoom_factors = (1.0 - aug_config['zoom_range'], 1.0 + aug_config['zoom_range'])
-        pipeline_ops.append(tf.keras.layers.RandomZoom(height_factor=zoom_factors, width_factor=zoom_factors, fill_mode='nearest'))
+    # Corrected RandomZoom logic:
+    # RandomZoom's height_factor/width_factor can be:
+    # - A float `x` (e.g. 0.1), resulting in zoom range [1-x, 1+x] (i.e., factors [-x, x])
+    # - A tuple `(low, high)` (e.g. (-0.1, 0.2)), resulting in zoom range [1+low, 1+high]
+    # The config's 'zoom_range' (e.g. 0.1 or [-0.1, 0.1]) can be passed directly.
+    if 'zoom_range' in aug_config and aug_config['zoom_range'] != 0: # Allow 0 or absence for no zoom
+        zoom_value = aug_config['zoom_range'] # This can be a float like 0.1 or a tuple like (-0.1, 0.1)
+        pipeline_ops.append(tf.keras.layers.RandomZoom(
+            height_factor=zoom_value, 
+            width_factor=zoom_value, 
+            fill_mode='nearest'
+        ))
 
     if aug_config.get("width_shift_range", 0) > 0 or aug_config.get("height_shift_range", 0) > 0:
         width_factor = aug_config.get("width_shift_range", 0)
@@ -353,10 +358,13 @@ def load_and_preprocess_segmentation(
         mask = tf.image.decode_jpeg(mask_string, channels=1) # Assuming JPG, load as grayscale
         mask = tf.image.resize(mask, image_size, method=tf.image.ResizeMethod.NEAREST_NEIGHBOR) # Use nearest for masks
         
+        # Cast mask to float32 before comparison with float threshold
+        mask = tf.cast(mask, tf.float32) # Now tf.float32, values in [0.0, 255.0]
+
         # Convert mask to binary: pixel > threshold becomes 1 (foreground), else 0 (background)
         # Common threshold is 128 for 8-bit images, or 0.5 if normalized.
         # Assuming masks are simple (e.g., white object on black background or vice-versa)
-        threshold = 127.5 # For 0-255 range pixel values
+        threshold = 127.5 # For 0-255 range pixel values (compares with float32 mask)
         mask = tf.cast(mask > threshold, tf.float32) # Binary mask [0.0, 1.0]
         mask.set_shape([*image_size, 1])
 
