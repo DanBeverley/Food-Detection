@@ -7,6 +7,7 @@ import logging
 from sklearn.model_selection import train_test_split # For stratified splitting
 from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
 import pathlib
+import glob
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -62,115 +63,149 @@ def load_classification_data(config: Dict) -> Tuple[tf.data.Dataset, tf.data.Dat
         ValueError: If invalid configuration.
         json.JSONDecodeError: If metadata file is corrupted.
     """
-    metadata_path = config['metadata_path']
-    data_dir = config['data_dir'] # Root directory containing images relative to project root
-    image_size = tuple(config['image_size'])
-    batch_size = config['batch_size']
-    split_ratio = config['split_ratio']
+    logger = logging.getLogger(__name__)
+    project_root = _get_project_root()
+    
+    dataset_root_dir_str = config["dataset_root_dir"]
+    label_map_path_str = config["label_map_path"]
+    image_size = tuple(config["image_size"])
+    batch_size = config["batch_size"]
+    split_ratio = config["split_ratio"]
+    num_classes_config = config.get("num_classes")
 
-    if not os.path.isabs(metadata_path):
-         metadata_path = os.path.join(os.path.dirname(__file__), '..', '..', metadata_path)
-    if not os.path.isabs(data_dir):
-         data_dir = os.path.join(os.path.dirname(__file__), '..', '..', data_dir)
+    # Handle relative paths from the project root
+    if not os.path.isabs(dataset_root_dir_str):
+        dataset_root_dir = project_root/dataset_root_dir_str
+    else:
+        dataset_root_dir = pathlib.Path(dataset_root_dir_str)
+    if not os.path.isabs(label_map_path_str):
+        label_map_path = project_root/label_map_path_str
+    else:
+        label_map_path = pathlib.Path(label_map_path_str)
+    if not dataset_root_dir.exists():
+        raise FileNotFoundError(f"Dataset root directory not found: {dataset_root_dir}")
+    if not label_map_path.exists():
+        raise FileNotFoundError(f"Label map file not found: {label_map_path}")
 
-    try:
-        if not 0 < split_ratio < 1:
-            raise ValueError("Split ratio must be between 0 and 1.")
+    logger.info(f"Loading label map from: {label_map_path}")
+    with open(label_map_path, "r") as f:
+        # JSON keys are strigs, convert to int for index
+        loaded_label_map = json.load(f)
+        index_to_label = {int(k):v for k, v in loaded_label_map.items()}
+    label_to_index = {v:k for k, v in index_to_label.items()}
+    num_classes = len(index_to_label)
+    logger.info(f"Loaded {num_classes} classes from label map")
+    if num_classes_config and num_classes_config != num_classes:
+        logger.warning(f"Number of classes in label_map ({num_classes}) differs from config ({num_classes_config}). Using label map.")
+    
+    # Discover image files and instances
+    all_instances_data = [] # List of {'path':str, 'label':int, 'instance_id':str}
+    logger.info(f"Scanning dataset directory: {dataset_root_dir}")
+    for class_names, class_idx in label_to_index.items():
+        class_dir = dataset_root_dir / class_name
+        if not class_dir.is_dir():
+            logger.warning(f"Class directory not found: {class_dir}. Skipping")
+            continue
+        for instance_dir in class_dir.iterdir():
+            if instance_dir.is_dir(): #e.g., Apple_1, Apple_2
+                instance_id = f"{class_name}_{instance_dir.name}" # Unique ID for isntance
+                original_images_dir = instance_dir / "original"
+                if original_images_dir.is_dir():
+                    image_files = list(original_images_dir.glob("*.jpg")) + \
+                                  list(original_images_dir.glob("*.png"))
+                    if not image_files:
+                        logger.warning(f"No images found in {original_images_dir} for instance {instance_id}")
+                        continue
+                    for img_path in image_files:
+                        all_instances_data.append({
+                               'path': str(img_path),
+                               'label': class_idx,
+                               'instance_id': instance_id
+                           })
+    if not all_instances_data:
+           raise FileNotFoundError("No image files found in the dataset structure.")
+    logger.info(f"Found {len(all_instances_data)} total images across all instances.")
 
-        logger.info(f"Loading metadata from: {metadata_path}")
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
-        logger.info(f"Loaded metadata for {len(metadata)} items.")
+    # Instance-Aware Train/Validation Split 
+    unique_instance_ids = sorted(list(set(item['instance_id'] for item in all_instances_data)))
+    if not unique_instance_ids:
+            raise ValueError("No instances found to perform train/val split.")
 
-        image_paths = []
-        string_labels = []
-        for item in metadata:
-            full_path = os.path.join(data_dir, item['image_path'])
-            if not os.path.exists(full_path):
-                 logger.warning(f"Image file not found: {full_path}. Skipping.")
-                 continue
-            image_paths.append(full_path)
-            string_labels.append(item['label'])
+    logger.info(f"Performing instance-aware split for {len(unique_instance_ids)} unique instances.")
+    
+    # Split instance IDs
+    train_instance_ids, val_instance_ids = train_test_split(
+        unique_instance_ids,
+        test_size=split_ratio,
+        random_state=42 # for reproducibility
+        # Stratification by class at instance level is complex; simple random split of instances for now
+    )
+    logger.info(f"Train instances: {len(train_instance_ids)}, Validation instances: {len(val_instance_ids)}")
 
-        if not image_paths:
-            raise FileNotFoundError("No valid image paths found based on metadata.")
+    train_paths, train_labels = [], []
+    val_paths, val_labels = [], []
 
-        # Create label mapping efficiently
-        unique_labels = sorted(list(set(string_labels)))
-        label_to_index = {label: index for index, label in enumerate(unique_labels)}
-        index_to_label = {index: label for label, index in label_to_index.items()}
-        num_classes = len(unique_labels)
-        logger.info(f"Found {num_classes} unique classes.")
-        if num_classes != config.get('num_classes'):
-             logger.warning(f"Number of classes found ({num_classes}) differs from config ({config.get('num_classes')}). Using found number.")
-             config['num_classes'] = num_classes # Update config if needed downstream
+    for item in all_instances_data:
+        if item['instance_id'] in train_instance_ids:
+            train_paths.append(item['path'])
+            train_labels.append(item['label'])
+        elif item['instance_id'] in val_instance_ids:
+            val_paths.append(item['path'])
+            val_labels.append(item['label'])
+    
+    if not train_paths:
+        raise ValueError("Training set is empty after split. Check dataset or split_ratio.")
+    if not val_paths and split_ratio > 0:
+            logger.warning("Validation set is empty after split. This might be intended if split_ratio is very small or dataset is tiny.")
 
-        # Convert string labels to integer indices
-        integer_labels = [label_to_index[label] for label in string_labels]
 
-        # Stratified split 
-        logger.info(f"Splitting data with validation ratio {split_ratio} (stratified)...")
-        train_paths, val_paths, train_labels, val_labels = train_test_split(
-            image_paths,
-            integer_labels,
-            test_size=split_ratio,
-            random_state=42, # for reproducibility
-            stratify=integer_labels
-        )
-        logger.info(f"Train samples: {len(train_paths)}, Validation samples: {len(val_paths)}")
+    logger.info(f"Train samples: {len(train_paths)}, Validation samples: {len(val_paths)}")
 
-        # Build augmentation pipeline (if enabled in config)
-        augmentation_pipeline = _build_augmentation_pipeline(config)
+    # Build Augmentation Pipeline
+    augmentation_pipeline = _build_augmentation_pipeline(config)
 
-        def load_and_preprocess(path: str, label: int, augment: bool = False) -> Tuple[tf.Tensor, tf.Tensor]:
-            """Loads, decodes, resizes, normalizes, and optionally augments an image."""
-            try:
-                image = tf.io.read_file(path)
-                # Use decode_image for flexibility, ensure 3 channels
-                image = tf.image.decode_image(image, channels=3, expand_animations=False)
-                image = tf.image.resize(image, image_size)
-                image.set_shape([*image_size, 3]) # Explicitly set shape
-                # Ensure input is float32 in [0, 255] range BEFORE preprocess_input
-                image = tf.cast(image, tf.float32)
+    # Define Image Loading and Preprocessing Function 
+    def load_and_preprocess(path: str, label: int, augment: bool = False) -> Tuple[tf.Tensor, tf.Tensor]:
+        try:
+            image = tf.io.read_file(path)
+            image = tf.image.decode_image(image, channels=3, expand_animations=False)
+            image = tf.image.resize(image, image_size) # Resize first
+            image.set_shape([*image_size, 3])
+            image = tf.cast(image, tf.float32) # Ensure float32 [0-255]
 
-                if augment and augmentation_pipeline is not None:
-                    image = tf.expand_dims(image, axis=0)  # Add batch dimension
-                    image = augmentation_pipeline(image, training=True) # Apply augmentation
-                    image = tf.squeeze(image, axis=0)     # Remove batch dimension
-            except Exception as e:
-                logger.error(f"Error applying augmentation to image {path}: {e}")
-                raise # Re-raise after logging
+            if augment and augmentation_pipeline is not None:
+                # Augmentation pipeline expects batch dim
+                img_for_aug = tf.expand_dims(image, axis=0) 
+                img_aug = augmentation_pipeline(img_for_aug, training=True)
+                image = tf.squeeze(img_aug, axis=0)
+                # Clip values to [0, 255] after augmentation if necessary, before preprocess_input
+                image = tf.clip_by_value(image, 0.0, 255.0) 
 
-            # <<< Apply EfficientNetV2 preprocessing >>>
-            image = preprocess_input(image)
+            image = preprocess_input(image) # Apply model-specific preprocessing (e.g., scaling to [-1,1] or [0,1])
             return image, label
+        except Exception as e:
+            logger.error(f"Error loading/preprocessing image {path}: {e}")
+            # Return a placeholder or skip? For now, re-raise.
+            # Consider mechanisms for skipping corrupted images if robust pipeline needed.
+            raise
 
-        AUTOTUNE = tf.data.AUTOTUNE
+    # Create tf.data.Datasets 
+    AUTOTUNE = tf.data.AUTOTUNE
 
-        train_dataset = tf.data.Dataset.from_tensor_slices((train_paths, train_labels))
-        # Use a lambda to pass the 'augment=True' flag
-        train_dataset = train_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=True), num_parallel_calls=AUTOTUNE)
-        train_dataset = train_dataset.shuffle(buffer_size=len(train_paths))
-        train_dataset = train_dataset.batch(batch_size)
-        train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
-        logger.info("Training dataset created.")
+    train_dataset = tf.data.Dataset.from_tensor_slices((train_paths, train_labels))
+    train_dataset = train_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=True), num_parallel_calls=AUTOTUNE)
+    train_dataset = train_dataset.shuffle(buffer_size=max(1000, len(train_paths))) # Adjusted buffer size
+    train_dataset = train_dataset.batch(batch_size)
+    train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
+    logger.info("Training dataset created.")
 
-        # Create validation dataset
-        val_dataset = tf.data.Dataset.from_tensor_slices((val_paths, val_labels))
-        # Use a lambda to pass the 'augment=False' flag
-        val_dataset = val_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=False), num_parallel_calls=AUTOTUNE)
-        val_dataset = val_dataset.batch(batch_size)
-        val_dataset = val_dataset.prefetch(buffer_size=AUTOTUNE)
-        logger.info("Validation dataset created.")
+    val_dataset = tf.data.Dataset.from_tensor_slices((val_paths, val_labels))
+    val_dataset = val_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=False), num_parallel_calls=AUTOTUNE)
+    val_dataset = val_dataset.batch(batch_size)
+    val_dataset = val_dataset.prefetch(buffer_size=AUTOTUNE)
+    logger.info("Validation dataset created.")
 
-        return train_dataset, val_dataset, index_to_label
-
-    except (FileNotFoundError, json.JSONDecodeError, ValueError, ModuleNotFoundError) as e:
-        logger.error(f"Data loading failed: {e}")
-        raise
-    except ImportError:
-        logger.error("Scikit-learn is required for stratified splitting. Please install it (`pip install scikit-learn`).")
-        raise
+    return train_dataset, val_dataset, index_to_label
 
 def load_test_data(config: Dict, index_to_label_map: Optional[Dict[int, str]] = None) -> Tuple[tf.data.Dataset, Dict[int, str]]:
     """
