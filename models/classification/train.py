@@ -306,8 +306,8 @@ def main():
 
     try:
         logger.info("Loading and preparing datasets...")
-        # Pass only the 'data' sub-configuration
-        train_dataset, val_dataset, index_to_label_map = load_classification_data(config['data'])
+        # Pass only the 'classification_training_data' sub-configuration
+        train_dataset, val_dataset, index_to_label_map = load_classification_data(config['classification_training_data'])
         num_classes = len(index_to_label_map)
         if num_classes == 0:
              logger.error("No classes found in the dataset. Check metadata and data paths.")
@@ -319,7 +319,7 @@ def main():
 
     try:
         # Pass only the 'model' sub-configuration (and num_classes)
-        model = build_model(num_classes=num_classes, config=config['model'])
+        model = build_model(num_classes=num_classes, config=config['classification_training_data']['model_config'])
     except Exception as e:
         logger.error(f"Failed to build model: {e}")
         return

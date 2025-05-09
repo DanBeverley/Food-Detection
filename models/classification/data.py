@@ -243,56 +243,55 @@ def load_test_data(config: Dict, index_to_label_map: Optional[Dict[int, str]] = 
     if not os.path.isabs(data_dir):
          data_dir = os.path.join(os.path.dirname(__file__), '..', '..', data_dir)
 
-    try:
-        logger.info(f"Loading test metadata from: {metadata_path}")
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
-        logger.info(f"Loaded test metadata for {len(metadata)} items.")
+    logger.info(f"Loading test metadata from: {metadata_path}")
+    with open(metadata_path, 'r') as f:
+        metadata = json.load(f)
+    logger.info(f"Loaded test metadata for {len(metadata)} items.")
 
-        image_paths = []
-        string_labels = [] 
-        for item in metadata:
-            full_path = os.path.join(data_dir, item['image_path'])
-            if not os.path.exists(full_path):
-                 logger.warning(f"Image file not found: {full_path}. Skipping.")
-                 continue
-            image_paths.append(full_path)
-            string_labels.append(item['label'])
+    image_paths = []
+    string_labels = [] 
+    for item in metadata:
+        full_path = os.path.join(data_dir, item['image_path'])
+        if not os.path.exists(full_path):
+             logger.warning(f"Image file not found: {full_path}. Skipping.")
+             continue
+        image_paths.append(full_path)
+        string_labels.append(item['label'])
 
-        if not image_paths:
-            raise FileNotFoundError("No valid image paths found for test data.")
+    if not image_paths:
+        raise FileNotFoundError("No valid image paths found for test data.")
 
-        if index_to_label_map is None:
-            logger.warning("Label map not provided for test data. Recalculating. "
-                           "For consistent evaluation/inference, always use the map from training.")
-            unique_labels = sorted(list(set(string_labels)))
-            label_to_index = {label: index for index, label in enumerate(unique_labels)}
-            index_to_label_map = {index: label for label, index in label_to_index.items()}
-        else:
-            logger.info("Using provided label map for test data.")
-            label_to_index = {label: index for index, label in index_to_label_map.items()}
+    if index_to_label_map is None:
+        logger.warning("Label map not provided for test data. Recalculating. "
+                       "For consistent evaluation/inference, always use the map from training.")
+        unique_labels = sorted(list(set(string_labels)))
+        label_to_index = {label: index for index, label in enumerate(unique_labels)}
+        index_to_label_map = {index: label for label, index in label_to_index.items()}
+    else:
+        logger.info("Using provided label map for test data.")
+        label_to_index = {label: index for index, label in index_to_label_map.items()}
 
-        integer_labels = [label_to_index.get(label, -1) for label in string_labels] 
-        if any(lbl == -1 for lbl in integer_labels):
-             logger.warning("Some test labels were not found in the provided/recalculated label map.")
+    integer_labels = [label_to_index.get(label, -1) for label in string_labels] 
+    if any(lbl == -1 for lbl in integer_labels):
+         logger.warning("Some test labels were not found in the provided/recalculated label map.")
 
-        def load_and_preprocess_test(path: str, label: int) -> Tuple[tf.Tensor, tf.Tensor]:
-             try:
-                image = tf.io.read_file(path)
-                image = tf.image.decode_image(image, channels=3, expand_animations=False)
-                image = tf.image.resize(image, image_size)
-                image.set_shape([*image_size, 3])
-                image = image / 255.0
-                return image, label
-            except Exception as e:
-                 logger.error(f"Error processing image {path}: {e}")
-                 raise
+    def load_and_preprocess_test(path: str, label: int) -> Tuple[tf.Tensor, tf.Tensor]:
+        try:
+            image = tf.io.read_file(path)
+            image = tf.image.decode_image(image, channels=3, expand_animations=False)
+            image = tf.image.resize(image, image_size)
+            image.set_shape([*image_size, 3])
+            image = image / 255.0
+            return image, label
+        except Exception as e:
+            logger.error(f"Error processing image {path}: {e}")
+            raise
 
-        AUTOTUNE = tf.data.AUTOTUNE
-        dataset = tf.data.Dataset.from_tensor_slices((image_paths, integer_labels))
-        dataset = dataset.map(load_and_preprocess_test, num_parallel_calls=AUTOTUNE)
-        dataset = dataset.batch(batch_size)
-        dataset = dataset.prefetch(buffer_size=AUTOTUNE)
-        logger.info("Test dataset created.")
+    AUTOTUNE = tf.data.AUTOTUNE
+    dataset = tf.data.Dataset.from_tensor_slices((image_paths, integer_labels))
+    dataset = dataset.map(load_and_preprocess_test, num_parallel_calls=AUTOTUNE)
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(buffer_size=AUTOTUNE)
+    logger.info("Test dataset created.")
 
-        return dataset, index_to_label_map
+    return dataset, index_to_label_map

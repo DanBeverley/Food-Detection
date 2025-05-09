@@ -54,7 +54,7 @@ segmentation_training_data:
 # --- Classification Model Training Data Configuration (Example - adjust as needed) ---
 classification_training_data:
   dataset_root_dir: "E:/_MetaFood3D_new_RGBD_videos_flipped_food/RGBD_videos_flipped_food" # Path to classification dataset
-  label_map_path: "models/classification/label_map.json" # Path to the label map file
+  label_map_path: "trained_models/classification/label_map.json" # Path to the label map file
   image_size: [224, 224]       # Target image size (height, width) for training
   batch_size: 16               # Batch size for training (adjusted for potential GPU memory constraints)
   split_ratio: 0.2             # Proportion of data for validation set
