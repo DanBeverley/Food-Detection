@@ -19,7 +19,8 @@ def build_model(num_classes: int, config: Dict) -> models.Model:
 
     Args:
         num_classes: Number of output classes.
-        config: Dictionary containing model configuration.
+        config: Dictionary containing classification training configuration, 
+                expected to have 'model_config' and 'image_size'.
 
     Returns:
         Compiled Keras model.
@@ -27,12 +28,14 @@ def build_model(num_classes: int, config: Dict) -> models.Model:
     Raises:
         ValueError: If configuration is invalid or architecture is unsupported.
     """
-    model_config = config.get('model', {})
-    architecture = model_config.get('architecture', 'EfficientNetV2B0')
-    image_size = tuple(config.get('data', {}).get('image_size', [224, 224]))
-    use_pretrained = model_config.get('use_pretrained_weights', True)
-    fine_tune = model_config.get('fine_tune', False)
-    fine_tune_layers = model_config.get('fine_tune_layers', 10) # Number of layers from the end to unfreeze
+    model_params = config.get('model_config', {})
+    architecture = model_params.get('architecture', 'EfficientNetV2B0')
+    image_size_list = config.get('image_size', [224, 224]) # Get image_size from the main config arg
+    image_size = tuple(image_size_list)
+
+    use_pretrained = model_params.get('use_pretrained_weights', True)
+    fine_tune = model_params.get('fine_tune', False)
+    fine_tune_layers = model_params.get('fine_tune_layers', 10) # Number of layers from the end to unfreeze
     weights = 'imagenet' if use_pretrained else None
 
     input_shape = (*image_size, 3)
@@ -79,7 +82,7 @@ def build_model(num_classes: int, config: Dict) -> models.Model:
             layer.trainable = False
 
     # classification head
-    head_config = model_config.get('classification_head', {})
+    head_config = model_params.get('classification_head', {})
     pooling_layer = head_config.get('pooling', 'GlobalAveragePooling2D') # or 'GlobalMaxPooling2D'
     dense_layers_units = head_config.get('dense_layers', [256]) # List of units for dense layers
     dropout_rate = head_config.get('dropout', 0.5)
@@ -104,9 +107,11 @@ def build_model(num_classes: int, config: Dict) -> models.Model:
     outputs = layers.Dense(num_classes, activation=final_activation)(x)
     model = models.Model(inputs, outputs)
 
+    # Get learning_rate directly from the main config (classification_training_data)
+    learning_rate = config.get('learning_rate', 0.001)  # Default if not specified
+
     optimizer_config = config.get('optimizer', {})
     optimizer_name = optimizer_config.get('name', 'Adam').lower()
-    learning_rate = optimizer_config.get('learning_rate', 1e-3)
 
     if optimizer_name == 'adam':
         optimizer = optimizers.Adam(learning_rate=learning_rate)
@@ -164,8 +169,8 @@ def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset
     Raises:
         RuntimeError: If training fails.
     """
-    training_config = config.get('training', {})
-    epochs = training_config.get('epochs', 50)
+    epochs = config.get('epochs', 50) # Correctly get epochs from the classification_training_data config
+
     model_dir = config.get('paths', {}).get('model_save_dir', 'trained_models/classification')
     log_dir = config.get('paths', {}).get('log_dir', 'logs/classification')
     checkpoint_dir = os.path.join(model_dir, 'checkpoints') # Subdirectory for checkpoints
@@ -318,14 +323,14 @@ def main():
         return
 
     try:
-        # Pass only the 'model' sub-configuration (and num_classes)
-        model = build_model(num_classes=num_classes, config=config['classification_training_data']['model_config'])
+        # Pass the 'classification_training_data' sub-configuration (and num_classes)
+        model = build_model(num_classes=num_classes, config=config['classification_training_data'])
     except Exception as e:
         logger.error(f"Failed to build model: {e}")
         return
     try:
-        # Pass only the 'training' sub-configuration (and others)
-        train_model(model, train_dataset, val_dataset, config['training'], index_to_label_map)
+        # Pass the entire 'classification_training_data' sub-configuration
+        train_model(model, train_dataset, val_dataset, config['classification_training_data'], index_to_label_map)
     except BaseException as e: # Catch BaseException to include things like SystemExit
         # Error already logged in train_model # This comment might be wrong
         # logger.info("Training process terminated due to error.") # Replace this
