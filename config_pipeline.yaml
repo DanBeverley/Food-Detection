@@ -13,10 +13,10 @@ model_params:
 
 camera_intrinsics:
   # IMPORTANT: Replace with your actual camera intrinsics
-  fx: 150.0    # Focal length x (pixels)
-  fy: 150.0    # Focal length y (pixels)
-  cx: 60.0     # Principal point x (pixels) - Should be near width/2
-  cy: 50.0     # Principal point y (pixels) - Should be near height/2
+  fx: 1000.0    # Focal length x (pixels) - PLACEHOLDER
+  fy: 1000.0    # Focal length y (pixels) - PLACEHOLDER
+  cx: 720.0     # Principal point x (pixels) - Should be near width/2
+  cy: 960.0     # Principal point y (pixels) - Should be near height/2
   # Note: These values (fx, fy, cx, cy) heavily influence volume estimation accuracy.
   # Use values calibrated for the specific depth sensor/camera being used.
 
@@ -24,6 +24,7 @@ volume_params:
   # Optional: Define min/max depth range (in meters) for filtering point cloud
   min_depth_m: 0.1 # Adjust based on typical distance to food
   max_depth_m: 1.5 # Adjust based on typical distance/sensor range
+  depth_scale_factor: 1.0 # Factor to multiply raw depth values by to get mm. Assumes raw depth is in mm.
 
 # Optional: Add other pipeline settings if needed
 # e.g., default confidence thresholds, volume estimation method flags, etc.
@@ -35,11 +36,11 @@ segmentation_training_data:
   batch_size: 8                # Batch size for training (adjust based on GPU memory)
   split_ratio: 0.2             # Proportion of data for validation set (e.g., 0.2 for 20%)
   random_seed: 42              # Seed for reproducible train/validation splits
-  epochs: 2                    # Number of epochs for training (reduced for quick test)
+  epochs: 1                    # Number of epochs for quick testing (Reduced from 2)
   learning_rate: 0.0001        # Learning rate for the Adam optimizer
   early_stopping_patience: 5   # Patience for early stopping (reduced for quick test)
-  dev_max_train_samples: 100     # Max training samples for quick dev run (set to null or remove for full training)
-  dev_max_val_samples: 20        # Max validation samples for quick dev run (set to null or remove for full training)
+  dev_max_train_samples: 16     # Max training samples for quick dev run (Reduced from 100)
+  dev_max_val_samples: 16        # Max validation samples for quick dev run (Reduced from 20)
   augmentation:
     enabled: True              # Master switch for augmentation
     horizontal_flip: True      # Enable random horizontal flips
@@ -59,11 +60,22 @@ classification_training_data:
   batch_size: 16               # Batch size for training (adjusted for potential GPU memory constraints)
   split_ratio: 0.2             # Proportion of data for validation set
   random_seed: 42              # Seed for reproducible train/validation splits
-  epochs: 2                    # Number of epochs for quick testing
+  epochs: 1                    # Number of epochs for quick testing (Reduced from 2)
   learning_rate: 0.0001        # Learning rate for the optimizer
-  early_stopping_patience: 5   # Patience for early stopping
-  dev_max_train_samples: 100     # Max training samples for quick dev run
-  dev_max_val_samples: 20        # Max validation samples for quick dev run
+  dev_max_train_samples: 16     # Max training samples for quick dev run (Reduced from 100)
+  dev_max_val_samples: 16        # Max validation samples for quick dev run (Reduced from 20)
+
+  model_config:
+    architecture: "EfficientNetV2B0"  # Example: EfficientNetV2B0, ConvNeXtTiny
+    use_pretrained_weights: true
+    fine_tune: false  # Set to true to unfreeze some layers of the base model
+    fine_tune_layers: 10 # Number of layers from the end to unfreeze if fine_tune is true
+    classification_head:
+      pooling: "GlobalAveragePooling2D" # Options: GlobalAveragePooling2D, GlobalMaxPooling2D, Flatten
+      dense_layers: [256] # List of units for additional dense layers before the final output layer, e.g., [512, 256]
+      dropout: 0.5 # Dropout rate for the dense layers in the classification head
+      output_activation: "softmax" # 'softmax' for multi-class, 'sigmoid' for multi-label
+
   augmentation:
     enabled: True              # Master switch for augmentation
     horizontal_flip: True      # Enable random horizontal flips
@@ -73,3 +85,33 @@ classification_training_data:
     height_shift_range: 0.1    # Fraction of total height for random vertical shifts
     brightness_range: [0.8, 1.2] # Applied only to images
     contrast_range: [0.8, 1.2]   # Applied only to images
+  callbacks:
+    model_checkpoint:
+      enabled: true
+      filename_template: 'model_epoch-{epoch:02d}_val_loss-{val_loss:.2f}.h5'
+      monitor: 'val_loss'
+      save_best_only: true
+      save_weights_only: false
+      mode: 'min'
+    tensorboard:
+      enabled: true
+      histogram_freq: 1
+      write_graph: true
+      write_images: false
+      update_freq: 'epoch'
+    early_stopping:
+      enabled: true
+      monitor: 'val_loss'
+      patience: 5
+      min_delta: 0.001
+      mode: 'min'
+      restore_best_weights: true
+    reduce_lr_on_plateau:
+      enabled: true
+      monitor: 'val_loss'
+      factor: 0.1
+      patience: 5
+      min_lr: 0.000001 # 1e-6
+      mode: 'min'
+
+# --- Segmentation Model Configuration ---
