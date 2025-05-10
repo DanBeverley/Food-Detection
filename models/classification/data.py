@@ -173,7 +173,7 @@ def load_classification_data(config: Dict) -> Tuple[tf.data.Dataset, tf.data.Dat
                 image = tf.clip_by_value(image, 0.0, 255.0) 
 
             image = preprocess_input(image) 
-            return image, tf.one_hot(label, num_classes) 
+            return image, label
         except Exception as e:
             logger.error(f"Error loading/preprocessing image {path}: {e}", exc_info=True)
             raise
