@@ -17,7 +17,7 @@ try:
     from models.classification.predict_classification import run_classification_inference, load_classification_model
 except ImportError:
     logging.error("Failed to import classification functions. Ensure predict_classification.py is refactored.")
-    def load_classification_model(path): return None, None, None # type: ignore
+    def load_classification_model(path): return None, None, None, None # type: ignore
     def run_classification_inference(*args): return None, 0.0 # type: ignore
 
 try:
@@ -116,7 +116,7 @@ def analyze_food_item(
                     depth_map = np.load(depth_map_path)
                     logging.debug(f"Loaded .npy depth map from {depth_map_path}, shape: {depth_map.shape if depth_map is not None else 'None'}")
                 else: 
-                    depth_map = cv2.imread(depth_map_path, cv2.IMREAD_UNCHANGED)
+                    depth_map = cv2.imread(depth_map_path, cv2.IMREAD_GRAYSCALE)
                     logging.debug(f"Loaded image-based depth map from {depth_map_path}, shape: {depth_map.shape if depth_map is not None else 'None'}")
 
                 if depth_map is None: 
@@ -234,18 +234,28 @@ def analyze_food_item(
             intrinsics = config['camera_intrinsics']
             volume_params = config.get('volume_params', {}) 
 
-            points = depth_map_to_masked_points(depth_map, segmentation_mask, intrinsics)
+            # Get min/max depth from volume_params in config, defaulting to None if not present
+            min_depth_m_param = volume_params.get('min_depth_m')
+            max_depth_m_param = volume_params.get('max_depth_m')
+            # Get depth_scale_factor from volume_params, defaulting to 1.0 (assumes depth is already in mm)
+            depth_scale_factor_param = volume_params.get('depth_scale_factor', 1.0)
+
+            points = depth_map_to_masked_points(depth_map, segmentation_mask, 
+                                                fx=intrinsics['fx'], fy=intrinsics['fy'], 
+                                                cx=intrinsics['cx'], cy=intrinsics['cy'],
+                                                min_depth_m=min_depth_m_param, 
+                                                max_depth_m=max_depth_m_param,
+                                                depth_scale_factor=depth_scale_factor_param)
             if points is None or points.shape[0] < 4: 
                 logging.warning(f"Not enough points ({points.shape[0] if points is not None else 0}) from depth map and mask for convex hull. Volume remains {volume_cm3:.2f} cm³.")
             else:
-                qhull_options = volume_params.get('qhull_options', 'QJ') 
-                volume_from_depth = estimate_volume_convex_hull(points, qhull_options=qhull_options)
-                if volume_from_depth is not None:
-                    volume_cm3 = volume_from_depth
+                volume_from_depth_mm3 = estimate_volume_convex_hull(points)
+                if volume_from_depth_mm3 is not None and volume_from_depth_mm3 > 0:
+                    volume_cm3 = volume_from_depth_mm3 / 1000.0 # Convert mm^3 to cm^3
                     volume_calculation_method = "Depth map (Convex Hull)"
-                    logging.info(f"Volume successfully calculated from depth map: {volume_cm3:.2f} cm³")
+                    logging.info(f"Volume successfully calculated from depth map: {volume_from_depth_mm3:.2f} mm³ ({volume_cm3:.2f} cm³)")
                 else:
-                    logging.warning(f"Convex hull volume estimation from depth map returned None. Volume remains {volume_cm3:.2f} cm³.")
+                    logging.warning(f"Convex hull volume estimation from depth map returned None or zero. Volume remains {volume_cm3:.2f} cm³.")
         elif volume_cm3 == 0.0: 
              logging.warning("Could not estimate volume from mesh or depth map. Volume set to 0.0 cm³.")
              volume_calculation_method = "Unavailable (defaulted to 0)"
