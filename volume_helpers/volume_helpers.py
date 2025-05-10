@@ -10,13 +10,15 @@ logger = logging.getLogger(__name__)
 def depth_map_to_masked_points(depth_map:np.ndarray, segmentation_mask:np.ndarray,
                                fx:float, fy:float, cx:float, cy:float,
                                min_depth_m: Optional[float] = None,
-                               max_depth_m: Optional[float] = None) -> Optional[np.ndarray]:
+                               max_depth_m: Optional[float] = None,
+                               depth_scale_factor: float = 1.0) -> Optional[np.ndarray]:
     """
     Converts a depth map region (defined by a mask) to a 3D point cloud.
 
     Args:
-        depth_map (np.ndarray): 2D numpy array of depth values (e.g., in mm).
+        depth_map (np.ndarray): 2D numpy array of depth values.
                                 Assumes invalid/no-return depth is <= 0.
+                                Values are scaled by depth_scale_factor to get mm.
         segmentation_mask (np.ndarray): 2D boolean numpy array (same shape as depth_map)
                                         where True indicates the object pixels.
         fx (float): Camera focal length in x (pixels).
@@ -25,6 +27,8 @@ def depth_map_to_masked_points(depth_map:np.ndarray, segmentation_mask:np.ndarra
         cy (float): Camera principal point y (pixels).
         min_depth_m (Optional[float]): Minimum valid depth in METERS. Points below this are discarded.
         max_depth_m (Optional[float]): Maximum valid depth in METERS. Points above this are discarded.
+        depth_scale_factor (float): Factor to multiply raw depth values by to convert them to millimeters.
+                                    Defaults to 1.0 (assumes raw depth is already in mm).
 
     Returns:
         np.ndarray | None: An (N, 3) numpy array of 3D points (x, y, z) in mm,
@@ -49,19 +53,22 @@ def depth_map_to_masked_points(depth_map:np.ndarray, segmentation_mask:np.ndarra
     jj_masked = jj[mask_indices]
     depth_value_masked = depth_map[mask_indices]
 
+    # Apply depth scale factor to convert raw depth values to millimeters
+    depth_value_masked_mm = depth_value_masked.astype(np.float32) * depth_scale_factor
+
     # Convert min/max depth from meters (config) to millimeters (depth map unit)
     min_depth_mm = min_depth_m * 1000 if min_depth_m is not None else 0 # Default min to 0 if None
     max_depth_mm = max_depth_m * 1000 if max_depth_m is not None else np.inf # Default max to infinity if None
 
     # Filter out invalid depth values (e.g., <= 0) and values outside min/max range
     valid_depth_filter = (
-        (depth_value_masked > min_depth_mm) & 
-        (depth_value_masked < max_depth_mm)
+        (depth_value_masked_mm > min_depth_mm) & 
+        (depth_value_masked_mm < max_depth_mm)
     )
 
     ii_final = ii_masked[valid_depth_filter]
     jj_final = jj_masked[valid_depth_filter]
-    depth_final = depth_value_masked[valid_depth_filter]
+    depth_final = depth_value_masked_mm[valid_depth_filter]
 
     if depth_final.size == 0:
         logger.warning(f"No valid depth pixels found within the segmentation mask")
