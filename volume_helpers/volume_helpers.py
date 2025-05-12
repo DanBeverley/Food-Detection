@@ -2,7 +2,8 @@ import numpy as np
 import logging
 from scipy.spatial import ConvexHull, QhullError
 from typing import Optional
-import trimesh 
+import trimesh
+from trimesh.repair import fill_holes
 
 logging.basicConfig(level = logging.INFO, format = "%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -115,103 +116,95 @@ def estimate_volume_convex_hull(points:np.ndarray) -> float:
         logger.error(f"An unexpected error occured during ConvexHull volume estimation: {e}")
         return 0.0
 
-def estimate_volume_from_mesh(mesh_file_path: str) -> float | None:
+def estimate_volume_from_mesh(file_path: str) -> float | None:
     """
-    Estimates the volume of a 3D model from its mesh file.
+    Estimates the volume of a 3D model from its mesh or point cloud file.
+    Supports .obj, .ply, and other formats loadable by trimesh.
+    For point clouds (e.g., .ply with only points), volume is calculated from their convex hull.
 
     Args:
-        mesh_file_path (str): The absolute path to the 3D mesh file (e.g., .obj, .ply).
+        file_path (str): The absolute path to the 3D file.
 
     Returns:
-        float | None: The calculated volume of the mesh in cubic centimeters (cm^3).
-                      Returns None if the mesh can't be loaded or volume calculation fails.
+        float | None: The calculated volume in cubic centimeters (cm^3).
+                      Returns None if the file can't be loaded or volume calculation fails.
     """
     try:
-        mesh = trimesh.load_mesh(mesh_file_path)
+        # Use load_path to handle scenes or single geometry files
+        loaded_data = trimesh.load_path(file_path)
 
-        # It's often good practice to ensure the mesh is "watertight" for accurate volume.
-        if not mesh.is_watertight:
-            logger.info(f"Mesh {mesh_file_path} is not watertight. Attempting to fill holes...")
-            from trimesh.repair import fill_holes
-            fill_holes(mesh) # Modifies the mesh in-place
-            if mesh.is_watertight:
-                logger.info(f"Mesh {mesh_file_path} is now watertight after filling holes.")
-            else:
-                logger.warning(f"Mesh {mesh_file_path} is still not watertight after attempting to fill holes. Volume may be approximate.")
+        geometry = None
+        if isinstance(loaded_data, trimesh.Scene):
+            if not loaded_data.geometry:
+                logger.warning(f"No geometry found in scene file: {file_path}")
+                return None
+            # Heuristic: try to pick the 'main' geometry. 
+            # This might need refinement based on dataset structure.
+            # For now, pick the first one, prioritizing Trimesh objects with volume.
+            for geom_obj in loaded_data.geometry.values():
+                if isinstance(geom_obj, trimesh.Trimesh):
+                    geometry = geom_obj
+                    break
+            if geometry is None: # If no Trimesh found, take the first geometry whatever it is
+                 geometry = list(loaded_data.geometry.values())[0]
+            logger.info(f"Extracted {type(geometry).__name__} from scene in {file_path}")
+        elif isinstance(loaded_data, (trimesh.Trimesh, trimesh.points.PointCloud)):
+            geometry = loaded_data # It's a single geometry object
         else:
-            logger.info(f"Mesh {mesh_file_path} is already watertight.")
+            logger.warning(f"Loaded data from {file_path} is of an unhandled type: {type(loaded_data)}")
+            return None
 
-        # Assume mesh units from trimesh.load_mesh() are in meters for MetaFood3D.
-        volume_m3 = mesh.volume
+        if geometry is None:
+            logger.error(f"Could not extract a valid geometry from {file_path}")
+            return None
 
-        # Convert volume to cubic centimeters (cm^3) as it's a more common unit for food.
-        # 1 m^3 = 1,000,000 cm^3
-        volume_cm3 = volume_m3 * 1_000_000
+        logger.info(f"Processing {file_path} as type {type(geometry).__name__}")
+        raw_volume_units = 0.0
+
+        if isinstance(geometry, trimesh.Trimesh):
+            logger.info(f"Processing as Trimesh object.")
+            if not geometry.is_watertight:
+                logger.info(f"Mesh from {file_path} is not watertight. Attempting to fill holes...")
+                fill_holes(geometry) # Modifies the geometry in-place
+                if geometry.is_watertight:
+                    logger.info(f"Mesh from {file_path} is now watertight after filling holes.")
+                else:
+                    logger.warning(f"Mesh from {file_path} is still not watertight. Volume may be approximate.")
+            else:
+                logger.info(f"Mesh from {file_path} is already watertight.")
+            raw_volume_units = geometry.volume
         
-        logger.info(f"Successfully loaded mesh: {mesh_file_path}")
-        logger.info(f"Raw volume from trimesh (assumed m^3): {volume_m3}")
-        logger.info(f"Calculated volume: {volume_cm3} cm^3")
+        elif isinstance(geometry, trimesh.points.PointCloud):
+            logger.info(f"Processing as PointCloud object. Calculating volume from its convex hull.")
+            if len(geometry.vertices) < 4:
+                logger.warning(f"PointCloud from {file_path} has {len(geometry.vertices)} vertices. Need at least 4 for convex hull volume.")
+                return None
+            try:
+                # The convex_hull of a PointCloud is a Trimesh object
+                convex_hull_mesh = geometry.convex_hull
+                raw_volume_units = convex_hull_mesh.volume
+            except QhullError as e:
+                logger.warning(f"QhullError computing convex hull for PointCloud {file_path}: {e}. This may occur for co-planar or degenerate points.")
+                return None
+            except Exception as e_cvx:
+                logger.error(f"Unexpected error computing convex hull for PointCloud {file_path}: {e_cvx}", exc_info=True)
+                return None
+        else:
+            logger.warning(f"Geometry from {file_path} is of an unsupported type for volume calculation: {type(geometry)}")
+            return None
+
+        # CRITICAL ASSUMPTION: Input 3D file units are in METERS.
+        # If units are different (e.g., mm), this conversion factor will be incorrect.
+        # 1 m^3 = 1,000,000 cm^3
+        volume_cm3 = raw_volume_units * 1_000_000
+        
+        logger.info(f"Raw volume (source units, assumed m^3): {raw_volume_units}")
+        logger.info(f"Calculated volume: {volume_cm3:.4f} cm^3 for {file_path}")
         return float(volume_cm3)
 
-    except Exception as e:
-        logger.error(f"Error loading or processing mesh {mesh_file_path}: {e}")
+    except FileNotFoundError:
+        logger.error(f"3D file not found: {file_path}")
         return None
-
-# Example usage:
-if __name__ == '__main__':
-    print("Testing volume_helpers (Convex Hull method)...")
-
-    # --- Create Dummy Data ---
-    H, W = 100, 120
-    # Dummy Depth Map (mm)
-    dummy_depth = np.random.rand(H, W).astype(np.float32) * 500 + 100 # Depths between 100mm and 600mm
-    dummy_depth[50:70, 50:70] += 200 # Make a region slightly closer
-    dummy_depth[0:10, 0:10] = 0 # Add some invalid depth areas
-
-    # Dummy Segmentation Mask (boolean)
-    dummy_mask = np.zeros((H, W), dtype=bool)
-    dummy_mask[40:80, 40:80] = True # A square object in the middle
-
-    # Dummy Camera Intrinsics (Example for a 120x100 camera)
-    fx, fy = 150.0, 150.0 # Focal lengths
-    cx, cy = W / 2 - 0.5, H / 2 - 0.5 # Principal point (adjust for 0-based indexing)
-
-    # --- Convert depth map region to points ---
-    masked_points = depth_map_to_masked_points(dummy_depth, dummy_mask, fx, fy, cx, cy)
-
-    if masked_points is not None:
-        print(f"Successfully extracted {masked_points.shape[0]} points using the mask.")
-
-        # --- Estimate Volume ---
-        volume_ch = estimate_volume_convex_hull(masked_points)
-        # Units will be mm³ if depth was in mm
-        print(f"Estimated Volume (Convex Hull): {volume_ch:.2f} mm³")
-
-        # --- Test degenerate cases ---
-        print("\nTesting degenerate cases:")
-        # Fewer than 4 points
-        few_points = masked_points[:3] if masked_points.shape[0] >= 3 else None
-        vol_few = estimate_volume_convex_hull(few_points)
-        print(f"Volume estimate with {few_points.shape[0] if few_points is not None else 0} points: {vol_few}")
-
-        # Co-planar points (create a flat plane)
-        if masked_points is not None and masked_points.shape[0] >= 4:
-            planar_points = masked_points.copy()
-            planar_points[:, 2] = np.mean(planar_points[:, 2]) # Set all Z to the average Z
-            vol_planar = estimate_volume_convex_hull(planar_points)
-            print(f"Volume estimate with co-planar points: {vol_planar}") # Expect 0.0 or error
-
-    else:
-        print("Failed to extract masked points from dummy data.")
-
-    # Example usage for estimate_volume_from_mesh
-    example_mesh_path = r"E:\_MetaFood3D_new_3D_Mesh\3D_Mesh\Apple\apple_1\apple_1.obj" # Using raw string for Windows path
-
-    mesh_vol_cm3 = estimate_volume_from_mesh(example_mesh_path)
-    if mesh_vol_cm3 is not None:
-        print(f"The estimated volume of the mesh '{example_mesh_path}' is: {mesh_vol_cm3:.2f} cm^3")
-
-    # You can also test the convex hull volume estimation if you have a point cloud
-    # dummy_points_for_convex_hull = np.random.rand(100, 3) * 10 # Example 100 points in a 10x10x10 cube
-    # convex_hull_vol = estimate_volume_convex_hull(dummy_points_for_convex_hull)
-    # print(f"Example convex hull volume: {convex_hull_vol}")
+    except Exception as e:
+        logger.error(f"Error loading or processing 3D file {file_path}: {e}", exc_info=True)
+        return None

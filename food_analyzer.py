@@ -61,6 +61,7 @@ def analyze_food_item(
     config: dict,
     depth_map_path: str | None = None,  
     mesh_file_path: str | None = None,  
+    point_cloud_file_path: str | None = None,  
     known_food_class: str | None = None, 
     usda_api_key: str | None = None
 ) -> dict | None:
@@ -72,19 +73,21 @@ def analyze_food_item(
         config (dict): Loaded pipeline configuration dictionary.
         depth_map_path (str | None, optional): Path to the corresponding depth map. Defaults to None.
         mesh_file_path (str | None, optional): Path to a 3D mesh file for volume calculation. Defaults to None.
+        point_cloud_file_path (str | None, optional): Path to a 3D point cloud file (e.g., .ply) for volume calculation. Defaults to None.
         known_food_class (str | None, optional): If the food class is already known, provide it here. Defaults to None.
         usda_api_key (str | None, optional): USDA API key for density lookup fallback. Defaults to None.
 
     Returns:
-        dict | None: A dictionary containing analysis results ('food_label', 'confidence',
-                     'volume_cm3', 'density_g_cm3', 'estimated_mass_g', 'calories_kcal_per_100g', 'estimated_total_calories', 'segmentation_mask_shape'),
-                     or None if a critical step fails.
+        dict | None: A dictionary containing analysis results, or None if a critical step fails.
+                     Keys include: 'food_label', 'confidence', 'volume_cm3', 'volume_method',
+                     'density_g_cm3', 'estimated_mass_g', 'calories_kcal_per_100g',
+                     'estimated_total_calories', 'segmentation_mask_shape'.
     """
     results = {
         'food_label': None,
         'confidence': 0.0,
         'volume_cm3': 0.0,
-        'volume_method': "N/A",
+        'volume_method': "N/A", 
         'density_g_cm3': None,
         'estimated_mass_g': None,
         'calories_kcal_per_100g': None,  
@@ -214,59 +217,68 @@ def analyze_food_item(
         return None
 
     # 5. Estimate Volume 
-    volume_cm3 = 0.0  
+    volume_cm3 = None
     try:
         t0 = time.time()
-        volume_calculation_method = "N/A"
+        if point_cloud_file_path and os.path.exists(point_cloud_file_path):
+            logging.info(f"Attempting volume estimation from point cloud file: {point_cloud_file_path}")
+            volume_cm3 = estimate_volume_from_mesh(point_cloud_file_path) 
+            if volume_cm3 is not None and volume_cm3 > 0:
+                results['volume_method'] = "point_cloud_file"
+                logging.info(f"Volume from point cloud file: {volume_cm3:.2f} cm³")
+            else:
+                logging.warning(f"Failed to get volume from point cloud file {point_cloud_file_path} or volume was zero. Trying other methods.")
+                volume_cm3 = None # Ensure it's None to try next method
 
-        if mesh_file_path and os.path.exists(mesh_file_path):
+        if volume_cm3 is None and mesh_file_path and os.path.exists(mesh_file_path):
             logging.info(f"Attempting volume estimation from mesh file: {mesh_file_path}")
-            volume_from_mesh = estimate_volume_from_mesh(mesh_file_path)
-            if volume_from_mesh is not None:
-                volume_cm3 = volume_from_mesh
-                volume_calculation_method = f"Mesh file ({os.path.basename(mesh_file_path)})"
-                logging.info(f"Volume successfully calculated from mesh: {volume_cm3:.2f} cm³")
+            volume_cm3 = estimate_volume_from_mesh(mesh_file_path)
+            if volume_cm3 is not None and volume_cm3 > 0:
+                results['volume_method'] = "mesh_file"
+                logging.info(f"Volume from mesh file: {volume_cm3:.2f} cm³")
             else:
-                logging.warning(f"Failed to estimate volume from mesh file {mesh_file_path}. Volume remains {volume_cm3:.2f} cm³.")
+                logging.warning(f"Failed to get volume from mesh file {mesh_file_path} or volume was zero. Trying depth map.")
+                volume_cm3 = None # Ensure it's None to try next method
         
-        if volume_cm3 == 0.0 and depth_map is not None and segmentation_mask is not None: 
+        if volume_cm3 is None:
             logging.info("Attempting volume estimation from depth map and segmentation mask.")
-            intrinsics = config['camera_intrinsics']
-            volume_params = config.get('volume_params', {}) 
-
-            # Get min/max depth from volume_params in config, defaulting to None if not present
-            min_depth_m_param = volume_params.get('min_depth_m')
-            max_depth_m_param = volume_params.get('max_depth_m')
-            # Get depth_scale_factor from volume_params, defaulting to 1.0 (assumes depth is already in mm)
-            depth_scale_factor_param = volume_params.get('depth_scale_factor', 1.0)
-
-            points = depth_map_to_masked_points(depth_map, segmentation_mask, 
-                                                fx=intrinsics['fx'], fy=intrinsics['fy'], 
-                                                cx=intrinsics['cx'], cy=intrinsics['cy'],
-                                                min_depth_m=min_depth_m_param, 
-                                                max_depth_m=max_depth_m_param,
-                                                depth_scale_factor=depth_scale_factor_param)
-            if points is None or points.shape[0] < 4: 
-                logging.warning(f"Not enough points ({points.shape[0] if points is not None else 0}) from depth map and mask for convex hull. Volume remains {volume_cm3:.2f} cm³.")
+            cam_intrinsics = config.get('camera_intrinsics')
+            if not cam_intrinsics:
+                logging.error("Camera intrinsics not found in config. Cannot estimate volume from depth map.")
+                results['error_message'] = "Camera intrinsics missing for depth-based volume."
             else:
-                volume_from_depth_mm3 = estimate_volume_convex_hull(points)
-                if volume_from_depth_mm3 is not None and volume_from_depth_mm3 > 0:
-                    volume_cm3 = volume_from_depth_mm3 / 1000.0 # Convert mm^3 to cm^3
-                    volume_calculation_method = "Depth map (Convex Hull)"
-                    logging.info(f"Volume successfully calculated from depth map: {volume_from_depth_mm3:.2f} mm³ ({volume_cm3:.2f} cm³)")
+                points_from_depth = depth_map_to_masked_points(
+                    depth_map, segmentation_mask,
+                    fx=cam_intrinsics['fx'], fy=cam_intrinsics['fy'],
+                    cx=cam_intrinsics['cx'], cy=cam_intrinsics['cy'],
+                    min_depth_m=config['volume_params'].get('min_depth_m'),
+                    max_depth_m=config['volume_params'].get('max_depth_m'),
+                    depth_scale_factor=config['volume_params'].get('depth_scale_factor', 1.0)
+                )
+                if points_from_depth is not None and points_from_depth.shape[0] > 0:
+                    # Convert volume from mm³ (from estimate_volume_convex_hull) to cm³
+                    volume_mm3 = estimate_volume_convex_hull(points_from_depth)
+                    if volume_mm3 is not None and volume_mm3 > 0:
+                        volume_cm3 = volume_mm3 / 1000.0
+                        results['volume_method'] = "depth_map_convex_hull"
+                        logging.info(f"Volume from depth map (convex hull): {volume_cm3:.2f} cm³ ({volume_mm3:.2f} mm³)")
+                    else:
+                        logging.warning("Volume from depth map was zero or None.")
                 else:
-                    logging.warning(f"Convex hull volume estimation from depth map returned None or zero. Volume remains {volume_cm3:.2f} cm³.")
-        elif volume_cm3 == 0.0: 
-             logging.warning("Could not estimate volume from mesh or depth map. Volume set to 0.0 cm³.")
-             volume_calculation_method = "Unavailable (defaulted to 0)"
+                    logging.warning("Failed to get 3D points from depth map.")
         
-        results['volume_cm3'] = float(volume_cm3)
-        results['volume_method'] = volume_calculation_method 
-        logging.info(f"Final estimated volume: {results['volume_cm3']:.2f} cm³ (Method: {results['volume_method']})")
+        if volume_cm3 is not None and volume_cm3 > 0:
+            results['volume_cm3'] = volume_cm3
+        else:
+            results['volume_cm3'] = 0.0 # Default to 0 if no method succeeded
+            results['volume_method'] = "N/A"
+            logging.warning("All volume estimation methods failed or yielded zero volume.")
         timing['volume_estimation'] = time.time() - t0
     except Exception as e:
-        logging.exception(f"Error during volume estimation: {e}") 
-        return None
+        logging.exception(f"Error during volume estimation: {e}")
+        results['error_message'] = f"Volume estimation error: {e}"
+        results['volume_cm3'] = 0.0 # Ensure volume is 0 on error
+        results['volume_method'] = "Error"
 
     # 6. Look Up Nutritional Info (Density & Calories)
     density_g_cm3 = None
@@ -305,8 +317,8 @@ def analyze_food_item(
     estimated_total_calories = None 
     try:
         t0 = time.time()
-        if density_g_cm3 is not None and volume_cm3 is not None and volume_cm3 > 0:
-            estimated_mass_g = density_g_cm3 * volume_cm3
+        if density_g_cm3 is not None and results['volume_cm3'] is not None and results['volume_cm3'] > 0:
+            estimated_mass_g = density_g_cm3 * results['volume_cm3']
             results['estimated_mass_g'] = float(estimated_mass_g)
             logging.info(f"Estimated mass for {food_label}: {estimated_mass_g:.2f} g")
 
@@ -317,7 +329,7 @@ def analyze_food_item(
             else:
                 logging.info(f"Cannot estimate total calories for {food_label} as calories/100g is unknown.")
 
-        elif volume_cm3 == 0.0:
+        elif results['volume_cm3'] == 0.0:
              logging.info(f"Cannot estimate mass or total calories for {food_label} as volume is 0 cm³.")
         else:
             logging.info(f"Cannot estimate mass or total calories for {food_label} as density or volume is unknown/invalid.")

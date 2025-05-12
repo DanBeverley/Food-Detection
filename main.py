@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--image", required=True, help="Path to the input RGB image file.")
     parser.add_argument("--depth", required=False, help="Path to the input depth map file (.npy or image format).")
     parser.add_argument("--mesh_file_path", help="Optional path to a 3D mesh file for volume calculation.")
+    parser.add_argument("--point_cloud_file", help="Optional path to a 3D point cloud file (e.g., .ply) for volume calculation.")
     parser.add_argument("--known_food_class", help="Optional known food class string (e.g., 'Apple').")
     parser.add_argument("--config", default="config_pipeline.yaml",
                         help="Path to the pipeline configuration YAML file (relative to project root).")
@@ -51,6 +52,7 @@ def main():
             config=config,
             depth_map_path=args.depth,
             mesh_file_path=args.mesh_file_path,
+            point_cloud_file_path=args.point_cloud_file,
             known_food_class=args.known_food_class,
             usda_api_key=args.api_key
         )
