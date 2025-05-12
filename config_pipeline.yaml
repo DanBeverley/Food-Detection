@@ -12,11 +12,10 @@ model_params:
   classification_input_size: [224, 224] # Verify from classification training config
 
 camera_intrinsics:
-  # IMPORTANT: Replace with your actual camera intrinsics
-  fx: 1000.0    # Focal length x (pixels) - PLACEHOLDER
-  fy: 1000.0    # Focal length y (pixels) - PLACEHOLDER
-  cx: 720.0     # Principal point x (pixels) - Should be near width/2
-  cy: 960.0     # Principal point y (pixels) - Should be near height/2
+  fx: 1120.42 # Focal length in x, in pixels
+  fy: 1120.42 # Focal length in y, in pixels
+  cx: 512.0   # Principal point x-coordinate, in pixels
+  cy: 512.0   # Principal point y-coordinate, in pixels
   # Note: These values (fx, fy, cx, cy) heavily influence volume estimation accuracy.
   # Use values calibrated for the specific depth sensor/camera being used.
 
@@ -24,7 +23,11 @@ volume_params:
   # Optional: Define min/max depth range (in meters) for filtering point cloud
   min_depth_m: 0.1 # Adjust based on typical distance to food
   max_depth_m: 1.5 # Adjust based on typical distance/sensor range
-  depth_scale_factor: 1.0 # Factor to multiply raw depth values by to get mm. Assumes raw depth is in mm.
+  # Depth scale factor: Multiply depth values by this factor to get depth in millimeters.
+  # For Intel RealSense, this is often 1000.0 (if depth unit is meters).
+  # For Kinect Azure, it's 1.0 (if depth unit is millimeters).
+  # For MetaFood3D (assuming depth values are in meters from Blender renders if not specified), a common practice is to scale to mm.
+  depth_scale_factor: 1000.0
 
 # Optional: Add other pipeline settings if needed
 # e.g., default confidence thresholds, volume estimation method flags, etc.
