@@ -251,27 +251,3 @@ def lookup_nutritional_info(food_item: str, api_key: str = None) -> dict | None:
     if result_data['density'] is not None or result_data['calories_kcal_per_100g'] is not None:
         return result_data
     return None 
-
-
-if __name__ == '__main__':
-    API_KEY = os.environ.get("USDA_API_KEY")
-    if not API_KEY:
-         print("Warning: USDA_API_KEY environment variable not set. API lookups will be skipped.")
-
-    test_foods = ["apple", "cooked white rice", "butter", "water", "nonexistent_food_xyz", "apple_fuji_raw", "banana_raw"]
-
-    _load_custom_db() 
-
-    for food in test_foods:
-        print(f"\n--- Looking up: {food} ---")
-        nutritional_info = lookup_nutritional_info(food, api_key=API_KEY)
-        if nutritional_info:
-            print(f"===> Final Nutritional Info for {food}: {nutritional_info}")
-        else:
-            print(f"===> Final Nutritional Info for {food}: Not found")
-
-    # Example: How the custom DB should look
-    # _custom_density_db['orange_navel_raw'] = {'density': 0.96, 'calories_kcal_per_100g': 47}
-    # print("\n--- Looking up orange (after potential custom add) ---")
-    # info = lookup_nutritional_info("orange navel raw", api_key=API_KEY)
-    # print(f"===> Final Nutritional Info for orange navel raw: {info}")

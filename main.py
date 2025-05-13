@@ -59,12 +59,12 @@ def main():
 
         if analysis_results:
             # Remove mask shape for cleaner printing/saving if present
-            results_to_print = analysis_results.copy()
+            # results_to_print = analysis_results.copy() # Redundant copy
             # results_to_print.pop('segmentation_mask_shape', None) # Keep shape for info
 
             print("\n--- Analysis Results ---")
             # Use json for consistent formatting, handling None values correctly
-            print(json.dumps(results_to_print, indent=2))
+            print(json.dumps(analysis_results, indent=2))
 
             # Save results if output path provided
             if args.output:
@@ -75,14 +75,14 @@ def main():
                          os.makedirs(output_dir, exist_ok=True)
                     # Save results dictionary as JSON
                     with open(args.output, 'w') as f:
-                        json.dump(results_to_print, f, indent=2)
+                        json.dump(analysis_results, f, indent=2)
                     logging.info(f"Results saved to: {args.output}")
                 except Exception as e:
                     logging.error(f"Failed to save results to {args.output}: {e}")
         else:
-            print("\n--- Analysis Failed ---")
+            logging.error("Analysis failed. No results to display or save.")
 
-    except FileNotFoundError:
+    except FileNotFoundError as e:
          # Config loading error already logged in helper
          print(f"Error: Pipeline configuration file '{args.config}' not found.", file=sys.stderr)
     except ImportError as e:

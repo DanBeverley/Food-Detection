@@ -93,11 +93,9 @@ def analyze_food_item(
         'calories_kcal_per_100g': None,  
         'estimated_total_calories': None, 
         'segmentation_mask_shape': None,
-        'segmentation_mask_path': None, 
         'error_message': None,
         'timing': {}
     }
-    timing = {} 
     project_root = _get_project_root()
     start_time = time.time()
 
@@ -140,7 +138,7 @@ def analyze_food_item(
              logging.error(f"Final depth map is not a 2D NumPy array (type: {type(depth_map)}, ndim: {depth_map.ndim if isinstance(depth_map, np.ndarray) else 'N/A'}). Cannot proceed.")
              return None
         logging.info(f"Using depth map of shape: {depth_map.shape}") 
-        timing['load_inputs'] = time.time() - t0
+        results['timing']['load_inputs'] = time.time() - t0
     except Exception as e: 
         logging.error(f"Critical error during input data loading: {e}", exc_info=True)
         return None
@@ -159,7 +157,7 @@ def analyze_food_item(
         
         clf_interpreter, clf_input_details, clf_output_details, class_labels = load_classification_model(clf_model_path, labels_path=class_labels_path)
         logging.info("Loaded segmentation and classification models.")
-        timing['load_models'] = time.time() - t0
+        results['timing']['load_models'] = time.time() - t0
     except FileNotFoundError as e:
          logging.error(f"Model file not found: {e}. Check paths in config_pipeline.yaml.")
          return None
@@ -182,7 +180,7 @@ def analyze_food_item(
         segmentation_mask = segmentation_mask.astype(bool)
         results['segmentation_mask_shape'] = segmentation_mask.shape
         logging.info(f"Segmentation successful. Mask shape: {segmentation_mask.shape}")
-        timing['segmentation'] = time.time() - t0
+        results['timing']['segmentation'] = time.time() - t0
     except Exception as e:
         logging.exception(f"Error during segmentation: {e}") 
         return None
@@ -211,7 +209,7 @@ def analyze_food_item(
         
         results['food_label'] = str(food_label) 
         results['confidence'] = float(confidence) 
-        timing['classification'] = time.time() - t0
+        results['timing']['classification'] = time.time() - t0
     except Exception as e:
         logging.exception(f"Error during food class determination: {e}") 
         return None
@@ -273,7 +271,7 @@ def analyze_food_item(
             results['volume_cm3'] = 0.0 # Default to 0 if no method succeeded
             results['volume_method'] = "N/A"
             logging.warning("All volume estimation methods failed or yielded zero volume.")
-        timing['volume_estimation'] = time.time() - t0
+        results['timing']['volume_estimation'] = time.time() - t0
     except Exception as e:
         logging.exception(f"Error during volume estimation: {e}")
         results['error_message'] = f"Volume estimation error: {e}"
@@ -307,7 +305,7 @@ def analyze_food_item(
                     logging.warning(f"Calories (kcal/100g) not found for {food_label}.")
             else:
                 logging.warning(f"Nutritional info (density/calories) lookup returned None for {food_label}.")
-            timing['nutritional_lookup'] = time.time() - t0 
+            results['timing']['nutritional_lookup'] = time.time() - t0 
         except Exception as e:
             logging.exception(f"Error during nutritional info lookup for {food_label}: {e}")
             results['error_message'] = results.get('error_message', "") + f"NutritionalLookupError: {e}; "
@@ -333,13 +331,14 @@ def analyze_food_item(
              logging.info(f"Cannot estimate mass or total calories for {food_label} as volume is 0 cm³.")
         else:
             logging.info(f"Cannot estimate mass or total calories for {food_label} as density or volume is unknown/invalid.")
-        timing['mass_calorie_estimation'] = time.time() - t0 
+        results['timing']['mass_calorie_estimation'] = time.time() - t0 
     except Exception as e:
         logging.exception(f"Error during mass and calorie estimation: {e}")
         results['error_message'] = results.get('error_message', "") + f"MassCalorieError: {e}; "
 
     total_time = time.time() - start_time
+    results['timing']['total_analysis_time'] = total_time
     logging.info(f"Total analysis time: {total_time:.2f} seconds")
-    logging.debug(f"Timing breakdown: {timing}")
+    logging.debug(f"Timing breakdown: {results['timing']}")
 
     return results
