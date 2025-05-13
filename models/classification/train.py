@@ -13,14 +13,16 @@ from data import load_classification_data, _get_project_root
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# Path to the specific config file for classification training
+CLASSIFICATION_CONFIG_PATH = os.path.join(_get_project_root(), "models", "classification", "config.yaml")
+
 def build_model(num_classes: int, config: Dict) -> models.Model:
     """
     Build and compile a classification model based on the configuration.
 
     Args:
         num_classes: Number of output classes.
-        config: Dictionary containing classification training configuration, 
-                expected to have 'model_config' and 'image_size'.
+        config: Dictionary containing classification training configuration (the entire content of config.yaml).
 
     Returns:
         Compiled Keras model.
@@ -28,14 +30,19 @@ def build_model(num_classes: int, config: Dict) -> models.Model:
     Raises:
         ValueError: If configuration is invalid or architecture is unsupported.
     """
-    model_params = config.get('model_config', {})
-    architecture = model_params.get('architecture', 'EfficientNetV2B0')
-    image_size_list = config.get('image_size', [224, 224]) # Get image_size from the main config arg
+    model_cfg = config.get('model', {}) # Changed from model_config
+    data_cfg = config.get('data', {})   # Added for image_size
+    optimizer_cfg = config.get('optimizer', {}) # Added for learning_rate
+    loss_cfg = config.get('loss', {}) # Added for loss_fn_name
+    metrics_cfg = config.get('metrics', ['accuracy']) # Added for metrics
+
+    architecture = model_cfg.get('architecture', 'EfficientNetV2B0')
+    image_size_list = data_cfg.get('image_size', [224, 224])
     image_size = tuple(image_size_list)
 
-    use_pretrained = model_params.get('use_pretrained_weights', True)
-    fine_tune = model_params.get('fine_tune', False)
-    fine_tune_layers = model_params.get('fine_tune_layers', 10) # Number of layers from the end to unfreeze
+    use_pretrained = model_cfg.get('use_pretrained_weights', True)
+    fine_tune = model_cfg.get('fine_tune', False)
+    fine_tune_layers = model_cfg.get('fine_tune_layers', 10)
     weights = 'imagenet' if use_pretrained else None
 
     input_shape = (*image_size, 3)
@@ -82,15 +89,15 @@ def build_model(num_classes: int, config: Dict) -> models.Model:
             layer.trainable = False
 
     # classification head
-    head_config = model_params.get('classification_head', {})
-    pooling_layer = head_config.get('pooling', 'GlobalAveragePooling2D') # or 'GlobalMaxPooling2D'
-    dense_layers_units = head_config.get('dense_layers', [256]) # List of units for dense layers
+    head_config = model_cfg.get('classification_head', {})
+    pooling_layer = head_config.get('pooling', 'GlobalAveragePooling2D')
+    dense_layers_units = head_config.get('dense_layers', [256])
     dropout_rate = head_config.get('dropout', 0.5)
     activation = head_config.get('activation', 'relu')
     final_activation = head_config.get('final_activation', 'softmax')
 
     inputs = layers.Input(shape=input_shape)
-    x = base_model(inputs, training=fine_tune) # Set training=fine_tune for BatchNorm behavior
+    x = base_model(inputs, training=fine_tune)
 
     if pooling_layer == 'GlobalAveragePooling2D':
         x = layers.GlobalAveragePooling2D()(x)
@@ -107,26 +114,18 @@ def build_model(num_classes: int, config: Dict) -> models.Model:
     outputs = layers.Dense(num_classes, activation=final_activation)(x)
     model = models.Model(inputs, outputs)
 
-    # Get learning_rate directly from the main config (classification_training_data)
-    learning_rate = config.get('learning_rate', 0.001)  # Default if not specified
-
-    optimizer_config = config.get('optimizer', {})
-    optimizer_name = optimizer_config.get('name', 'Adam').lower()
+    learning_rate = optimizer_cfg.get('learning_rate', 0.001)
+    optimizer_name = optimizer_cfg.get('name', 'Adam').lower()
 
     if optimizer_name == 'adam':
         optimizer = optimizers.Adam(learning_rate=learning_rate)
     elif optimizer_name == 'sgd':
-        momentum = optimizer_config.get('momentum', 0.9)
+        momentum = optimizer_cfg.get('momentum', 0.9)
         optimizer = optimizers.SGD(learning_rate=learning_rate, momentum=momentum)
-    #Optional: Maybe add other optimizers (RMSprop, AdamW from tfa, etc.)
-    # elif optimizer_name == 'adamw' and tfa:
-    #     weight_decay = optimizer_config.get('weight_decay', 1e-4)
-    #     optimizer = tfa.optimizers.AdamW(learning_rate=learning_rate, weight_decay=weight_decay)
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
-    loss_config = config.get('loss', {})
-    loss_fn_name = loss_config.get('name', 'sparse_categorical_crossentropy').lower()
+    loss_fn_name = loss_cfg.get('name', 'sparse_categorical_crossentropy').lower()
 
     if loss_fn_name == 'sparse_categorical_crossentropy':
         loss_fn = losses.SparseCategoricalCrossentropy(from_logits=(final_activation != 'softmax'))
@@ -135,18 +134,16 @@ def build_model(num_classes: int, config: Dict) -> models.Model:
     else:
         raise ValueError(f"Unsupported loss function: {loss_fn_name}")
 
-    metrics_config = config.get('metrics', ['accuracy'])
     metrics_list = []
-    for m_name in metrics_config:
+    for m_name in metrics_cfg:
         m_name_lower = m_name.lower()
         if m_name_lower == 'accuracy':
             metrics_list.append('accuracy')
         elif m_name_lower == 'sparse_categorical_accuracy':
              metrics_list.append(metrics.SparseCategoricalAccuracy())
         elif m_name_lower == 'sparse_top_k_categorical_accuracy':
-             k = loss_config.get('top_k', 5)
+             k = loss_cfg.get('top_k', 5) # Assuming top_k might be in loss_cfg or a dedicated metrics_cfg section
              metrics_list.append(metrics.SparseTopKCategoricalAccuracy(k=k, name=f'top_{k}_accuracy'))
-        # Add other metrics as needed
         else:
             logger.warning(f"Unsupported metric '{m_name}' specified in config. Skipping.")
 
@@ -163,184 +160,160 @@ def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset
         model: Compiled Keras model.
         train_dataset: Training tf.data.Dataset.
         val_dataset: Validation tf.data.Dataset.
-        config: Dictionary containing training configuration.
+        config: Dictionary containing training configuration (the entire content of config.yaml).
         index_to_label_map: Mapping from integer index to string label.
 
     Raises:
         RuntimeError: If training fails.
     """
-    epochs = config.get('epochs', 50) # Correctly get epochs from the classification_training_data config
+    training_cfg = config.get('training', {})
+    paths_cfg = config.get('paths', {})
 
-    model_dir = config.get('paths', {}).get('model_save_dir', 'trained_models/classification')
-    log_dir = config.get('paths', {}).get('log_dir', 'logs/classification')
-    checkpoint_dir = os.path.join(model_dir, 'checkpoints') # Subdirectory for checkpoints
-    label_map_filename = config.get('paths', {}).get('label_map_filename', 'label_map.json')
+    epochs = training_cfg.get('epochs', 50)
 
-    # Resolve paths relative to project root
+    model_dir = paths_cfg.get('model_save_dir', 'trained_models/classification')
+    log_dir_rel = paths_cfg.get('log_dir', 'logs/classification') # log_dir is often relative in config
+    label_map_filename = paths_cfg.get('label_map_filename', 'label_map.json')
+    checkpoint_dir_rel = config.get('checkpoint_dir', os.path.join(model_dir, 'checkpoints')) # Use specific 'checkpoint_dir' or default
+
     project_root = _get_project_root()
-    model_dir = os.path.join(project_root, model_dir)
-    log_dir = os.path.join(project_root, log_dir)
-    checkpoint_dir = os.path.join(project_root, checkpoint_dir)
-    label_map_path = os.path.join(model_dir, label_map_filename)
+    model_dir_abs = os.path.join(project_root, model_dir)
+    log_dir_abs = os.path.join(project_root, log_dir_rel)
+    checkpoint_dir_abs = os.path.join(project_root, checkpoint_dir_rel)
+    label_map_path = os.path.join(model_dir_abs, label_map_filename)
 
-    os.makedirs(model_dir, exist_ok=True)
-    os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    logger.info(f"Model artifacts will be saved to: {model_dir}")
-    logger.info(f"TensorBoard logs will be saved to: {log_dir}")
+    os.makedirs(model_dir_abs, exist_ok=True)
+    os.makedirs(log_dir_abs, exist_ok=True)
+    os.makedirs(checkpoint_dir_abs, exist_ok=True)
+    logger.info(f"Model artifacts will be saved to: {model_dir_abs}")
+    logger.info(f"TensorBoard logs will be saved to: {log_dir_abs}")
 
     callbacks_list = []
-    callbacks_config = config.get('callbacks', {})
-    print(f"DEBUG: callbacks_config = {callbacks_config}") 
+    callbacks_config = training_cfg.get('callbacks', {})
+    # print(f"DEBUG: callbacks_config = {callbacks_config}") # Keep for debugging if needed
 
-    # Model Checkpoint
     if callbacks_config.get('model_checkpoint', {}).get('enabled', True):
         ckpt_config = callbacks_config['model_checkpoint']
-        filepath = os.path.join(checkpoint_dir, ckpt_config.get('filename_template', 'model_epoch-{epoch:02d}_val_loss-{val_loss:.2f}.h5'))
+        filepath = os.path.join(checkpoint_dir_abs, ckpt_config.get('filename_template', 'model_epoch-{epoch:02d}_val_loss-{val_loss:.2f}.h5'))
         callbacks_list.append(callbacks.ModelCheckpoint(
             filepath=filepath,
             monitor=ckpt_config.get('monitor', 'val_loss'),
+            mode=ckpt_config.get('mode', 'min'),
             save_best_only=ckpt_config.get('save_best_only', True),
             save_weights_only=ckpt_config.get('save_weights_only', False),
-            mode=ckpt_config.get('mode', 'min'),
             verbose=1
         ))
-        logger.info(f"ModelCheckpoint enabled: Monitor='{ckpt_config.get('monitor', 'val_loss')}', SaveBestOnly={ckpt_config.get('save_best_only', True)}")
+        logger.info(f"ModelCheckpoint enabled. Saving to {checkpoint_dir_abs}/")
 
-    # TensorBoard
-    if callbacks_config.get('tensorboard', {}).get('enabled', True):
-        tb_config = callbacks_config['tensorboard']
-        callbacks_list.append(callbacks.TensorBoard(
-            log_dir=log_dir,
-            histogram_freq=tb_config.get('histogram_freq', 1), # Log histograms every epoch
-            write_graph=tb_config.get('write_graph', True),
-            write_images=tb_config.get('write_images', False),
-            update_freq=tb_config.get('update_freq', 'epoch') # 'epoch' or 'batch'
-        ))
-        logger.info(f"TensorBoard enabled: Logging to {log_dir}")
-
-    # Early Stopping
     if callbacks_config.get('early_stopping', {}).get('enabled', True):
         es_config = callbacks_config['early_stopping']
         callbacks_list.append(callbacks.EarlyStopping(
             monitor=es_config.get('monitor', 'val_loss'),
-            patience=es_config.get('patience', 10),
-            min_delta=es_config.get('min_delta', 0.001),
             mode=es_config.get('mode', 'min'),
+            patience=es_config.get('patience', 10),
             restore_best_weights=es_config.get('restore_best_weights', True),
             verbose=1
         ))
-        logger.info(f"EarlyStopping enabled: Monitor='{es_config.get('monitor', 'val_loss')}', Patience={es_config.get('patience', 10)}")
+        logger.info("EarlyStopping enabled.")
 
-    # ReduceLROnPlateau
     if callbacks_config.get('reduce_lr_on_plateau', {}).get('enabled', True):
         lr_config = callbacks_config['reduce_lr_on_plateau']
         callbacks_list.append(callbacks.ReduceLROnPlateau(
             monitor=lr_config.get('monitor', 'val_loss'),
-            factor=lr_config.get('factor', 0.1),
-            patience=lr_config.get('patience', 5),
-            min_lr=lr_config.get('min_lr', 1e-6),
             mode=lr_config.get('mode', 'min'),
+            factor=lr_config.get('factor', 0.2),
+            patience=lr_config.get('patience', 5),
+            min_lr=lr_config.get('min_lr', 0.000001),
             verbose=1
         ))
-        logger.info(f"ReduceLROnPlateau enabled: Monitor='{lr_config.get('monitor', 'val_loss')}', Factor={lr_config.get('factor', 0.1)}")
+        logger.info("ReduceLROnPlateau enabled.")
 
-    # Save label map
-    try:
-        with open(label_map_path, 'w') as f:
-            json.dump(index_to_label_map, f, indent=4)
-        logger.info(f"Label map saved to: {label_map_path}")
-    except IOError as e:
-        logger.error(f"Failed to save label map to {label_map_path}: {e}")
+    if callbacks_config.get('tensorboard', {}).get('enabled', True):
+        tb_config = callbacks_config['tensorboard']
+        # Use log_dir_abs which is already resolved
+        callbacks_list.append(callbacks.TensorBoard(
+            log_dir=log_dir_abs, # Use absolute path
+            histogram_freq=tb_config.get('histogram_freq', 0),
+            write_graph=tb_config.get('write_graph', True),
+            update_freq=tb_config.get('update_freq', 'epoch')
+        ))
+        logger.info(f"TensorBoard logging enabled to {log_dir_abs}.")
 
-    # Start Training
-    logger.info(f"Starting training for {epochs} epochs...")
     try:
-        history = model.fit(
+        logger.info(f"Starting training for {epochs} epochs...")
+        model.fit(
             train_dataset,
             epochs=epochs,
             validation_data=val_dataset,
             callbacks=callbacks_list
         )
-        logger.info("Training finished.")
+        logger.info("Training completed.")
 
-        # Save the final model (best weights might already be saved by ModelCheckpoint)
-        final_model_path = os.path.join(model_dir, 'final_model.h5')
-        try:
-            model.save(final_model_path)
-            logger.info(f"Final model saved to: {final_model_path}")
-        except Exception as e:
-            logger.error(f"Failed to save final model: {e}")
+        # Save the final model
+        final_model_path = os.path.join(model_dir_abs, "final_model.h5")
+        model.save(final_model_path)
+        logger.info(f"Final trained model saved to: {final_model_path}")
+
+        # Save label map
+        with open(label_map_path, 'w') as f:
+            json.dump(index_to_label_map, f, indent=4)
+        logger.info(f"Label map saved to: {label_map_path}")
 
     except Exception as e:
-        logger.error(f"An error occurred during model training: {e}", exc_info=True)
-        # Force print traceback to stdout
-        print("--- DETAILED TRACEBACK ---")
-        print(traceback.format_exc())
-        print("-------------------------")
-        raise RuntimeError("Model training failed.") from e
+        logger.error(f"Training failed: {e}", exc_info=True)
+        raise RuntimeError(f"Training process encountered an error: {traceback.format_exc()}")
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Train classification model using a configuration file.")
-    parser.add_argument('--config', type=str, default='models/classification/config.yaml', help="Path to the YAML configuration file.")
+    parser = argparse.ArgumentParser(description="Train a classification model.")
+    # parser.add_argument("--config", type=str, default=CLASSIFICATION_CONFIG_PATH, help="Path to the training configuration YAML file.") # Defaulting to CLASSIFICATION_CONFIG_PATH
     args = parser.parse_args()
 
-    config_path = args.config
+    # config_path = args.config
+    config_path = CLASSIFICATION_CONFIG_PATH # Use the defined constant
+
     try:
+        logger.info(f"Loading configuration from: {config_path}")
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
-        logger.info(f"Loaded configuration from: {config_path}")
     except FileNotFoundError:
         logger.error(f"Configuration file not found at: {config_path}")
         return
     except yaml.YAMLError as e:
         logger.error(f"Error parsing configuration file: {e}")
         return
-
-    # Mixed Precision (Optional) 
-    if config.get('training', {}).get('use_mixed_precision', False) and tf.config.list_physical_devices('GPU'):
-        try:
-            from tensorflow.keras import mixed_precision
-            policy = mixed_precision.Policy('mixed_float16')
-            mixed_precision.set_global_policy(policy)
-            logger.info("Mixed precision training enabled (mixed_float16).")
-        except ImportError:
-            logger.warning("Mixed precision requested but failed to import/set policy.")
-        except Exception as e:
-            logger.error(f"Error setting mixed precision policy: {e}")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while loading config: {e}")
+        return
 
     try:
         logger.info("Loading and preparing datasets...")
-        # Pass only the 'classification_training_data' sub-configuration
-        train_dataset, val_dataset, index_to_label_map = load_classification_data(config['classification_training_data'])
-        num_classes = len(index_to_label_map)
+        # Pass the entire config dictionary to load_classification_data
+        train_ds, val_ds, index_to_label = load_classification_data(config) 
+        if train_ds is None:
+            raise ValueError("Failed to load training data.")
+        
+        num_classes = len(index_to_label)
         if num_classes == 0:
-             logger.error("No classes found in the dataset. Check metadata and data paths.")
-             return
-        logger.info(f"Data loaded successfully. Number of classes: {num_classes}")
-    except Exception as e:
-        logger.error(f"Failed to load data: {e}")
-        return
+            raise ValueError("No classes found. Label map is empty.")
+        logger.info(f"Number of classes: {num_classes}")
 
-    try:
-        # Pass the 'classification_training_data' sub-configuration (and num_classes)
-        model = build_model(num_classes=num_classes, config=config['classification_training_data'])
-    except Exception as e:
-        logger.error(f"Failed to build model: {e}")
-        return
-    try:
-        # Pass the entire 'classification_training_data' sub-configuration
-        train_model(model, train_dataset, val_dataset, config['classification_training_data'], index_to_label_map)
-    except BaseException as e: # Catch BaseException to include things like SystemExit
-        # Error already logged in train_model # This comment might be wrong
-        # logger.info("Training process terminated due to error.") # Replace this
-        logger.error(f"Error caught in main during training: {e}", exc_info=True) # Add detailed log
-        print("--- TRACEBACK FROM MAIN ---") # Add print for redundancy
-        print(traceback.format_exc())
-        print("-------------------------")
-        return
+        logger.info("Building model...")
+        # Pass the entire config dictionary to build_model
+        model = build_model(num_classes=num_classes, config=config) 
 
-    logger.info("Classification training script finished.")
+        logger.info("Starting model training...")
+        # Pass the entire config dictionary to train_model
+        train_model(model, train_ds, val_ds, config=config, index_to_label_map=index_to_label)
+
+        logger.info("Classification model training finished successfully.")
+
+    except ValueError as e:
+        logger.error(f"Configuration or data error: {e}", exc_info=True)
+    except RuntimeError as e:
+        logger.error(f"Training runtime error: {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during the training process: {e}", exc_info=True)
 
 if __name__ == '__main__':
     main()
