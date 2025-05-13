@@ -1,10 +1,11 @@
 data:
-  image_dir: "data/segmentation/images/" 
-  mask_dir: "data/segmentation/masks/"
+  metadata_path: "data/MetaFood3D_RGBD_segmentation/metadata.json" # Path relative to project root
+  # image_dir: "data/segmentation/images/" # Commented out: metadata.json will be used
+  # mask_dir: "data/segmentation/masks/"   # Commented out: metadata.json will be used
   image_size: [256, 256] 
   batch_size: 16
-  validation_split_ratio: 0.0 # Set to 0.0 for dummy run
-  test_split_ratio: 0.0 # Set to 0.0 for dummy run
+  validation_split_ratio: 0.2 # Updated from 0.0, adjust as needed
+  test_split_ratio: 0.1     # Updated from 0.0, adjust as needed
   num_classes: 2 # Number of segmentation classes (e.g., 1 for foreground + 1 for background, or N food classes + background)
   # Add color mapping if masks are color-coded instead of integer-based
   # color_map: 
@@ -54,7 +55,7 @@ metrics: ["iou_metric"] # e.g., ['iou_metric', 'dice_coefficient', 'accuracy']
 
 # Training Configuration
 training:
-  epochs: 1 # Set to 1 for a quick test
+  epochs: 1 # IMPORTANT: Increase for actual training after testing pipeline
   use_mixed_precision: false
 
   callbacks:
@@ -112,7 +113,7 @@ export:
   tflite_filename: "segmentation_model.tflite"
 
   quantization:
-    type: "default" # 'none', 'default', 'float16', 'int8'
+    type: "default" # 'none', 'default', 'float16', 'int8'. Review for segmentation; int8 might need representative_dataset enabled.
     representative_dataset:
-      enabled: false 
+      enabled: false # Set to true if int8 quantization is used and representative data is needed
       num_samples: 50
