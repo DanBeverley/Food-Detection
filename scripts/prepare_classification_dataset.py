@@ -34,6 +34,8 @@ def create_dataset_metadata(source_rgbd_base_dir_path: str, output_metadata_dir_
 
     all_metadata_entries = []
     class_counts = {}
+    label_to_index = {} # To store class name to integer mapping
+    next_label_index = 0 # Counter for assigning new labels
     total_images_referenced = 0
 
     logging.info(f"Scanning source directory: {source_dir} to generate metadata (no images will be copied).")
@@ -63,6 +65,11 @@ def create_dataset_metadata(source_rgbd_base_dir_path: str, output_metadata_dir_
                 logging.warning(f"  No 'original' folder found in instance '{instance_name}' for class '{class_name}'. Skipping.")
                 continue
 
+            # Ensure class_name is in label_to_index map
+            if class_name not in label_to_index: # Check and assign new label
+                label_to_index[class_name] = next_label_index
+                next_label_index += 1
+
             image_files = list(original_folder.glob('*[.jpg][.jpeg][.png][.gif]'))
             if not image_files:
                 continue
@@ -72,7 +79,8 @@ def create_dataset_metadata(source_rgbd_base_dir_path: str, output_metadata_dir_
                     # Reference the original image directly
                     metadata_entry = {
                         "image_path": str(img_path.resolve()), # Absolute path to original image
-                        "label": class_name
+                        "class_name": class_name,
+                        "instance_name": instance_folder.name
                     }
                     all_metadata_entries.append(metadata_entry)
                     class_image_count += 1
@@ -90,10 +98,20 @@ def create_dataset_metadata(source_rgbd_base_dir_path: str, output_metadata_dir_
         logging.error("No images were referenced. Metadata file will not be created.")
         return
 
+    # Create index_to_label for saving the label_map.json in the desired format
+    index_to_label = {v: k for k, v in label_to_index.items()}
+    label_map_file_path = output_meta_dir / "label_map.json" # Path for label_map.json
+
     try:
         with open(metadata_file_path, 'w') as f:
             json.dump(all_metadata_entries, f, indent=2)
         logging.info(f"Successfully created metadata file at: {metadata_file_path}")
+
+        with open(label_map_file_path, 'w') as f: # Save label_map.json
+            json.dump(index_to_label, f, indent=2)
+        logging.info(f"Successfully created label map file at: {label_map_file_path}")
+        logging.info(f"Total unique classes found: {len(label_to_index)}")
+
         logging.info(f"Total images referenced overall: {total_images_referenced}")
         logging.info("Image counts per class in the metadata file:")
         for class_name, count in class_counts.items():
@@ -102,7 +120,7 @@ def create_dataset_metadata(source_rgbd_base_dir_path: str, output_metadata_dir_
             logging.info(f"  {class_name}: {count} (For reference: approx. train {approx_train}, approx. val {approx_val} based on {train_val_split_ratio_for_log*100}% val split)")
 
     except IOError as e:
-        logging.error(f"Failed to write metadata file: {e}")
+        logging.error(f"Failed to write metadata or label map file: {e}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Prepare classification dataset metadata by referencing original images from a nested structure. No images are copied.")
