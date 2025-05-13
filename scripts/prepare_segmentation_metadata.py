@@ -103,7 +103,9 @@ def create_segmentation_metadata(source_rgbd_base_dir_path: str, output_metadata
                     try:
                         pair_entry = {
                             "image_path": str(img_path.resolve()),
-                            "mask_path": str(found_mask_path.resolve())
+                            "mask_path": str(found_mask_path.resolve()),
+                            "class_name": class_name,
+                            "instance_name": instance_name
                         }
                         all_metadata_pairs.append(pair_entry)
                         total_pairs_found += 1
