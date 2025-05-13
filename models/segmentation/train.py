@@ -1,9 +1,15 @@
-import tensorflow as tf
-import yaml
 import os
-import pathlib
+import sys
+import yaml
 import logging
+import tensorflow as tf
+from pathlib import Path
 from datetime import datetime
+
+# Add _get_project_root function definition
+def _get_project_root() -> Path:
+    """Assumes this script is in Food-Detection/models/segmentation/"""
+    return Path(__file__).resolve().parent.parent.parent
 
 # Assuming data.py is in the same directory or accessible in PYTHONPATH
 from data import load_segmentation_data # Use relative import
@@ -13,9 +19,6 @@ logger = logging.getLogger(__name__)
 
 # Path to the specific config file for segmentation training
 SEGMENTATION_CONFIG_PATH = os.path.join(_get_project_root(), "models", "segmentation", "config.yaml")
-
-def _get_project_root() -> pathlib.Path:
-    return pathlib.Path(__file__).resolve().parent.parent.parent
 
 def load_config(config_path: str) -> dict:
     """Loads the YAML configuration file."""
@@ -80,7 +83,8 @@ def unet_model(output_channels: int, image_size: tuple, model_config: dict) -> t
     conv7 = tf.keras.layers.Conv2D(64, 3, activation='relu', padding='same', kernel_initializer=kernel_initializer)(conv7)
 
     # Output layer
-    final_activation = model_config.get('final_activation', 'sigmoid') # from config
+    # Ensure this key matches the one used in config.yaml (model -> activation)
+    final_activation = model_config.get('activation', 'sigmoid') 
     outputs = tf.keras.layers.Conv2D(output_channels, 1, activation=final_activation)(conv7)
 
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
@@ -90,7 +94,7 @@ def unet_model(output_channels: int, image_size: tuple, model_config: dict) -> t
 def main():
     project_root = _get_project_root()
     # config_file_path = project_root / 'config_pipeline.yaml'
-    config_file_path = pathlib.Path(SEGMENTATION_CONFIG_PATH) # Use the specific config path
+    config_file_path = Path(SEGMENTATION_CONFIG_PATH) # Use the specific config path
     config = load_config(config_file_path)
 
     # seg_config = config.get('segmentation_training_data')
@@ -137,7 +141,10 @@ def main():
 
     loss_fn_name = loss_cfg.get('name', 'BinaryCrossentropy').lower()
     if loss_fn_name == 'binarycrossentropy':
-        loss_function = tf.keras.losses.BinaryCrossentropy(from_logits=model_cfg.get('final_activation') != 'sigmoid')
+        # Determine from_logits based on whether the model's final layer has a sigmoid
+        # This should align with the 'activation' specified in the model_cfg for the unet_model
+        model_final_activation = model_cfg.get('activation', 'sigmoid') # Default to 'sigmoid' if not specified
+        loss_function = tf.keras.losses.BinaryCrossentropy(from_logits=(model_final_activation != 'sigmoid'))
     # Add other loss functions if needed, e.g., Dice Loss
     # elif loss_fn_name == 'dice_loss':
     #     # Placeholder for a custom Dice Loss implementation or from a library
@@ -232,12 +239,23 @@ def main():
     logger.info(f"Training data examples: {train_dataset.unbatch().take(1) if hasattr(train_dataset, 'unbatch') else 'N/A'}") # Log one example
     logger.info(f"Validation data examples: {val_dataset.unbatch().take(1) if val_dataset and hasattr(val_dataset, 'unbatch') else 'None'}")
 
+    fit_kwargs = {
+        'epochs': epochs,
+        'callbacks': callbacks_list,
+        'verbose': 1,
+        'steps_per_epoch': 20 # For faster pipeline testing, process fewer batches
+    }
+
+    if val_dataset:
+        fit_kwargs['validation_data'] = val_dataset
+        fit_kwargs['validation_steps'] = 5 # For faster pipeline testing
+    else:
+        logger.info("No validation dataset provided or it's empty. Skipping validation during fit.")
+        # No need to explicitly pass validation_data=None if not present in kwargs
+
     history = model.fit(
         train_dataset,
-        epochs=epochs,
-        callbacks=callbacks_list,
-        validation_data=val_dataset, 
-        verbose=1
+        **fit_kwargs
     )
 
     logger.info("Training finished.")
