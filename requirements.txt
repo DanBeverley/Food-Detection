@@ -1,8 +1,8 @@
-numpy>=1.20
+numpy>=1.20,<2.0 # Constrain to 1.x for compatibility
 scipy>=1.7
 requests>=2.25 # Added based on density_lookup.py usage
 scikit-learn # For model_selection.train_test_split
 tensorflow-addons # For focal loss etc.
 trimesh>=3.0 # For 3D mesh processing (.obj, .ply)
 PyYAML>=5.0 # For loading YAML configuration files
-typing_extensions>=4.7.0 # For modern typing features, resolves TypeIs import error
+typing_extensions>=4.8.0 # For modern typing features, satisfies ultralytics requirement

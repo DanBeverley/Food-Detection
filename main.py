@@ -50,7 +50,7 @@ def main():
         # Run the analysis
         analysis_results = analyze_food_item(
             image_path=args.image,
-            config=config,
+            config_path=config_abs_path,
             depth_map_path=args.depth,
             mesh_file_path=args.mesh_file_path,
             point_cloud_file_path=args.point_cloud_file,
