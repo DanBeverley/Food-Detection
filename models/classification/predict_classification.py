@@ -134,10 +134,24 @@ def load_classification_model(tflite_model_path: str, labels_path: str = None):
 
     return interpreter, input_details, output_details, class_labels
 
-def preprocess_classification_image(image_path: str, target_size_hw: tuple) -> np.ndarray:
+def preprocess_classification_image(
+    image_path: str = None, 
+    image_data: np.ndarray = None, 
+    target_size_hw: tuple = None
+) -> np.ndarray:
     """Loads and preprocesses an image for classification."""
+    if image_data is None and image_path is None:
+        raise ValueError("Either image_path or image_data must be provided.")
+    if target_size_hw is None:
+        raise ValueError("target_size_hw must be provided.")
+
     try:
-        img = Image.open(image_path).convert('RGB')
+        if image_data is not None:
+            # Assuming image_data is an RGB NumPy array
+            img = Image.fromarray(image_data.astype(np.uint8))
+        else:
+            img = Image.open(image_path).convert('RGB')
+        
         # Resize using target_size (PIL uses W, H)
         target_size_wh = (target_size_hw[1], target_size_hw[0])
         img_resized = img.resize(target_size_wh, Image.BILINEAR) # Or other interpolation like ANTIALIAS
@@ -152,20 +166,21 @@ def preprocess_classification_image(image_path: str, target_size_hw: tuple) -> n
         input_data = np.expand_dims(preprocessed_img, axis=0)
         return input_data
 
-    except FileNotFoundError:
+    except FileNotFoundError: # Only relevant if image_path was used
         logging.error(f"Image file not found: {image_path}")
         raise
     except Exception as e:
-        logging.error(f"Error loading or preprocessing classification image {image_path}: {e}")
+        logging.error(f"Error loading or preprocessing classification image: {e}")
         raise
 
 def run_classification_inference(
     interpreter: tf.lite.Interpreter,
     input_details: list,
     output_details: list,
-    image_path: str,
-    model_input_size_hw: tuple,
-    class_labels: list = None
+    model_input_size_hw: tuple, # Keep this required
+    class_labels: list = None,
+    image_path: str = None, # Make path optional
+    image_data: np.ndarray = None # Add image_data
 ) -> tuple[str | int, float] | tuple[None, None]:
     """
     Runs classification inference on a single image.
@@ -174,16 +189,26 @@ def run_classification_inference(
         interpreter: Loaded TFLite interpreter.
         input_details: Interpreter input details.
         output_details: Interpreter output details.
-        image_path: Path to the input image.
         model_input_size_hw: Expected input size (H, W) of the TFLite model.
         class_labels (list, optional): List of class labels corresponding to output indices.
+        image_path (str, optional): Path to the input image.
+        image_data (np.ndarray, optional): NumPy array of the image (RGB format).
 
     Returns:
         tuple: (predicted_label, confidence_score) or (None, None) on failure.
                Label is the string from class_labels if provided, otherwise the class index.
     """
+    if image_data is None and image_path is None:
+        logging.error("Either image_path or image_data must be provided to run_classification_inference.")
+        return None, None
+    # model_input_size_hw is already checked effectively by its use in preprocess_classification_image
+
     try:
-        input_data = preprocess_classification_image(image_path, model_input_size_hw)
+        input_data = preprocess_classification_image(
+            image_path=image_path, 
+            image_data=image_data, 
+            target_size_hw=model_input_size_hw
+        )
 
         # Check input tensor type and scale if necessary (e.g., for UINT8 models)
         input_dtype = input_details[0]['dtype']
@@ -277,7 +302,10 @@ def predict_standalone(config_path: str, image_path: str, top_k: int = 1):
 
     # Preprocess Image
     try:
-        input_data = preprocess_classification_image(image_path, model_input_size_hw)
+        input_data = preprocess_classification_image(
+            image_path=image_path, 
+            target_size_hw=model_input_size_hw
+        )
     except Exception:
         return 
 
