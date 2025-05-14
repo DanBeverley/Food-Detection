@@ -20,7 +20,7 @@ TEST_CASES = [
             "mask_path": "E:/_MetaFood3D_new_RGBD_videos/RGBD_videos/Apple/apple_1/masks/0.jpg",
             "mesh_file_path": "E:/_MetaFood3D_new_3D_Mesh/3D_Mesh/Apple/apple_1/apple_1.obj",
             "point_cloud_file": "E:/_MetaFood3D_new_Point_cloud/Point_cloud/4096/Apple/apple_1/apple_1_sampled_1.ply",
-            "api_key": "zMUj0HH7Y269G0VvO5aowSVdlCNH8PmMrL37aNow", # Consider moving to env var for tests
+            # "api_key": "zMUj0HH7Y269G0VvO5aowSVdlCNH8PmMrL37aNow", # Removed, will rely on env var
             "config": CONFIG_PATH
         },
         "expected_outputs": {
@@ -48,7 +48,7 @@ class TestFoodAnalysisPipeline(unittest.TestCase):
                 # Convert argument names from snake_case (used in dict) to kebab-case or as expected by main.py
                 # For main.py, it's mostly --snake_case
                 arg_name = f"--{key.replace('_', '-')}" 
-                if key == "mask_path" or key == "mesh_file_path" or key == "point_cloud_file" or key == "api_key" or key == "config" or key=="image" or key=="depth":
+                if key == "mask_path" or key == "mesh_file_path" or key == "point_cloud_file" or key == "config" or key=="image" or key=="depth":
                      arg_name = f"--{key}"
 
                 args.extend([arg_name, str(value)])
