@@ -196,9 +196,33 @@ def analyze_food_item(
             logging.info(f"Using known food class: {food_label}")
         else:
             target_clf_size = tuple(config['model_params']['classification_input_size'])
+            
+            # Load image for classification
+            img_for_clf = cv2.imread(image_path)
+            if img_for_clf is None:
+                logging.error(f"Failed to load image for classification from {image_path}")
+                return None
+            img_for_clf_rgb = cv2.cvtColor(img_for_clf, cv2.COLOR_BGR2RGB)
+
+            # Resize segmentation_mask to match img_for_clf_rgb dimensions
+            # segmentation_mask is (H_mask, W_mask), img_for_clf_rgb is (H_img, W_img, C)
+            # We need to resize mask to (H_img, W_img)
+            resized_segmentation_mask = cv2.resize(
+                segmentation_mask.astype(np.uint8), 
+                (img_for_clf_rgb.shape[1], img_for_clf_rgb.shape[0]), # (W, H) for cv2.resize
+                interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
+
+            # Apply mask to create a cropped/masked image for classification
+            # Create a black image and copy only the masked region
+            masked_img_for_clf = np.zeros_like(img_for_clf_rgb)
+            masked_img_for_clf[resized_segmentation_mask] = img_for_clf_rgb[resized_segmentation_mask]
+
             classified_label, classified_confidence = run_classification_inference(
                 clf_interpreter, clf_input_details, clf_output_details,
-                image_path, target_clf_size, class_labels
+                model_input_size_hw=target_clf_size, # Pass model_input_size_hw explicitly
+                class_labels=class_labels,
+                image_data=masked_img_for_clf # Pass image data array
             )
             if classified_label is None:
                 logging.error("Image-based classification failed to return a label.")
