@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--output", help="Optional path to save the results as a JSON file.")
     parser.add_argument("--api_key", default=os.environ.get("USDA_API_KEY"),
                         help="USDA API Key for density lookup. Defaults to USDA_API_KEY environment variable.")
+    parser.add_argument("--mask_path", help="Optional path to a pre-computed segmentation mask image.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging.")
 
     args = parser.parse_args()
@@ -54,7 +55,8 @@ def main():
             mesh_file_path=args.mesh_file_path,
             point_cloud_file_path=args.point_cloud_file,
             known_food_class=args.known_food_class,
-            usda_api_key=args.api_key
+            usda_api_key=args.api_key,
+            mask_path=args.mask_path
         )
 
         if analysis_results:

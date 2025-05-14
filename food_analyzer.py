@@ -57,31 +57,33 @@ def load_pipeline_config(config_path: str) -> dict:
 # Core Analysis Function
 
 def analyze_food_item(
+    config_path: str,
     image_path: str,
-    config: dict,
     depth_map_path: str | None = None,  
     mesh_file_path: str | None = None,  
     point_cloud_file_path: str | None = None,  
     known_food_class: str | None = None, 
-    usda_api_key: str | None = None
+    usda_api_key: str | None = None,
+    mask_path: str | None = None
 ) -> dict | None:
     """
     Runs the full food analysis pipeline: segmentation, classification, volume, density, mass.
 
     Args:
+        config_path (str): Path to the pipeline configuration file.
         image_path (str): Path to the input RGB image.
-        config (dict): Loaded pipeline configuration dictionary.
         depth_map_path (str | None, optional): Path to the corresponding depth map. Defaults to None.
         mesh_file_path (str | None, optional): Path to a 3D mesh file for volume calculation. Defaults to None.
         point_cloud_file_path (str | None, optional): Path to a 3D point cloud file (e.g., .ply) for volume calculation. Defaults to None.
         known_food_class (str | None, optional): If the food class is already known, provide it here. Defaults to None.
         usda_api_key (str | None, optional): USDA API key for density lookup fallback. Defaults to None.
+        mask_path (str | None, optional): Path to a pre-computed segmentation mask. Defaults to None.
 
     Returns:
         dict | None: A dictionary containing analysis results, or None if a critical step fails.
                      Keys include: 'food_label', 'confidence', 'volume_cm3', 'volume_method',
                      'density_g_cm3', 'estimated_mass_g', 'calories_kcal_per_100g',
-                     'estimated_total_calories', 'segmentation_mask_shape'.
+                     'estimated_total_calories', 'segmentation_mask_shape', 'segmentation_source'.
     """
     results = {
         'food_label': None,
@@ -143,47 +145,87 @@ def analyze_food_item(
         logging.error(f"Critical error during input data loading: {e}", exc_info=True)
         return None
 
-    #2. Load Models 
-    try:
-        t0 = time.time()
-        seg_model_path = os.path.join(project_root, config['models']['segmentation_tflite'])
-        seg_interpreter, seg_input_details, seg_output_details = load_segmentation_model(seg_model_path)
+    # 2. Load Depth Map (if provided)
+    if depth_map_path and os.path.exists(depth_map_path):
+        logging.debug(f"Depth map loaded with shape: {depth_map.shape}, min_val: {depth_map.min()}, max_val: {depth_map.max()}")
+    else:
+        logging.info("No depth map path provided or file not found.")
 
-        clf_model_path = os.path.join(project_root, config['models']['classification_tflite'])
-        class_labels_path_rel = config['models'].get('classification_labels') 
-        class_labels_path = None
-        if class_labels_path_rel:
-            class_labels_path = os.path.join(project_root, class_labels_path_rel) 
-        
-        clf_interpreter, clf_input_details, clf_output_details, class_labels = load_classification_model(clf_model_path, labels_path=class_labels_path)
-        logging.info("Loaded segmentation and classification models.")
-        results['timing']['load_models'] = time.time() - t0
-    except FileNotFoundError as e:
-         logging.error(f"Model file not found: {e}. Check paths in config_pipeline.yaml.")
-         return None
-    except Exception as e:
-        logging.error(f"Failed to load models: {e}")
-        return None
-    try:
-        t0 = time.time()
-        seg_input_size = tuple(config['model_params']['segmentation_input_size'])
-        seg_num_classes = config['model_params'].get('segmentation_num_classes', 2) 
-        
-        segmentation_mask = run_segmentation_inference(
-            seg_interpreter, seg_input_details, seg_output_details,
-            image_path, seg_input_size, depth_map.shape, 
-            num_classes=seg_num_classes 
-        )
-        if segmentation_mask is None:
-            logging.error("Segmentation failed.")
-            return None
-        segmentation_mask = segmentation_mask.astype(bool)
+    # 3. Food Segmentation
+    segmentation_mask = None
+    segmentation_source = "unknown" # Initialize segmentation source
+    t0_seg_overall = time.time() # Start timing for overall segmentation process
+
+    if mask_path and os.path.exists(mask_path):
+        try:
+            loaded_mask_gray = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            if loaded_mask_gray is not None:
+                # Threshold to ensure a binary mask, assuming mask pixels > 1 are foreground
+                _, thresholded_mask = cv2.threshold(loaded_mask_gray, 1, 255, cv2.THRESH_BINARY)
+                segmentation_mask = thresholded_mask.astype(bool)
+                logging.info(f"Successfully loaded pre-computed mask from: {mask_path} with initial shape {segmentation_mask.shape}")
+                segmentation_source = f"precomputed_mask_file: {os.path.basename(mask_path)}"
+            else:
+                logging.warning(f"cv2.imread returned None for {mask_path}. Falling back to model generation.")
+        except Exception as e_load_mask:
+            logging.warning(f"Error loading mask from {mask_path}: {e_load_mask}. Falling back to model generation.")
+
+    if segmentation_mask is None: # Fallback if not loaded or path not provided or load failed
+        logging.info("No valid pre-computed mask available, attempting to generate mask using model.")
+        try:
+            # Load Segmentation Model (only if needed)
+            config = load_pipeline_config(config_path)
+            seg_model_path = str(project_root / config['models']['segmentation_tflite'])
+            # Assuming load_segmentation_model is defined elsewhere and handles TFLite loading
+            seg_interpreter, seg_input_details, seg_output_details = load_segmentation_model(seg_model_path)
+            target_seg_size = tuple(config['model_params']['segmentation_input_size'])
+
+            segmentation_mask = run_segmentation_inference(
+                seg_interpreter, seg_input_details, seg_output_details,
+                image_path, target_seg_size
+            )
+            logging.info(f"Generated mask using model with initial shape: {segmentation_mask.shape}")
+            segmentation_source = "model_generated"
+        except Exception as e_seg_model:
+            logging.exception(f"Error during model-based segmentation: {e_seg_model}")
+            results['error_message'] = f"Segmentation (model-based) failed: {e_seg_model}"
+            # segmentation_mask remains None
+
+    # Resize mask (loaded or generated) and finalize
+    if segmentation_mask is not None:
+        target_h, target_w = -1, -1
+        resize_info = "original image shape"
+        if depth_map is not None:
+            target_h, target_w = depth_map.shape[:2]
+            resize_info = "depth map shape"
+        else: 
+            temp_img_for_shape = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+            if temp_img_for_shape is not None:
+                target_h, target_w = temp_img_for_shape.shape[:2]
+            else:
+                logging.warning("Could not read image to determine target shape for mask resizing (depth map absent). Using mask's current shape.")
+                target_h, target_w = segmentation_mask.shape[:2] # Default to current shape if image load fails
+                resize_info = "mask's current shape (image load failed for fallback resizing)"
+
+        if segmentation_mask.shape[0] != target_h or segmentation_mask.shape[1] != target_w:
+            logging.info(f"Resizing segmentation mask from {segmentation_mask.shape} to ({target_h}, {target_w}) based on {resize_info}.")
+            segmentation_mask = cv2.resize(
+                segmentation_mask.astype(np.uint8) * 255, # Convert boolean to 0/255 for resize
+                (target_w, target_h),
+                interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
         results['segmentation_mask_shape'] = segmentation_mask.shape
-        logging.info(f"Segmentation successful. Mask shape: {segmentation_mask.shape}")
-        results['timing']['segmentation'] = time.time() - t0
-    except Exception as e:
-        logging.exception(f"Error during segmentation: {e}") 
-        return None
+        logging.info(f"Final segmentation mask shape: {segmentation_mask.shape} (Source: {segmentation_source})")
+    else:
+        logging.error("Segmentation failed: mask is None after all attempts.")
+        results['segmentation_mask_shape'] = None
+        # Append to existing error message if it exists
+        current_error = results.get('error_message', '')
+        additional_error = "Segmentation failed: mask is None after all attempts."
+        results['error_message'] = f"{current_error} | {additional_error}" if current_error else additional_error
+
+    results['timing']['segmentation'] = time.time() - t0_seg_overall
+    results['segmentation_source'] = segmentation_source # Store how the mask was obtained
 
     # 4. Determine Food Class 
     food_label = None
@@ -195,6 +237,7 @@ def analyze_food_item(
             confidence = 1.0  
             logging.info(f"Using known food class: {food_label}")
         else:
+            config = load_pipeline_config(config_path)
             target_clf_size = tuple(config['model_params']['classification_input_size'])
             
             # Load image for classification
@@ -218,6 +261,13 @@ def analyze_food_item(
             masked_img_for_clf = np.zeros_like(img_for_clf_rgb)
             masked_img_for_clf[resized_segmentation_mask] = img_for_clf_rgb[resized_segmentation_mask]
 
+            clf_model_path = os.path.join(project_root, config['models']['classification_tflite'])
+            class_labels_path_rel = config['models'].get('classification_labels') 
+            class_labels_path = None
+            if class_labels_path_rel:
+                class_labels_path = os.path.join(project_root, class_labels_path_rel) 
+        
+            clf_interpreter, clf_input_details, clf_output_details, class_labels = load_classification_model(clf_model_path, labels_path=class_labels_path)
             classified_label, classified_confidence = run_classification_inference(
                 clf_interpreter, clf_input_details, clf_output_details,
                 model_input_size_hw=target_clf_size, # Pass model_input_size_hw explicitly
@@ -264,6 +314,7 @@ def analyze_food_item(
         
         if volume_cm3 is None:
             logging.info("Attempting volume estimation from depth map and segmentation mask.")
+            config = load_pipeline_config(config_path)
             cam_intrinsics = config.get('camera_intrinsics')
             if not cam_intrinsics:
                 logging.error("Camera intrinsics not found in config. Cannot estimate volume from depth map.")
