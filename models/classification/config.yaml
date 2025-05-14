@@ -1,6 +1,6 @@
 data:
-  metadata_path: "C:/Users/ADMIN/Documents/GitHub/Food-Detection/data/dummy_classification/metadata.json" # Point to dummy metadata
-  data_dir: "C:/Users/ADMIN/Documents/GitHub/Food-Detection/data/dummy_classification/processed"      # Point to dummy processed data
+  metadata_path: "data/classification/metadata.json" # Path relative to project root
+  # data_dir: "C:/Users/ADMIN/Documents/GitHub/Food-Detection/data/dummy_classification/processed" # Commented out: metadata.json now uses absolute paths
   image_size: [224, 224]
   batch_size: 32
   split_ratio: 0.2
@@ -81,9 +81,15 @@ training:
 
 # Paths Configuration (Used by Train and Export)
 paths:
+  # Directory where the prepare_classification_dataset.py script saves its output.
+  # This directory should contain 'metadata.json' and 'label_map.json'.
+  # This is also the directory from which train.py will load these files.
+  data_dir: "data/classification" # General directory for processed classification data
+  metadata_filename: "metadata.json" # To be found in data_dir
+  label_map_dir: "data/classification" # Path relative to project root, where label_map.json is found
+  label_map_filename: "label_map.json" # To be found in label_map_dir
   model_save_dir: "trained_models/classification/"
   log_dir: "logs/classification/"
-  label_map_filename: "label_map.json" 
   tflite_export_dir: "trained_models/classification/exported/" 
 
 export:
@@ -91,7 +97,7 @@ export:
 
   # Quantization Settings
   quantization:
-    type: "default"
+    type: "int8" # Updated from 'default' as per previous request
     representative_dataset: 
       enabled: true 
       num_samples: 100 
