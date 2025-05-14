@@ -30,7 +30,7 @@ This project provides a Python-based pipeline for analyzing food images. It perf
 The analysis is orchestrated by `main.py` and `food_analyzer.py`:
 
 1.  **Initialization (`main.py`)**:
-    *   Parses command-line arguments: paths to the input image, depth map (optional), mesh file path (optional), configuration file, and USDA API key (optional).
+    *   Parses command-line arguments: paths to the input image, depth map (optional), mesh file path (optional), configuration file.
     *   Calls the main analysis function in `food_analyzer.py`.
 
 2.  **Core Analysis (`food_analyzer.py` - `analyze_food_item` function)**:
@@ -122,15 +122,23 @@ The main configuration for the pipeline is done via `config_pipeline.yaml`. This
 
 ## How to Run
 
+Before running, ensure the `USDA_API_KEY` environment variable is set if you intend to use the USDA FoodData Central API for nutritional lookups when items are not found in the local custom database.
+
+Example (Windows PowerShell):
+`$env:USDA_API_KEY="YOUR_KEY_HERE"`
+
+Example (Bash/Zsh):
+`export USDA_API_KEY="YOUR_KEY_HERE"`
+
 Execute the `main.py` script with the required arguments. Example:
 
 ```bash
-python main.py --image "path/to/your/image.jpg" --depth "path/to/your/depth_map.npy_or_png" --mesh_file_path "path/to/your/mesh.obj" --config "config_pipeline.yaml" --api_key "YOUR_USDA_API_KEY_IF_NEEDED"
+python main.py --image "path/to/your/image.jpg" --depth "path/to/your/depth_map.npy_or_png" --mesh_file_path "path/to/your/mesh.obj" --config "config_pipeline.yaml"
 ```
 *   `--depth`: Optional. Path to the depth map. If a `--mesh_file_path` is also provided, the mesh file will take precedence for volume estimation.
 *   `--mesh_file_path`: Optional. Path to a 3D mesh file (e.g., `.obj`). Takes precedence over `--depth` for volume estimation.
 *   If neither `--depth` nor `--mesh_file_path` is valid, a dummy depth map might be used for basic pipeline flow, but volume/mass/calorie estimates will be unreliable.
-*   `--api_key`: Optional. Needed if you want to use the USDA API for density and calorie lookups if the food item isn't in your custom DB.
+*   The pipeline will automatically use the `USDA_API_KEY` from your environment if needed for lookups not covered by the local `custom_density_db.json`.
 
 ## Future Enhancements (from original vision)
 
