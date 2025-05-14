@@ -10,6 +10,9 @@ model_params:
   # Add the number of output classes for your segmentation model (e.g., 2 for binary background/foreground)
   segmentation_num_classes: 2 # Verify this number (e.g., 2 for background/foreground)
   classification_input_size: [224, 224] # Verify from classification training config
+  # Minimum confidence score for a classification to be considered valid.
+  # Predictions below this threshold will be flagged or handled as 'uncertain'.
+  classification_confidence_threshold: 0.6
 
 camera_intrinsics:
   fx: 1120.42 # Focal length in x, in pixels
