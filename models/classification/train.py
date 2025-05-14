@@ -16,13 +16,14 @@ logger = logging.getLogger(__name__)
 # Path to the specific config file for classification training
 CLASSIFICATION_CONFIG_PATH = os.path.join(_get_project_root(), "models", "classification", "config.yaml")
 
-def build_model(num_classes: int, config: Dict) -> models.Model:
+def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.Model:
     """
     Build and compile a classification model based on the configuration.
 
     Args:
         num_classes: Number of output classes.
         config: Dictionary containing classification training configuration (the entire content of config.yaml).
+        learning_rate_to_use: The learning rate value (float) or a tf.keras.optimizers.schedules.LearningRateSchedule instance.
 
     Returns:
         Compiled Keras model.
@@ -114,14 +115,16 @@ def build_model(num_classes: int, config: Dict) -> models.Model:
     outputs = layers.Dense(num_classes, activation=final_activation)(x)
     model = models.Model(inputs, outputs)
 
-    learning_rate = optimizer_cfg.get('learning_rate', 0.001)
+    # learning_rate = optimizer_cfg.get('learning_rate', 0.001) # Old: Read static LR from optimizer_cfg
+    # Use the passed learning_rate_to_use, which can be a static value or a schedule
+    current_learning_rate = learning_rate_to_use 
     optimizer_name = optimizer_cfg.get('name', 'Adam').lower()
 
     if optimizer_name == 'adam':
-        optimizer = optimizers.Adam(learning_rate=learning_rate)
+        optimizer = optimizers.Adam(learning_rate=current_learning_rate)
     elif optimizer_name == 'sgd':
         momentum = optimizer_cfg.get('momentum', 0.9)
-        optimizer = optimizers.SGD(learning_rate=learning_rate, momentum=momentum)
+        optimizer = optimizers.SGD(learning_rate=current_learning_rate, momentum=momentum)
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
@@ -147,7 +150,7 @@ def build_model(num_classes: int, config: Dict) -> models.Model:
         else:
             logger.warning(f"Unsupported metric '{m_name}' specified in config. Skipping.")
 
-    logger.info(f"Compiling model with optimizer: {optimizer_name}, learning_rate: {learning_rate}, loss: {loss_fn_name}, metrics: {[m.name if hasattr(m, 'name') else m for m in metrics_list]}")
+    logger.info(f"Compiling model with optimizer: {optimizer_name}, learning_rate: {current_learning_rate}, loss: {loss_fn_name}, metrics: {[m.name if hasattr(m, 'name') else m for m in metrics_list]}")
     model.compile(optimizer=optimizer, loss=loss_fn, metrics=metrics_list)
     model.summary(print_fn=logger.info)
     return model
@@ -298,12 +301,48 @@ def main():
             raise ValueError("No classes found. Label map is empty.")
         logger.info(f"Number of classes: {num_classes}")
 
+        # Prepare Learning Rate Value or Schedule
+        initial_learning_rate = config.get('optimizer', {}).get('learning_rate', 0.001)
+        lr_scheduler_cfg = config.get('training', {}).get('callbacks', {}).get('lr_scheduler', {})
+        
+        final_lr_for_optimizer = initial_learning_rate # Default to static LR
+
+        if lr_scheduler_cfg.get('enabled', False) and lr_scheduler_cfg.get('name') == 'cosine_decay':
+            logger.info("Configuring CosineDecay learning rate schedule.")
+            steps_per_epoch_tf = tf.data.experimental.cardinality(train_ds)
+
+            if steps_per_epoch_tf == tf.data.experimental.INFINITE_CARDINALITY:
+                logger.error("Cannot use CosineDecay: training dataset has infinite cardinality. Steps per epoch must be finite.")
+                # Fallback to static LR or raise error - for now, fallback and warn
+                logger.warning("Falling back to static learning rate due to infinite dataset cardinality for CosineDecay.")
+            else:
+                steps_per_epoch = steps_per_epoch_tf.numpy()
+                if steps_per_epoch <= 0:
+                    logger.error(f"Cannot use CosineDecay: steps_per_epoch resolved to {steps_per_epoch}. Must be positive.")
+                    logger.warning("Falling back to static learning rate.")
+                else:
+                    num_epochs = config.get('training', {}).get('epochs', 1) # Ensure epochs is read correctly
+                    decay_steps = steps_per_epoch * num_epochs
+                    alpha = lr_scheduler_cfg.get('alpha', 0.0)
+                    
+                    cosine_decay_schedule = tf.keras.optimizers.schedules.CosineDecay(
+                        initial_learning_rate=initial_learning_rate,
+                        decay_steps=decay_steps,
+                        alpha=alpha
+                    )
+                    final_lr_for_optimizer = cosine_decay_schedule
+                    logger.info(f"CosineDecay schedule created and will be used by the optimizer. Initial LR: {initial_learning_rate}, Decay Steps: {decay_steps}, Alpha: {alpha}")
+        else:
+            logger.info(f"Using static learning rate for optimizer: {initial_learning_rate}")
+
         logger.info("Building model...")
-        # Pass the entire config dictionary to build_model
-        model = build_model(num_classes=num_classes, config=config) 
+        model = build_model(
+            num_classes=num_classes, 
+            config=config, 
+            learning_rate_to_use=final_lr_for_optimizer
+        )
 
         logger.info("Starting model training...")
-        # Pass the entire config dictionary to train_model
         train_model(model, train_ds, val_ds, config=config, index_to_label_map=index_to_label)
 
         logger.info("Classification model training finished successfully.")
