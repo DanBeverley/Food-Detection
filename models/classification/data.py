@@ -61,7 +61,8 @@ def _build_augmentation_pipeline(config: Dict) -> Optional[tf.keras.Sequential]:
         factor = aug_config['rotation_range'] / 360.0
         pipeline.add(tf.keras.layers.RandomRotation(factor))
     if aug_config.get('shear_range', 0) > 0:
-        pipeline.add(tf.keras.layers.RandomShear(intensity=aug_config['shear_range']))
+        # pipeline.add(tf.keras.layers.RandomShear(intensity=aug_config['shear_range']))
+        logger.warning("RandomShear augmentation is currently commented out due to potential TF version incompatibility.")
     if aug_config.get('zoom_range', 0) > 0:
         pipeline.add(tf.keras.layers.RandomZoom(height_factor=aug_config['zoom_range'], width_factor=aug_config['zoom_range']))
     if 'brightness_range' in aug_config and aug_config['brightness_range']:

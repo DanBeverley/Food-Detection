@@ -96,6 +96,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     dropout_rate = head_config.get('dropout', 0.5)
     activation = head_config.get('activation', 'relu')
     final_activation = head_config.get('final_activation', 'softmax')
+    kernel_l2_factor = head_config.get('kernel_l2_factor', 0.0)
 
     inputs = layers.Input(shape=input_shape)
     x = base_model(inputs, training=fine_tune)
@@ -107,12 +108,17 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     else:
         x = layers.Flatten()(x)
 
+    kernel_regularizer = None
+    if kernel_l2_factor > 0:
+        kernel_regularizer = tf.keras.regularizers.l2(kernel_l2_factor)
+        logger.info(f"Applying L2 kernel regularization with factor: {kernel_l2_factor} to Dense layers in head.")
+
     for units in dense_layers_units:
-        x = layers.Dense(units, activation=activation)(x)
+        x = layers.Dense(units, activation=activation, kernel_regularizer=kernel_regularizer)(x)
         if dropout_rate > 0:
             x = layers.Dropout(dropout_rate)(x)
 
-    outputs = layers.Dense(num_classes, activation=final_activation)(x)
+    outputs = layers.Dense(num_classes, activation=final_activation)(x) # Usually no regularization on final output layer
     model = models.Model(inputs, outputs)
 
     # learning_rate = optimizer_cfg.get('learning_rate', 0.001) # Old: Read static LR from optimizer_cfg
