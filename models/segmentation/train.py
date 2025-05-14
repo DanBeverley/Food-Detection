@@ -20,6 +20,16 @@ logger = logging.getLogger(__name__)
 # Path to the specific config file for segmentation training
 SEGMENTATION_CONFIG_PATH = os.path.join(_get_project_root(), "models", "segmentation", "config.yaml")
 
+from tensorflow.keras.callbacks import Callback
+
+# Custom callback to print log keys
+class PrintLogKeys(Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is not None:
+            logger.info(f"Epoch {epoch+1}: Available log keys: {list(logs.keys())}")
+        else:
+            logger.info(f"Epoch {epoch+1}: No logs dictionary provided to on_epoch_end.")
+
 def load_config(config_path: str) -> dict:
     """Loads the YAML configuration file."""
     with open(config_path, 'r') as f:
@@ -185,6 +195,9 @@ def main():
     log_dir_abs.mkdir(parents=True, exist_ok=True)
 
     callbacks_list = []
+    # Add our custom callback first to see keys early
+    callbacks_list.append(PrintLogKeys())
+
     callbacks_config = training_cfg.get('callbacks', {})
 
     if callbacks_config.get('model_checkpoint', {}).get('enabled', True):
