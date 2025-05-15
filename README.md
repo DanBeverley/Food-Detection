@@ -1,148 +1,300 @@
-# Food Detection & Calorie Estimator
+# Food Detection, Volume, and Calorie Estimation Project
 
-This project provides a Python-based pipeline for analyzing food images. It performs food segmentation, classification, volume estimation (using a depth map, a 3D mesh file, or a fallback dummy depth map), density lookup, calorie estimation, and mass calculation. The system is designed to be configurable and extensible.
+This project provides a comprehensive Python-based pipeline for detecting food items in images, estimating their volume and calories. It leverages deep learning models for segmentation and classification, and supports various methods for volume estimation. The ultimate goal is to create a production-ready system deployable on iOS devices, utilizing datasets like MetaFood3D for robust real-world performance.
 
-## Key Features of the Python Pipeline
+## Key Features
 
-*   **Food Segmentation**: Identifies and masks the food item in an image using a TFLite segmentation model.
-*   **Food Classification**: Classifies the segmented food item using a TFLite classification model and a label map.
-*   **Volume Estimation**:
-    *   Calculates the 3D volume of the food item using either a depth map (and camera intrinsics) or a direct 3D mesh file (e.g., `.obj`).
-    *   Supports fallback to a dummy depth map if a real one or a mesh file is not provided.
-    *   Utilizes `scipy.spatial.ConvexHull` (for depth maps) or `trimesh` (for mesh files).
-*   **Nutritional Information Lookup (Density & Calories)**:
-    *   Retrieves food density (g/cm³) and calories (kcal/100g) from a local custom JSON database (`data/databases/custom_density_db.json`). The database supports entries with both density and calories, or density alone.
-    *   Optionally queries the USDA FoodData Central API for this information if not found locally (requires an API key).
-    *   Caches API results to minimize redundant lookups.
-*   **Mass & Calorie Calculation**:
-    *   Estimates the mass of the food item based on its calculated volume and looked-up density.
-    *   Estimates the total calories of the food item based on its mass and calories per 100g.
-*   **Configurable**: Pipeline parameters (model paths, camera intrinsics, API keys) are managed through a YAML configuration file (`config_pipeline.yaml`).
-
-## Recent Pipeline Enhancements
-
-*   **Masked Classification Input**: To potentially improve classification accuracy, the image provided to the classification model is now masked using the output from the segmentation stage. This ensures the classifier focuses primarily on the food item, minimizing background interference.
-*   **Flexible Segmentation Mask Handling**: The pipeline now supports the use of pre-computed segmentation masks. Users can provide a path to an existing mask image via the `--mask_path` command-line argument. If a valid pre-computed mask is supplied, it will be used; otherwise, the system defaults to generating a mask using the integrated segmentation model. The source of the segmentation mask (e.g., "precomputed_mask_file: <filename>" or "model_generated") is included in the analysis results.
-*   **Automated Testing Suite**: An initial automated testing suite has been introduced in the `tests/` directory (`tests/test_pipeline.py`). This suite, built using Python's `unittest` framework, facilitates end-to-end testing of the pipeline. It allows for defining specific test cases with known inputs and expected outputs to verify pipeline integrity and track the impact of future modifications.
-
-## How the Python Pipeline Works
-
-The analysis is orchestrated by `main.py` and `food_analyzer.py`:
-
-1.  **Initialization (`main.py`)**:
-    *   Parses command-line arguments: paths to the input image, depth map (optional), mesh file path (optional), configuration file.
-    *   Calls the main analysis function in `food_analyzer.py`.
-
-2.  **Core Analysis (`food_analyzer.py` - `analyze_food_item` function)**:
-    *   **Load Configuration**: Reads `config_pipeline.yaml`.
-    *   **Load Inputs**: Loads the RGB image. Attempts to load the provided depth map or mesh file; if unavailable or invalid, creates a dummy depth map based on image dimensions.
-    *   **Load Models**: Loads TFLite segmentation and classification models, along with the classification `label_map.json`.
-    *   **Segmentation**: Runs inference with the segmentation model to produce a food mask.
-    *   **Classification**: Runs inference with the classification model on the (potentially masked) image to get a food label and confidence.
-    *   **Volume Estimation** (orchestrated by `food_analyzer.py`, implemented in `volume_helpers.py`):
-        *   If a mesh file path is provided, its volume is calculated using `trimesh` and used directly.
-        *   Otherwise, if a depth map is provided, it's converted into a 3D point cloud using camera intrinsics. The volume of this point cloud is calculated using `ConvexHull`.
-        *   If neither is available, a dummy volume might be assumed or an error/warning logged.
-    *   **Nutritional Lookup (`density_lookup.py`)**: Queries local `custom_density_db.json` and/or USDA API for density (g/cm³) and calories (kcal/100g) of the classified food label.
-    *   **Mass & Calorie Calculation**: Computes mass (volume × density) and then total estimated calories (mass × calories_per_100g / 100).
-    *   **Output**: Returns a dictionary containing all results (mask shape, food label, confidence, volume, density, mass, calories_kcal_per_100g, estimated_total_calories).
+*   **Food Segmentation**: Identifies and masks food items using a U-Net-like model with an EfficientNet backbone (TFLite format).
+*   **Food Classification**: Classifies segmented food items using an EfficientNetV2 model (TFLite format).
+*   **Configurable Training Pipelines**: Includes scripts and YAML configurations for training both segmentation and classification models, supporting features like:
+    *   Custom datasets (e.g., prepared from MetaFood3D).
+    *   Data augmentation.
+    *   Learning rate schedules (e.g., cosine decay).
+    *   L2 regularization.
+    *   Early stopping.
+    *   TensorBoard logging.
+*   **TFLite Export**: Scripts to convert trained Keras models to TensorFlow Lite format, with options for quantization (currently defaults to none).
+*   **Google Colab Integration**: A unified script (`train_all_colab.py`) to facilitate training both models sequentially on Google Colab.
+*   **Volume Estimation**: Calculates 3D volume using:
+    *   Depth maps (from RGB-D sensors) and camera intrinsics.
+    *   Direct 3D mesh files (e.g., `.obj`).
+    *   Fallback to a dummy depth map if real data is unavailable (for pipeline flow, not accuracy).
+*   **Nutritional Information Lookup**: Retrieves food density (g/cm³) and calories (kcal/100g) from:
+    *   A local custom JSON database (`data/databases/custom_density_db.json`).
+    *   USDA FoodData Central API (requires API key, with caching).
+*   **Mass & Calorie Calculation**: Estimates mass and total calories based on volume and nutritional data.
+*   **Modular and Configurable**: Key parameters, model paths, and settings are managed through YAML configuration files.
+*   **Automated Testing**: Basic end-to-end pipeline tests using `unittest`.
 
 ## Project Structure
 
-The repository is organized as follows:
-
-```text
-.
-├── .git/                   # Git version control files
-├── .gitignore             
-├── README.md               # This file
-├── main.py                 # Main script to run the food analysis pipeline
-├── food_analyzer.py        # Core logic for the food analysis pipeline
-├── config_pipeline.yaml    # Configuration file for the pipeline
-├── requirements.txt        # Python package dependencies
-├── create_dummy_classification_data.py # Script (enerating placeholder data/models)
-├── data/                   # Data files used by the pipeline
-│   ├── databases/          # Custom databases (e.g., for density and calories)
-│   │   └── custom_density_db.json  # Stores food items with their density (g/cm³) and calories (kcal/100g)
-│   ├── cache/              # Cached data (e.g., from API lookups) - (Verify if used and path)
-│   └── sample_data/        # Sample images, depth maps for testing
-├── models/                 # Python scripts for model definition, loading, and inference logic
-│   ├── segmentation/
-│   │   └── predict_segmentation.py
-│   └── classification/
-│       └── predict_classification.py
-├── trained_models/         # Pre-trained model files (e.g., .tflite) and label maps
-│   ├── segmentation/
-│   │   └── segmentation_model.tflite
-│   └── classification/
-│       ├── classification_model.tflite
-│       └── label_map.json
-├── volume_helpers/         # Utility modules for volume estimation and density lookup
+```
+Food-Detection/
+├── .git/                     # Git version control
+├── .gitignore
+├── README.md                 # This file
+├── config_pipeline.yaml      # Configuration for the end-to-end inference pipeline
+├── requirements.txt          # Python dependencies
+├── main.py                   # Entry point for running the inference pipeline
+├── food_analyzer.py          # Core logic for the inference pipeline
+├── train_all_colab.py        # Unified training script for Google Colab
+|
+├── data/
+│   ├── classification/       # Processed data for classification model
+│   │   ├── metadata.json     # Image paths and labels
+│   │   └── label_map.json    # Maps class names to integer labels
+│   ├── segmentation/         # Processed data for segmentation model
+│   │   └── metadata.json     # Image and mask paths
+│   ├── databases/
+│   │   └── custom_density_db.json # Local nutritional database
+│   └── cache/                # Cached API responses (if implemented)
+│   └── sample_data/          # Sample images, depth maps for testing
+|
+├── models/                   # Model-specific scripts, configs, and modules
+│   ├── __init__.py
+│   ├── classification/
+│   │   ├── __init__.py
+│   │   ├── config.yaml       # Training & export config for classification
+│   │   ├── data.py           # Data loading and preprocessing
+│   │   ├── train.py          # Training script
+│   │   ├── export_tflite.py  # TFLite export script
+│   │   ├── evaluate.py       # Evaluation script for Keras model
+│   │   ├── evaluate_tflite.py # Evaluation script for TFLite model
+│   │   └── predict_classification.py # Prediction script
+│   └── segmentation/
+│       ├── __init__.py
+│       ├── config.yaml       # Training & export config for segmentation
+│       ├── data.py           # Data loading and preprocessing
+│       ├── train.py          # Training script
+│       ├── export_tflite.py  # TFLite export script
+│       ├── evaluate_segmentation.py # Evaluation script
+│       └── predict_segmentation.py # Prediction script
+|
+├── trained_models/           # Where trained models (.h5, .tflite) are saved by default
+│   ├── classification/
+│   │   ├── exported/         # TFLite models and labels
+│   │   │   └── classification_model_full_default.tflite
+│   │   │   └── label_map.json (copied here by export script)
+│   │   └── checkpoints/      # Keras model checkpoints
+│   └── segmentation/
+│       ├── exported/
+│       │   └── segmentation_model_default.tflite
+│       └── checkpoints/
+|
+├── volume_helpers/
+│   ├── __init__.py
 │   ├── volume_helpers.py
 │   └── density_lookup.py
-├── scripts/                # Additional helper scripts 
-├── logs/                   # Log files generated by the application
-├── checkpoints/            # Model training checkpoints
-├── tests/                  # Automated test suite
-│   └── test_pipeline.py    # End-to-end pipeline tests
-└── __pycache__/            # Python bytecode cache
+|
+├── scripts/                  # Utility scripts for data preparation, etc.
+│   └── prepare_classification_dataset.py # Example dataset preparation script
+|
+├── logs/                     # Default directory for TensorBoard logs and other logs
+│   ├── classification/
+│   └── segmentation/
+|
+└── tests/
+    └── test_pipeline.py      # Automated tests for the inference pipeline
 ```
 
-## Getting Started
+## Setup and Installation
 
-1.  **Clone the repository:**
+1.  **Clone the Repository:**
     ```bash
-    git clone <your-repo-url>
+    git clone <your-repository-url>
     cd Food-Detection
     ```
 
-2.  **Create a Python environment and install dependencies:**
-    It's recommended to use a virtual environment.
+2.  **Python Environment:**
+    It's highly recommended to use a Python virtual environment. Python 3.9+ is recommended.
     ```bash
     python -m venv venv
-    # On Windows
-    venv\\Scripts\\activate
-    # On macOS/Linux
+    # On Windows:
+    venv\Scripts\activate
+    # On macOS/Linux:
     # source venv/bin/activate
-    pip install -r requirements.txt
     ```
 
-3.  **Prepare Data and Models:**
-    *   Ensure your TFLite models (`segmentation_model.tflite`, `classification_model.tflite`) and `label_map.json` are placed in the `trained_models/` subdirectories as specified in `config_pipeline.yaml`.
-    *   Update `config_pipeline.yaml` with correct paths and camera intrinsic values if necessary.
-    *   Populate `data/databases/custom_density_db.json` with any custom food densities and calories.
+3.  **Install Dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+    This will install TensorFlow, OpenCV, PyYAML, and other necessary packages.
 
-## Configuration
+## Data Preparation
 
-The main configuration for the pipeline is done via `config_pipeline.yaml`. This file includes:
-*   Paths to segmentation and classification models.
-*   Path to the classification label map.
-*   Camera intrinsic parameters (`fx`, `fy`, `cx`, `cy`) for accurate 3D conversions.
-*   Depth processing parameters (e.g., min/max depth cutoffs).
+Raw datasets like MetaFood3D need to be processed into a format suitable for the training scripts.
 
-## How to Run
+*   **Classification Data (`data/classification/`):**
+    *   Images should be organized into subdirectories by class, or listed in `metadata.json` with their corresponding labels.
+    *   `metadata.json`: A JSON file, typically a list of dictionaries, where each dictionary contains at least `image_path` (relative to a base directory defined in `models/classification/config.yaml`) and `label` (class name).
+    *   `label_map.json`: Maps string class labels to integer indices. This can be generated by `scripts/prepare_classification_dataset.py` or manually.
+    *   The `scripts/prepare_classification_dataset.py` script provides an example of how to generate `metadata.json` and `label_map.json` from a directory of images.
 
-Before running, ensure the `USDA_API_KEY` environment variable is set if you intend to use the USDA FoodData Central API for nutritional lookups when items are not found in the local custom database.
+*   **Segmentation Data (`data/segmentation/`):**
+    *   `metadata.json`: A JSON file, typically a list of dictionaries, where each dictionary contains `image_path` and `mask_path` (relative to base directories defined in `models/segmentation/config.yaml`).
+    *   Masks should be binary images where food pixels are distinct from background pixels.
 
-Example (Windows PowerShell):
-`$env:USDA_API_KEY="YOUR_KEY_HERE"`
+## Configuration Files
 
-Example (Bash/Zsh):
-`export USDA_API_KEY="YOUR_KEY_HERE"`
+Configuration is managed through YAML files:
 
-Execute the `main.py` script with the required arguments. Example:
+1.  **`models/classification/config.yaml`**: For classification model training and export.
+    *   `paths`: Directories for data, model saving, logs.
+    *   `data`: Image size, batch size, class mode, validation split, label map filename.
+    *   `model`: Architecture (e.g., `EfficientNetV2B0`), number of classes, input shape, if to use pretrained weights.
+    *   `training`: Epochs, optimizer settings (name, learning rate), loss function, metrics, regularization (L2), learning rate schedule (e.g., `cosine_decay`), early stopping parameters.
+    *   `augmentation`: Parameters for data augmentation (rotation, zoom, shift, shear, flip, brightness).
+    *   `export`: TFLite filename, quantization settings.
 
+2.  **`models/segmentation/config.yaml`**: For segmentation model training and export.
+    *   Similar structure to classification config, but tailored for segmentation (e.g., U-Net architecture, specific backbone like `EfficientNetB0`, binary crossentropy or dice loss).
+
+3.  **`config_pipeline.yaml`**: For the end-to-end inference pipeline (`main.py`).
+    *   `models`: Paths to the `.tflite` segmentation and classification models, and classification labels file.
+    *   `model_params`: Input sizes for models, number of segmentation classes.
+    *   `camera_intrinsics`: `fx`, `fy`, `cx`, `cy` for depth-to-point-cloud conversion.
+    *   `volume_params`: Parameters for volume calculation (e.g., depth cutoffs).
+    *   `classification_confidence_threshold`: Minimum confidence for a classification to be considered valid.
+
+## Training Models (Locally)
+
+Ensure data is prepared and configuration files (`models/*/config.yaml`) are set up correctly.
+
+1.  **Train Classification Model:**
+    ```bash
+    python models/classification/train.py --config models/classification/config.yaml
+    ```
+    Logs and checkpoints will be saved to directories specified in the config (e.g., `logs/classification/` and `trained_models/classification/checkpoints/`). Monitor training with TensorBoard:
+    ```bash
+    tensorboard --logdir logs/classification
+    ```
+
+2.  **Train Segmentation Model:**
+    ```bash
+    python models/segmentation/train.py --config models/segmentation/config.yaml
+    ```
+    Monitor training with TensorBoard:
+    ```bash
+    tensorboard --logdir logs/segmentation
+    ```
+
+## Exporting Models to TFLite (Locally)
+
+After training, export the Keras models to TensorFlow Lite format.
+
+1.  **Export Classification Model:**
+    ```bash
+    python models/classification/export_tflite.py --config models/classification/config.yaml
+    ```
+    The `.tflite` model will be saved (e.g., to `trained_models/classification/exported/classification_model_full_default.tflite`).
+
+2.  **Export Segmentation Model:**
+    ```bash
+    python models/segmentation/export_tflite.py --config models/segmentation/config.yaml
+    ```
+    The `.tflite` model will be saved (e.g., to `trained_models/segmentation/exported/segmentation_model_default.tflite`).
+
+## Training on Google Colab
+
+Use the `train_all_colab.py` script for a streamlined training experience on Colab.
+
+1.  **Prepare Project for Upload:**
+    *   Ensure your local `Food-Detection` project directory contains all necessary code, data preparation scripts, and updated configuration files.
+    *   Zip your `Food-Detection` project directory.
+    *   If your processed datasets (`data/classification/`, `data/segmentation/`) are very large, consider zipping them separately.
+
+2.  **Upload to Google Drive:**
+    *   Upload the project zip file (e.g., `Food-Detection.zip`) to your Google Drive.
+    *   Upload dataset zips if separate.
+
+3.  **Colab Notebook Setup:**
+    Open a new Colab notebook and run the following cells:
+
+    ```python
+    # Mount Google Drive
+    from google.colab import drive
+    drive.mount('/content/drive')
+
+    # Unzip your project (adjust path to your zip file)
+    !unzip "/content/drive/My Drive/Food-Detection.zip" -d "/content/"
+
+    # Navigate to the project directory
+    import os
+    os.chdir('/content/Food-Detection')
+    !ls # Verify contents (should show train_all_colab.py, models/, data/, etc.)
+
+    # If datasets were zipped separately, unzip them into the correct locations:
+    # !unzip "/content/drive/My Drive/my_classification_data.zip" -d "/content/Food-Detection/data/"
+    # !unzip "/content/drive/My Drive/my_segmentation_data.zip" -d "/content/Food-Detection/data/"
+    # Verify data structure, e.g., /content/Food-Detection/data/classification/metadata.json should exist.
+
+    # Install dependencies (Colab often has TensorFlow pre-installed, adjust if needed)
+    !pip install -r requirements.txt
+    ```
+    *Ensure your Colab runtime has a GPU enabled (Runtime -> Change runtime type).* 
+
+4.  **Run Unified Training Script:**
+    ```python
+    !python train_all_colab.py
+    ```
+    This script will train and export both classification and segmentation models sequentially. Logs will be printed in the notebook output.
+
+5.  **Save Trained Models:**
+    After training, the `.h5` checkpoints and `.tflite` models will be in `/content/Food-Detection/trained_models/`. Copy them back to your Google Drive for persistence:
+    ```python
+    # Example: Create a directory in Drive and copy models
+    !mkdir -p "/content/drive/My Drive/Food-Detection-Output/trained_models"
+    !cp -r /content/Food-Detection/trained_models/* "/content/drive/My Drive/Food-Detection-Output/trained_models/"
+    !mkdir -p "/content/drive/My Drive/Food-Detection-Output/logs"
+    !cp -r /content/Food-Detection/logs/* "/content/drive/My Drive/Food-Detection-Output/logs/"
+    ```
+
+## Running the Inference Pipeline
+
+Once models are trained and exported (and paths in `config_pipeline.yaml` are correct), run the end-to-end analysis:
+
+1.  **Set USDA API Key (Optional):**
+    If you want to use the USDA API for nutritional lookups for items not in `custom_density_db.json`:
+    *   Windows (PowerShell): `$env:USDA_API_KEY="YOUR_KEY_HERE"`
+    *   macOS/Linux (Bash): `export USDA_API_KEY="YOUR_KEY_HERE"`
+
+2.  **Execute `main.py`:**
+    ```bash
+    python main.py --image "path/to/image.jpg" \
+                   --depth "path/to/depth_map.npy_or_png" \
+                   --mesh_file_path "path/to/mesh.obj" \
+                   --config "config_pipeline.yaml"
+    ```
+    *   `--depth`: Optional path to a depth map.
+    *   `--mesh_file_path`: Optional path to a 3D mesh file. Takes precedence over depth for volume estimation.
+    *   If neither depth nor mesh is provided, volume/mass/calorie estimates will be unreliable.
+
+## Testing
+
+The project includes an initial automated testing suite for the inference pipeline:
 ```bash
-python main.py --image "path/to/your/image.jpg" --depth "path/to/your/depth_map.npy_or_png" --mesh_file_path "path/to/your/mesh.obj" --config "config_pipeline.yaml"
+python -m unittest tests.test_pipeline
 ```
-*   `--depth`: Optional. Path to the depth map. If a `--mesh_file_path` is also provided, the mesh file will take precedence for volume estimation.
-*   `--mesh_file_path`: Optional. Path to a 3D mesh file (e.g., `.obj`). Takes precedence over `--depth` for volume estimation.
-*   If neither `--depth` nor `--mesh_file_path` is valid, a dummy depth map might be used for basic pipeline flow, but volume/mass/calorie estimates will be unreliable.
-*   The pipeline will automatically use the `USDA_API_KEY` from your environment if needed for lookups not covered by the local `custom_density_db.json`.
+Refer to `tests/test_pipeline.py` for example test cases.
 
-## Future Enhancements (from original vision)
+## Upcoming Goals / Production Plan
 
-*   Train models on comprehensive datasets like FoodSeg-103 for real food recognition.
-*   Develop more sophisticated dummy depth map generation for better volume estimation when real depth is unavailable.
-*   Integrate the pipeline into a cross-platform mobile application (iOS & Android).
-*   Explore using device-specific depth sensors (LiDAR/ToF on mobile devices).
+*   **iOS Deployment**: Package the inference pipeline and TFLite models into an iOS application for on-device food analysis.
+*   **Model Accuracy & Robustness**: Continuously improve model performance on diverse, real-world food items using datasets like MetaFood3D. This includes fine-tuning, exploring different architectures/quantization, and enhancing data augmentation.
+*   **User Testing**: Conduct user testing on the iOS application to gather feedback and identify areas for improvement in usability and accuracy.
+*   **Optimize for Mobile**: Ensure efficient performance (latency, memory usage) of models on mobile devices.
+*   **Expand Nutritional Database**: Enhance the local `custom_density_db.json` and improve USDA API integration.
+
+## Key Dependencies
+
+*   `tensorflow` (>=2.10 recommended)
+*   `opencv-python-headless`
+*   `PyYAML`
+*   `scipy`
+*   `numpy`
+*   `requests`
+*   `trimesh`
+*   `scikit-learn`
+*   `tensorflow-addons`
+*   (Full list in `requirements.txt`)

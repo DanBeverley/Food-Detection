@@ -6,3 +6,4 @@ tensorflow-addons # For focal loss etc.
 trimesh>=3.0 # For 3D mesh processing (.obj, .ply)
 PyYAML>=5.0 # For loading YAML configuration files
 typing_extensions>=4.8.0 # For modern typing features, satisfies ultralytics requirement
+tensorflow>=2.10 # Core machine learning library for model training and execution
