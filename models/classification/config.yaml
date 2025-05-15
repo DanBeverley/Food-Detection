@@ -29,6 +29,7 @@ model:
     dropout: 0.5 
     activation: "relu" 
     final_activation: "softmax"
+    kernel_l2_factor: 0.001 # Add L2 regularization factor (e.g., 0.001, set to 0.0 or remove to disable)
 
 # --- Optimizer Configuration ---
 optimizer:
@@ -46,7 +47,7 @@ metrics: ["accuracy"] # List of metrics, e.g., ['accuracy', 'sparse_top_k_catego
 
 # Training Configuration
 training:
-  epochs: 1 # Set epochs to 1 for a quick test
+  epochs: 100 # Set epochs for full training, early stopping will manage duration
   use_mixed_precision: false
   callbacks:
     model_checkpoint:
@@ -76,6 +77,7 @@ training:
       write_graph: true
       update_freq: "epoch"
     lr_scheduler:
+      enabled: true
       name: "cosine_decay"
       alpha: 0.0
 
@@ -88,20 +90,16 @@ paths:
   metadata_filename: "metadata.json" # To be found in data_dir
   label_map_dir: "data/classification" # Path relative to project root, where label_map.json is found
   label_map_filename: "label_map.json" # To be found in label_map_dir
-  model_save_dir: "trained_models/classification/"
+  model_save_dir: "trained_models/classification/" 
   log_dir: "logs/classification/"
   tflite_export_dir: "trained_models/classification/exported/" 
 
 export:
-  tflite_filename: "classification_model.tflite"
+  tflite_filename: "classification_model_full_default.tflite" # Renamed for clarity
 
   # Quantization Settings
   quantization:
-    type: "int8" # Updated from 'default' as per previous request
+    type: "none" # Set to 'none' for initial Keras training. Change to 'int8' or 'float16' for export later.
     representative_dataset: 
       enabled: true 
       num_samples: 100 
-
-# Logging and checkpoints (Potentially redundant if paths are covered above)
-checkpoint_dir: "trained_models/classification/checkpoints/"  # Directory for saving checkpoints
-log_dir: "logs/classification/"  # Directory for TensorBoard logs or other logging

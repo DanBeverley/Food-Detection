@@ -51,7 +51,7 @@ loss:
 
 # Training Configuration
 training:
-  epochs: 1 # IMPORTANT: Increase for actual training after testing pipeline
+  epochs: 100 # IMPORTANT: Increase for actual training after testing pipeline
   use_mixed_precision: false
   metrics: ["mean_iou", "accuracy"] # Metrics to be used during training and evaluation
 
@@ -86,10 +86,10 @@ training:
       write_graph: true
       update_freq: "epoch"
 
-    # Optional LR Scheduler
-    # lr_scheduler:
-    #   name: "cosine_decay"
-    #   alpha: 0.0
+    lr_scheduler:
+      enabled: true
+      name: "cosine_decay"
+      alpha: 0.0
 
 # Evaluation Configuration 
 evaluation:
@@ -107,10 +107,10 @@ paths:
 # Export Configuration
 export:
   # keras_model_filename: "unet_epoch-XX_val_iou-X.XXXX.h5" # Optional: Specify Keras model file. Defaults to best/final model.
-  tflite_filename: "segmentation_model.tflite"
+  tflite_filename: "segmentation_model_default.tflite"
 
   quantization:
-    type: "default" # 'none', 'default', 'float16', 'int8'. Review for segmentation; int8 might need representative_dataset enabled.
+    type: "none" # 'none', 'default', 'float16', 'int8'. Review for segmentation; int8 might need representative_dataset enabled.
     representative_dataset:
       enabled: false # Set to true if int8 quantization is used and representative data is needed
       num_samples: 50

@@ -1,6 +1,6 @@
 models:
-  segmentation_tflite: "trained_models/segmentation/exported/segmentation_model.tflite" # Check if this is the correct exported model path/name
-  classification_tflite: "trained_models/classification/exported/classification_model.tflite" # Check if this is the correct exported model path/name
+  segmentation_tflite: "trained_models/segmentation/exported/segmentation_model_default.tflite" # Check if this is the correct exported model path/name
+  classification_tflite: "trained_models/classification/exported/classification_model_full_default.tflite" # Check if this is the correct exported model path/name
   classification_labels: "trained_models/classification/label_map.json" # Path to the label map
   # classification_labels: "trained_models/classification/exported/labels.txt" # Verify this path and filename
 

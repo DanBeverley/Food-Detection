@@ -1,3 +1,15 @@
 {
-  "_comment": "Populate this file with food items (matching classification output) and their densities in g/cm3. Example: \"apple_fuji_raw\": 0.75"
+  "_comment": "Populate this file with food items (matching classification output). Preferred format: \"food_item\": {\"density\": value_g_cm3, \"calories_kcal_per_100g\": value_kcal_100g}. Legacy format (density only): \"food_item\": value_g_cm3. Example: \"apple_fuji_raw\": {\"density\": 0.75, \"calories_kcal_per_100g\": 50.0}",
+  "apple": {
+    "density": 0.8,
+    "calories_kcal_per_100g": 52.0
+  },
+  "almond(bowl)": {
+    "density": 0.46,
+    "calories_kcal_per_100g": 161.0
+  },
+  "banana": {
+    "density": 0.952,
+    "calories_kcal_per_100g": 89.0
+  }
 }
