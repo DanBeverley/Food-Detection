@@ -7,6 +7,7 @@ import tensorflow as tf
 from tensorflow.keras import models, layers, optimizers, losses, callbacks, applications, metrics
 from typing import Dict, Tuple
 import traceback
+import inspect
 
 from data import load_classification_data, _get_project_root
 
@@ -313,6 +314,14 @@ def main(config_path: str):
 
     logger.info(f"Expecting metadata to be read by load_classification_data using relative path from config: {paths_cfg.get('data_dir', 'data/classification')}/{paths_cfg.get('metadata_filename', 'metadata.json')}")
     logger.info(f"Expecting label map to be read by load_classification_data using relative path from config: {label_map_dir_rel}/{label_map_filename}")
+
+    try:
+        logger.info(f"--- Introspecting load_classification_data ---")
+        logger.info(f"Source file for load_classification_data: {inspect.getfile(load_classification_data)}")
+        logger.info(f"Source code for load_classification_data:\n{inspect.getsource(load_classification_data)}")
+        logger.info(f"--- End Introspection ---")
+    except Exception as e_inspect:
+        logger.error(f"Error during introspection: {e_inspect}")
 
     # Call load_classification_data with the main config object.
     # The function load_classification_data is responsible for extracting
