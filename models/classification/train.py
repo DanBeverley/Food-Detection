@@ -306,22 +306,18 @@ def main(config_path: str):
     metadata_filename = paths_cfg.get('metadata_filename', 'metadata.json')
     metadata_path_abs = os.path.join(data_dir_abs, metadata_filename)
 
-    label_map_dir_rel = paths_cfg.get('label_map_dir', data_dir_rel) 
+    label_map_dir_rel = paths_cfg.get('label_map_dir', data_dir_rel) # Default to data_dir if not specified
     label_map_filename = paths_cfg.get('label_map_filename', 'label_map.json')
     label_map_dir_abs = os.path.join(project_root, label_map_dir_rel)
-    label_map_path_abs = os.path.join(label_map_dir_abs, label_map_filename)
+    label_map_path_abs = os.path.join(label_map_dir_abs, label_map_filename) # This path is now primarily for reference/logging if load_classification_data handles it
 
-    logger.info(f"Loading data using metadata: {metadata_path_abs}")
-    logger.info(f"Expecting label map at: {label_map_path_abs}")
+    logger.info(f"Expecting metadata to be read by load_classification_data using relative path from config: {paths_cfg.get('data_dir', 'data/classification')}/{paths_cfg.get('metadata_filename', 'metadata.json')}")
+    logger.info(f"Expecting label map to be read by load_classification_data using relative path from config: {label_map_dir_rel}/{label_map_filename}")
 
-    train_dataset, val_dataset, num_classes, index_to_label_map = load_classification_data(
-        metadata_path=metadata_path_abs,
-        label_map_path=label_map_path_abs,
-        image_size=tuple(config.get('data', {}).get('image_size', [224, 224])),
-        batch_size=config.get('data', {}).get('batch_size', 32),
-        split_ratio=config.get('data', {}).get('split_ratio', 0.2),
-        augmentation_config=config.get('data', {}).get('augmentation', {})
-    )
+    # Call load_classification_data with the main config object.
+    # The function load_classification_data is responsible for extracting
+    # metadata_path, label_map_path, image_size, batch_size, etc., from the config.
+    train_dataset, val_dataset, num_classes, index_to_label_map = load_classification_data(config)
 
     if not train_dataset or not val_dataset:
         logger.error("Failed to load training or validation data. Exiting.")
