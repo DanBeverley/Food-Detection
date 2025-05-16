@@ -20,15 +20,21 @@ def run_training_step(model_name: str, script_path: str, config_path: str):
     
     logging.info(f"Executing command: {' '.join(command)}")
     try:
+        # Ensure PYTHONUNBUFFERED is set for the child processes launched by this script too
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
 
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_newlines=True)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_newlines=True, env=env)
         
         if process.stdout:
             for line in iter(process.stdout.readline, ''):
-                logging.info(f"[{model_name}] {line.strip()}")
+                # Use print with flush=True for better real-time output in Kaggle
+                print(f"[{model_name}] {line.strip()}", flush=True)
         
         process.wait() 
-        process.stdout.close() 
+        # It's good practice to close stdout, though it should auto-close when process ends
+        if process.stdout:
+            process.stdout.close()
 
         if process.returncode == 0:
             logging.info(f"--- {model_name} completed successfully. ---")
