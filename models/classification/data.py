@@ -81,14 +81,14 @@ def _build_augmentation_pipeline(config: Dict) -> Optional[tf.keras.Sequential]:
     logger.info(f"Built augmentation pipeline with {len(pipeline.layers)-1} augmentation layers.")
     return pipeline
 
-def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Dict[int, str]]:
+def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, Dict[int, str]]:
     """
     Load and prepare classification data using a metadata.json file.
     Refactored to read from metadata_path, use label_map_path from paths config.
     Args:
         config: Dictionary from classification/config.yaml.
     Returns:
-        Tuple of (train_dataset, val_dataset, index_to_label_map).
+        Tuple of (train_dataset, val_dataset, num_classes, index_to_label_map).
     """
     project_root = _get_project_root()
 
@@ -267,6 +267,6 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
     #         val_dataset = val_dataset.take(max_val_samples // batch_size + 1)
     #         logger.info(f"Dev mode: Validation dataset limited to approx {max_val_samples} samples.")
 
-    return train_dataset, val_dataset, index_to_label
+    return train_dataset, val_dataset, num_classes, index_to_label
 
 # --- load_test_data and other functions will be refactored in subsequent steps --- 
