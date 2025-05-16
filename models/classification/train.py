@@ -3,16 +3,40 @@ import argparse
 import logging
 import yaml
 import json
+import traceback
+
 import tensorflow as tf
 from tensorflow.keras import models, layers, optimizers, losses, callbacks, applications, metrics
 from typing import Dict, Tuple
 import traceback
-import inspect
 
 from data import load_classification_data, _get_project_root
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Set TensorFlow global logging level
+tf.get_logger().setLevel('INFO')
+
 logger = logging.getLogger(__name__)
+
+# Custom Callback for detailed logging
+class DetailedLoggingCallback(callbacks.Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        log_message = f"Epoch {epoch+1}/{self.params['epochs']} completed."
+        for metric, value in logs.items():
+            log_message += f" - {metric}: {value:.4f}"
+        logger.info(log_message)
+        print(log_message, flush=True) # Also print directly with flush
+
+    # Optional: For batch-level logging (can be very verbose)
+    # def on_batch_end(self, batch, logs=None):
+    #     logs = logs or {}
+    #     if batch % 10 == 0: # Log every 10 batches
+    #         log_message = f"Epoch {self.params['epochs']}, Batch {batch}"
+    #         for metric, value in logs.items():
+    #             log_message += f" - {metric}: {value:.4f}"
+    #         logger.info(log_message)
+    #         print(log_message, flush=True)
+
 
 def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.Model:
     """
@@ -192,6 +216,9 @@ def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset
     callbacks_list = []
     callbacks_config = training_cfg.get('callbacks', {})
 
+    # Add the custom logging callback first
+    callbacks_list.append(DetailedLoggingCallback())
+
     mc_cfg = callbacks_config.get('model_checkpoint', {})
     if mc_cfg.get('enabled', True):
         checkpoint_filename = mc_cfg.get('filename_template', 'model_epoch-{epoch:02d}_val_loss-{val_loss:.2f}.h5')
@@ -235,12 +262,19 @@ def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset
     
     tb_cfg = callbacks_config.get('tensorboard', {})
     if tb_cfg.get('enabled', True):
-        tb_log_dir = tb_cfg.get('log_dir', 'logs/classification') 
-        if not os.path.isabs(tb_log_dir):
-            tb_log_dir_abs = os.path.join(_get_project_root(), tb_log_dir)
+        # Ensure log_dir for TensorBoard is absolute and unique if needed
+        tb_log_dir_rel = tb_cfg.get('log_dir', 'logs/classification_tb') # Use a distinct name like classification_tb
+        if not os.path.isabs(tb_log_dir_rel):
+            tb_log_dir_abs = os.path.join(_get_project_root(), tb_log_dir_rel)
         else:
-            tb_log_dir_abs = tb_log_dir
-        os.makedirs(tb_log_dir_abs, exist_ok=True) 
+            tb_log_dir_abs = tb_log_dir_rel
+        
+        # Optional: Add a timestamp to make log dirs unique per run
+        # from datetime import datetime
+        # current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # tb_log_dir_abs = os.path.join(tb_log_dir_abs, current_time)
+
+        os.makedirs(tb_log_dir_abs, exist_ok=True) # Ensure it exists
         logger.info(f"TensorBoard logs (within train_model) will be saved to: {tb_log_dir_abs}")
         callbacks_list.append(
             callbacks.TensorBoard(
@@ -259,7 +293,7 @@ def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset
             epochs=epochs,
             validation_data=val_dataset,
             callbacks=callbacks_list,
-            verbose=1 
+            verbose=2
         )
         logger.info("Model training completed.")
 
@@ -314,14 +348,6 @@ def main(config_path: str):
 
     logger.info(f"Expecting metadata to be read by load_classification_data using relative path from config: {paths_cfg.get('data_dir', 'data/classification')}/{paths_cfg.get('metadata_filename', 'metadata.json')}")
     logger.info(f"Expecting label map to be read by load_classification_data using relative path from config: {label_map_dir_rel}/{label_map_filename}")
-
-    try:
-        logger.info(f"--- Introspecting load_classification_data ---")
-        logger.info(f"Source file for load_classification_data: {inspect.getfile(load_classification_data)}")
-        logger.info(f"Source code for load_classification_data:\n{inspect.getsource(load_classification_data)}")
-        logger.info(f"--- End Introspection ---")
-    except Exception as e_inspect:
-        logger.error(f"Error during introspection: {e_inspect}")
 
     # Call load_classification_data with the main config object.
     # The function load_classification_data is responsible for extracting
