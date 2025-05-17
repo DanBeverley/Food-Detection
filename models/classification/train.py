@@ -7,8 +7,7 @@ import traceback
 
 import tensorflow as tf
 from tensorflow.keras import models, layers, optimizers, losses, callbacks, applications, metrics
-from tensorflow.keras.mixed_precision import experimental as mixed_precision_experimental # For TF < 2.11
-from tensorflow.keras import mixed_precision # For TF >= 2.11
+from tensorflow.keras import mixed_precision # For TF >= 2.11 (and Keras 3)
 
 from typing import Dict, Tuple, Any
 
@@ -90,12 +89,8 @@ def set_mixed_precision_policy(config: Dict, strategy: tf.distribute.Strategy):
                 policy = mixed_precision.Policy(policy_name)
                 mixed_precision.set_global_policy(policy)
                 logger.info(f"Using tf.keras.mixed_precision.set_global_policy. Compute dtype: {policy.compute_dtype}, Variable dtype: {policy.variable_dtype}")
-            elif hasattr(mixed_precision_experimental, 'set_policy'): # Older TF
-                policy = mixed_precision_experimental.Policy(policy_name)
-                mixed_precision_experimental.set_policy(policy)
-                logger.info(f"Using tf.keras.mixed_precision.experimental.set_policy (older TF). Compute dtype: {policy.compute_dtype}, Variable dtype: {policy.variable_dtype}")
             else:
-                logger.warning(f"Could not set mixed precision policy. API not found.")
+                logger.warning(f"Could not set mixed precision policy. tf.keras.mixed_precision.set_global_policy API not found. Ensure TensorFlow/Keras version is compatible.")
     else:
         logger.info("Mixed precision training not enabled in config.")
 
