@@ -215,18 +215,22 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
 
     def load_and_preprocess(path: str, label: int, augment: bool = False) -> Tuple[tf.Tensor, tf.Tensor]:
         image_string = tf.io.read_file(path)
-        image = tf.image.decode_image(image_string, channels=3, expand_animations=False)
+        image = tf.image.decode_image(image_string, channels=3, expand_animations=False, dtype=tf.uint8) # Explicitly decode to uint8 first
         image = tf.image.resize(image, image_size)
-        image.set_shape([*image_size, 3]) # Ensure shape consistency
+        image = tf.cast(image, tf.float32) # Cast to float32 early
+        image.set_shape([*image_size, 3]) # Ensure shape consistency for the float32 image
+
         # Augmentation happens BEFORE a Keras model's preprocess_input usually
         if augment and augmentation_pipeline is not None:
             # Augmentation pipeline expects batch dim, then removes it
-            img_for_aug = tf.expand_dims(tf.cast(image, tf.float32), axis=0)
+            # Image is already float32 here
+            img_for_aug = tf.expand_dims(image, axis=0) 
             img_aug = augmentation_pipeline(img_for_aug, training=True)
             image = tf.squeeze(img_aug, axis=0)
-            image = tf.clip_by_value(image, 0.0, 255.0) # Ensure valid pixel range post-aug
+            image = tf.clip_by_value(image, 0.0, 255.0) 
         
-        image_preprocessed = preprocess_fn(tf.cast(image, tf.float32))
+        # Image is already float32
+        image_preprocessed = preprocess_fn(image)
         return image_preprocessed, label
 
     AUTOTUNE = tf.data.AUTOTUNE
