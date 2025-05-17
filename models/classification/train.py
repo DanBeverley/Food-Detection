@@ -1,14 +1,29 @@
-import os
+import yaml
 import argparse
 import logging
-import yaml
+import os
 import json
 import traceback
 
 import tensorflow as tf
 from tensorflow.keras import models, layers, optimizers, losses, callbacks, applications, metrics
 from typing import Dict, Tuple
-import traceback
+
+# Configure TensorFlow to use only the first GPU and enable memory growth
+logger = logging.getLogger(__name__) # Get logger early for GPU setup logging
+try:
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        logger.info(f"Found GPUs: {gpus}")
+        # Restrict TensorFlow to only use the first GPU
+        tf.config.experimental.set_visible_devices(gpus[0], 'GPU')
+        # Enable memory growth for the selected GPU
+        tf.config.experimental.set_memory_growth(gpus[0], True)
+        logger.info(f"Restricted TensorFlow to use GPU: {gpus[0].name} and enabled memory growth.")
+    else:
+        logger.warning("No GPUs found by TensorFlow. Training will use CPU.")
+except Exception as e:
+    logger.error(f"Error during GPU setup: {e}. TensorFlow might use default GPU settings or CPU.")
 
 from data import load_classification_data, _get_project_root
 
