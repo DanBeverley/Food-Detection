@@ -221,16 +221,19 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
         image.set_shape([*image_size, 3]) # Ensure shape consistency for the float32 image
 
         # Augmentation happens BEFORE a Keras model's preprocess_input usually
-        if augment and augmentation_pipeline is not None:
+        if augment and augmentation_pipeline is not None: 
             # Augmentation pipeline expects batch dim, then removes it
             # Image is already float32 here
             img_for_aug = tf.expand_dims(image, axis=0) 
             img_aug = augmentation_pipeline(img_for_aug, training=True)
             image = tf.squeeze(img_aug, axis=0)
-            image = tf.clip_by_value(image, 0.0, 255.0) 
+            image = tf.clip_by_value(image, 0.0, 255.0)
         
-        # Image is already float32
-        image_preprocessed = preprocess_fn(image)
+        # Image is already float32 (0-255 range typically if no prior scaling in aug)
+        # TEMPORARILY BYPASS MODEL-SPECIFIC PREPROCESSING FOR TPU DEBUGGING
+        logger.info("TEMPORARY DEBUG: Using generic image scaling (image / 255.0) instead of model-specific preprocess_fn.")
+        image_preprocessed = image / 255.0 
+        # image_preprocessed = preprocess_fn(image) # ORIGINAL LINE - RESTORE AFTER DEBUGGING
         return image_preprocessed, label
 
     AUTOTUNE = tf.data.AUTOTUNE
