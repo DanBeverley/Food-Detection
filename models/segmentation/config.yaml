@@ -1,7 +1,7 @@
 data:
   metadata_path: "data/segmentation/metadata.json"
   image_size: [256, 256] 
-  batch_size: 16
+  batch_size: 8 # Reduced from 16 to prevent OOM
   validation_split_ratio: 0.2 # Updated from 0.0, adjust as needed
   test_split_ratio: 0.1       # Updated from 0.0, adjust as needed
   num_classes: 2 # Number of segmentation classes (e.g., 1 for foreground + 1 for background, or N food classes + background)
@@ -94,7 +94,7 @@ training:
 evaluation:
   # Optional: Specify model for evaluation, defaults to best checkpoint or final model
   # keras_model_filename: "unet_best_model.h5"
-  batch_size: 16 
+  batch_size: 8 # Reduced from 16 to prevent OOM
 
 # Paths Configuration 
 paths:
