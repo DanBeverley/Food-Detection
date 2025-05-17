@@ -237,7 +237,9 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
 
     train_dataset = tf.data.Dataset.from_tensor_slices((train_paths, train_labels))
     # Apply specific per-image augmentations here if not handled by the sequential pipeline
-    train_dataset = train_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=data_cfg.get('augmentation', {}).get('enabled', False)), num_parallel_calls=AUTOTUNE)
+    # TEMPORARILY DISABLE AUGMENTATION FOR DEBUGGING TPU TRANSFER MANAGER ERROR
+    logger.info("TEMPORARY DEBUG: Augmentation is being bypassed for the training dataset to debug TPU issues.")
+    train_dataset = train_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=False), num_parallel_calls=AUTOTUNE)
     train_dataset = train_dataset.shuffle(buffer_size=max(1000, len(train_paths)))
     train_dataset = train_dataset.batch(batch_size)
     train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
