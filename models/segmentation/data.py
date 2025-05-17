@@ -10,7 +10,6 @@ import json
 import traceback 
 import sys
 import math # For PI
-import tensorflow_addons as tfa # For advanced image augmentations
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -224,14 +223,25 @@ def _adjust_brightness(image: tf.Tensor, mask: tf.Tensor, brightness_delta_tf: t
 
 @tf.function(reduce_retracing=True)
 def _rotate_image_and_mask(image: tf.Tensor, mask: tf.Tensor, max_angle_deg_tf: tf.Tensor, prob_tf: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Conditionally rotates image and mask using tfa.image.rotate."""
+    """Conditionally rotates image and mask using tf.image.transform."""
     def apply_rotation_fn():
         max_angle_rad = max_angle_deg_tf * (math.pi / 180.0)
         angle = tf.random.uniform(shape=[], minval=-max_angle_rad, maxval=max_angle_rad)
-        # Use 'reflect' fill mode for image, 'constant' (0=background) for mask
-        rotated_image = tfa.image.rotate(image, angle, interpolation='BILINEAR', fill_mode='reflect')
-        rotated_mask = tfa.image.rotate(mask, angle, interpolation='NEAREST', fill_mode='constant', fill_value=0)
-        return rotated_image, rotated_mask
+        
+        img_dtype = image.dtype
+        msk_dtype = mask.dtype
+        image_float = tf.cast(image, tf.float32)
+        mask_float = tf.cast(mask, tf.float32)
+
+        # tf.image.transform rotates counter-clockwise around the center of the image when 'transforms' is a scalar angle.
+        rotated_image_float = tf.image.transform(images=image_float, transforms=angle, interpolation='BILINEAR', fill_mode='REFLECT')
+        rotated_mask_float = tf.image.transform(images=mask_float, transforms=angle, interpolation='NEAREST', fill_mode='CONSTANT') # fill_value=0 is default for CONSTANT
+
+        rotated_image_out = tf.cast(rotated_image_float, img_dtype)
+        rotated_mask_out = tf.cast(rotated_mask_float, msk_dtype)
+        
+        return rotated_image_out, rotated_mask_out
+
     def no_rotation_fn():
         return image, mask
     should_apply = tf.random.uniform(shape=[], dtype=tf.float32) < prob_tf
@@ -239,19 +249,34 @@ def _rotate_image_and_mask(image: tf.Tensor, mask: tf.Tensor, max_angle_deg_tf: 
 
 @tf.function(reduce_retracing=True)
 def _shift_image_and_mask(image: tf.Tensor, mask: tf.Tensor, width_shift_fraction_tf: tf.Tensor, height_shift_fraction_tf: tf.Tensor, prob_tf: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Conditionally shifts image and mask using tfa.image.translate."""
+    """Conditionally shifts image and mask using tf.image.transform."""
     def apply_shift_fn():
         img_shape = tf.shape(image)
-        img_height = tf.cast(img_shape[0], tf.float32)
-        img_width = tf.cast(img_shape[1], tf.float32)
+        img_height_float = tf.cast(img_shape[0], tf.float32)
+        img_width_float = tf.cast(img_shape[1], tf.float32)
 
-        dx = tf.random.uniform(shape=[], minval=-width_shift_fraction_tf, maxval=width_shift_fraction_tf) * img_width
-        dy = tf.random.uniform(shape=[], minval=-height_shift_fraction_tf, maxval=height_shift_fraction_tf) * img_height
-        translations = tf.stack([dx, dy]) # Changed from tf.convert_to_tensor
-        # Use 'reflect' fill mode for image, 'constant' (0=background) for mask
-        shifted_image = tfa.image.translate(image, translations, interpolation='BILINEAR', fill_mode='reflect') # or 'constant' with fill_value
-        shifted_mask = tfa.image.translate(mask, translations, interpolation='NEAREST', fill_mode='constant', fill_value=0) # Assuming 0 is bg for mask
-        return shifted_image, shifted_mask
+        dx = tf.random.uniform(shape=[], minval=-width_shift_fraction_tf, maxval=width_shift_fraction_tf) * img_width_float
+        dy = tf.random.uniform(shape=[], minval=-height_shift_fraction_tf, maxval=height_shift_fraction_tf) * img_height_float
+        
+        # Transformation matrix for translation [1, 0, dx, 0, 1, dy, 0, 0]
+        # Positive dx shifts right, positive dy shifts down.
+        transform_matrix = tf.convert_to_tensor([1.0, 0.0, dx,  # ax, ay, a0 (x component)
+                                                 0.0, 1.0, dy,  # bx, by, b0 (y component)
+                                                 0.0, 0.0], dtype=tf.float32) # Perspective components (not used for affine)
+        
+        img_dtype = image.dtype
+        msk_dtype = mask.dtype
+        image_float = tf.cast(image, tf.float32)
+        mask_float = tf.cast(mask, tf.float32)
+
+        shifted_image_float = tf.image.transform(image_float, transform_matrix, interpolation='BILINEAR', fill_mode='REFLECT')
+        shifted_mask_float = tf.image.transform(mask_float, transform_matrix, interpolation='NEAREST', fill_mode='CONSTANT')
+
+        shifted_image_out = tf.cast(shifted_image_float, img_dtype)
+        shifted_mask_out = tf.cast(shifted_mask_float, msk_dtype)
+        
+        return shifted_image_out, shifted_mask_out
+        
     def no_shift_fn():
         return image, mask
     should_apply = tf.random.uniform(shape=[], dtype=tf.float32) < prob_tf
