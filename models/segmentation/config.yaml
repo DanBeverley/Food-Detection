@@ -50,7 +50,8 @@ loss:
 # Training Configuration
 training:
   epochs: 100
-  use_mixed_precision: false
+  use_mixed_precision: true
+  use_tpu: false
   metrics: ["mean_iou", "accuracy"] # Metrics to be used during training and evaluation
 
   callbacks:
@@ -81,7 +82,7 @@ training:
       enabled: true
       log_dir: "logs/segmentation/"
       histogram_freq: 0
-      write_graph: true
+      write_graph: false
       update_freq: "epoch"
 
     lr_scheduler:

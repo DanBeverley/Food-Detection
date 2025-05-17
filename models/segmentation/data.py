@@ -395,75 +395,45 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         if not items_list:
             return None
 
-        img_paths = [item['image_path'] for item in items_list]
+        image_paths = [item['image_path'] for item in items_list]
         mask_paths = [item['mask_path'] for item in items_list]
 
-        dataset = tf.data.Dataset.from_tensor_slices((img_paths, mask_paths))
+        dataset = tf.data.Dataset.from_tensor_slices((image_paths, mask_paths))
 
-        # These are captured by _py_func_map_wrapper from create_dataset's scope
-        # Note: image_size, num_classes, and aug_settings are from load_segmentation_data's scope, captured by create_dataset
-        current_preprocess_input_fn = _get_segmentation_preprocess_fn(backbone)
-        current_aug_settings = aug_settings if augment_flag else None # Pass None if no aug for this dataset split
-
-        # Define the wrapper function that tf.py_function will call.
-        # This wrapper has access to current_preprocess_input_fn and current_aug_settings via closure.
-        def _py_func_map_wrapper(img_path_t, mask_path_t, target_size_t, num_classes_t, augment_tensor_t):
-            return load_and_preprocess_segmentation(
-                img_path_t, mask_path_t, 
-                target_size_t, num_classes_t, 
-                augment_tensor_t,
-                current_preprocess_input_fn,  # Captured from create_dataset's scope
-                current_aug_settings          # Captured from create_dataset's scope
-            )
+        # Convert Python types to TensorFlow constants for use in tf.function
+        target_size_tf = tf.constant(list(image_size), dtype=tf.int32)
+        num_classes_tf = tf.constant(num_classes, dtype=tf.int32)
+        augment_tf = tf.constant(augment_flag, dtype=tf.bool) # Pass Python bool directly
+        
+        # Capture Python variables that need to be passed to the tf.function
+        # The preprocess_fn and aug_config are determined before mapping starts
+        current_preprocess_fn = _get_segmentation_preprocess_fn(backbone)
+        current_aug_config = aug_settings if augment_flag else None
 
         dataset = dataset.map(
-            lambda img_path, mask_path: tf.py_function(
-                func=_py_func_map_wrapper, # Use the wrapper
-                inp=[
-                    img_path, 
-                    mask_path, 
-                    tf.constant(image_size, dtype=tf.int32), # target_size_tensor for the wrapper
-                    tf.constant(num_classes, dtype=tf.int32),# num_classes_tensor for the wrapper
-                    tf.constant(augment_flag, dtype=tf.bool) # augment_tensor for the wrapper
-                ],
-                Tout=[tf.float32, tf.float32] 
+            lambda img_p, msk_p: load_and_preprocess_segmentation(
+                img_p, msk_p, 
+                target_size_tf, 
+                num_classes_tf, 
+                augment_tf, 
+                current_preprocess_fn, 
+                current_aug_config
             ),
             num_parallel_calls=AUTOTUNE
         )
-            
-        def _set_shape(image, mask):
-            # image_size is a tuple (H, W), num_classes is an int
-            image.set_shape([*image_size, 3])
-            mask.set_shape([*image_size, 1])
-            return image, mask
-        dataset = dataset.map(_set_shape, num_parallel_calls=AUTOTUNE)
+        
+        if augment_flag:
+            logger.info("Applying .cache() to the training segmentation dataset after mapping. This will use more RAM.")
+        else:
+            logger.info("Applying .cache() to the validation/test segmentation dataset after mapping.")
+        dataset = dataset.cache() # Cache after mapping
 
-        if augment_flag: # This uses the parameter passed to create_dataset
-            # Cache after initial load and preprocess, before shuffle and augmentations applied in map
-            # Note: if load_and_preprocess_segmentation contains the actual augmentation logic,
-            # caching should ideally be before that map if augmentations are random per epoch.
-            # Given the current structure where load_and_preprocess_segmentation conditionally calls augmentations,
-            # caching here means augmented data might be cached if augment_flag is True for the initial map.
-            # Re-evaluating: augmentations are inside load_and_preprocess_segmentation, controlled by augment_tensor.
-            # So, caching *after* the map that includes load_and_preprocess_segmentation means we cache *augmented* versions.
-            # For true randomness per epoch, augmentations should be after cache.
-            # However, load_and_preprocess_segmentation itself has the augment_tensor and aug_settings.
-            # Let's assume the map with py_function is the one doing deterministic parts + potentially augmentations.
-            # For simplicity and to ensure augmentations are re-applied if they are indeed random within the py_function call per epoch,
-            # we should cache *before* the map that does augmentations if they are truly random per-epoch.
-            # Given the `augment_tensor` is passed into the map, this implies augmentations are applied within that map.
-            # The current `load_and_preprocess_segmentation` has an `augment_tensor` argument.
-            # Let's put cache *after* the main mapping but *before* shuffle for training data.
-            # This will cache the (potentially augmented if `augment_flag` was true for that mapping) data.
-            dataset = dataset.cache() # Cache the training data after mapping
-            dataset = dataset.shuffle(buffer_size=1024) # Reduced buffer size
+        if augment_flag: # Shuffle only training data
+            # Use a buffer size proportional to dataset size, or a large fixed number
+            buffer_sz = max(1000, len(items_list))
+            dataset = dataset.shuffle(buffer_size=buffer_sz, seed=random_seed)
         
         dataset = dataset.batch(batch_size)
-        # For training data (augment_flag is True), make it repeat indefinitely
-        # This is standard practice when using steps_per_epoch with model.fit()
-        if augment_flag:
-            dataset = dataset.repeat()
-            
         dataset = dataset.prefetch(buffer_size=AUTOTUNE)
         return dataset
 

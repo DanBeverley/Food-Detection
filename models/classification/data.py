@@ -229,20 +229,17 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
             image = tf.squeeze(img_aug, axis=0)
             image = tf.clip_by_value(image, 0.0, 255.0)
         
-        # Image is already float32 (0-255 range typically if no prior scaling in aug)
-        # TEMPORARILY BYPASS MODEL-SPECIFIC PREPROCESSING FOR TPU DEBUGGING
-        logger.info("TEMPORARY DEBUG: Using generic image scaling (image / 255.0) instead of model-specific preprocess_fn.")
-        image_preprocessed = image / 255.0 
-        # image_preprocessed = preprocess_fn(image) # ORIGINAL LINE - RESTORE AFTER DEBUGGING
+        # Image is already float32
+        image_preprocessed = preprocess_fn(image)
         return image_preprocessed, label
 
     AUTOTUNE = tf.data.AUTOTUNE
 
     train_dataset = tf.data.Dataset.from_tensor_slices((train_paths, train_labels))
     # Apply specific per-image augmentations here if not handled by the sequential pipeline
-    # TEMPORARILY DISABLE AUGMENTATION FOR DEBUGGING TPU TRANSFER MANAGER ERROR
-    logger.info("TEMPORARY DEBUG: Augmentation is being bypassed for the training dataset to debug TPU issues.")
-    train_dataset = train_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=False), num_parallel_calls=AUTOTUNE)
+    train_dataset = train_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=data_cfg.get('augmentation', {}).get('enabled', False)), num_parallel_calls=AUTOTUNE)
+    logger.info("Applying .cache() to the training dataset after mapping. This will use more RAM but speed up subsequent epochs.")
+    train_dataset = train_dataset.cache() # Cache after mapping
     train_dataset = train_dataset.shuffle(buffer_size=max(1000, len(train_paths)))
     train_dataset = train_dataset.batch(batch_size)
     train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
@@ -252,6 +249,8 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
     if val_paths:
         val_dataset = tf.data.Dataset.from_tensor_slices((val_paths, val_labels))
         val_dataset = val_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=False), num_parallel_calls=AUTOTUNE)
+        logger.info("Applying .cache() to the validation dataset after mapping.")
+        val_dataset = val_dataset.cache() # Cache after mapping
         val_dataset = val_dataset.batch(batch_size)
         val_dataset = val_dataset.prefetch(buffer_size=AUTOTUNE)
         logger.info("Validation dataset created.")

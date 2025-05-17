@@ -48,6 +48,7 @@ metrics: ["accuracy"] # List of metrics, e.g., ['accuracy', 'sparse_top_k_catego
 training:
   epochs: 100 # Set epochs for full training, early stopping will manage duration
   use_mixed_precision: true
+  use_tpu: false # Explicitly set to false for GPU training
   callbacks:
     model_checkpoint:
       enabled: true
@@ -73,7 +74,7 @@ training:
       enabled: true
       log_dir: "logs/classification/" # Will be created relative to project root
       histogram_freq: 0 # Set to 1 to enable histograms (can consume disk space)
-      write_graph: true
+      write_graph: false
       update_freq: "epoch"
     lr_scheduler:
       enabled: true
