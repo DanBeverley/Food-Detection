@@ -7,6 +7,7 @@ import logging
 from sklearn.model_selection import train_test_split
 import pathlib
 # import glob # No longer needed
+from tqdm import tqdm # Import tqdm
 
 # Dynamic import for preprocess_input
 _PREPROCESS_FN_CACHE = {}
@@ -140,30 +141,22 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
     for i, item_raw in enumerate(metadata_list[:3]):
         logger.info(f"DEBUG: Raw metadata item {i}: {item_raw}")
 
-    for idx, item in enumerate(metadata_list):
+    logger.info("Processing metadata entries from metadata.json...")
+    for item in tqdm(metadata_list, desc="Validating image paths from metadata.json"):
         class_name = item.get('class_name')
         img_path = item.get('image_path')
         instance_name = item.get('instance_name')
-
-        if idx < 3:
-            logger.info(f"DEBUG: Processing item {idx}: class_name='{class_name}', img_path='{img_path}', instance_name='{instance_name}'")
 
         if not (class_name and img_path and instance_name):
             logger.warning(f"Skipping incomplete metadata item: {item}")
             continue
         
         class_in_map = class_name in label_to_index
-        if idx < 3:
-            logger.info(f"DEBUG: Item {idx}: class_name='{class_name}' in label_to_index? {class_in_map}")
-
         if not class_in_map:
             logger.warning(f"Class '{class_name}' in metadata (img: {img_path}) not in label_map. Skipping.")
             continue
         
         img_file_exists = pathlib.Path(img_path).is_file()
-        if idx < 3:
-             logger.info(f"DEBUG: Item {idx}: img_path='{img_path}' exists? {img_file_exists}")
-        
         if not img_file_exists:
              logger.warning(f"Image file not found: {img_path} (from metadata). Skipping.")
              continue
