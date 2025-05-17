@@ -245,12 +245,10 @@ def main():
         'epochs': epochs,
         'callbacks': callbacks_list,
         'verbose': 1,
-        'steps_per_epoch': 20 # For faster pipeline testing, process fewer batches
     }
 
     if val_dataset:
         fit_kwargs['validation_data'] = val_dataset
-        fit_kwargs['validation_steps'] = 5 # For faster pipeline testing
     else:
         logger.info("No validation dataset provided or it's empty. Skipping validation during fit.")
         # No need to explicitly pass validation_data=None if not present in kwargs
