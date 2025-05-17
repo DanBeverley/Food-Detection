@@ -18,8 +18,8 @@ data:
 model:
   architecture: "EfficientNetV2B0" 
   use_pretrained_weights: true 
-  fine_tune: false 
-  fine_tune_layers: 10 
+  fine_tune: true 
+  fine_tune_layers: 30 
 
   # Classification Head Configuration
   classification_head:
@@ -33,7 +33,7 @@ model:
 # --- Optimizer Configuration ---
 optimizer:
   name: "Adam" # 'Adam', 'SGD', 'RMSprop' (potentially 'AdamW' if tensorflow-addons installed)
-  learning_rate: 0.001
+  learning_rate: 0.0001
   # momentum: 0.9 # Only used for SGD
   # weight_decay: 0.0001 # Only used for AdamW
 
