@@ -1,7 +1,5 @@
 data:
-  metadata_path: "data/segmentation/metadata.json" # Path relative to project root
-  # image_dir: "data/segmentation/images/" # Commented out: metadata.json will be used
-  # mask_dir: "data/segmentation/masks/"   # Commented out: metadata.json will be used
+  metadata_path: "data/segmentation/metadata.json"
   image_size: [256, 256] 
   batch_size: 16
   validation_split_ratio: 0.2 # Updated from 0.0, adjust as needed
@@ -51,7 +49,7 @@ loss:
 
 # Training Configuration
 training:
-  epochs: 100 # IMPORTANT: Increase for actual training after testing pipeline
+  epochs: 100
   use_mixed_precision: false
   metrics: ["mean_iou", "accuracy"] # Metrics to be used during training and evaluation
 

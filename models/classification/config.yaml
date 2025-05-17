@@ -1,30 +1,29 @@
 data:
-  metadata_path: "data/classification/metadata.json" # Path relative to project root
-  # data_dir: "C:/Users/ADMIN/Documents/GitHub/Food-Detection/data/dummy_classification/processed" # Commented out: metadata.json now uses absolute paths
+  metadata_path: "data/classification/metadata.json" 
   image_size: [224, 224]
-  batch_size: 32
+  batch_size: 16 
   split_ratio: 0.2
 
   augmentation:
     enabled: true
-    rotation_range: 20 # degrees
-    width_shift_range: 0.1 # fraction of total width
-    height_shift_range: 0.1 # fraction of total height
+    rotation_range: 20 
+    width_shift_range: 0.1 
+    height_shift_range: 0.1
     shear_range: 0.1
     zoom_range: 0.1
     horizontal_flip: true
-    brightness_range: [0.8, 1.2] # Min/max brightness factor
+    brightness_range: [0.8, 1.2] 
 
 # Model Configuration 
 model:
-  architecture: "EfficientNetV2B0" # e.g., EfficientNetV2B0, EfficientNetV2S, ConvNeXtTiny
+  architecture: "EfficientNetV2B0" 
   use_pretrained_weights: true 
   fine_tune: false 
   fine_tune_layers: 10 
 
   # Classification Head Configuration
   classification_head:
-    pooling: "GlobalAveragePooling2D" # 'GlobalAveragePooling2D' or 'GlobalMaxPooling2D' or 'Flatten'
+    pooling: "GlobalAveragePooling2D" 
     dense_layers: [256] 
     dropout: 0.5 
     activation: "relu" 
@@ -42,7 +41,7 @@ optimizer:
 loss:
   name: "sparse_categorical_crossentropy" # 'sparse_categorical_crossentropy', 'categorical_crossentropy' (requires one-hot labels)
 
-# --- Metrics Configuration ---
+# Metrics Configuration
 metrics: ["accuracy"] # List of metrics, e.g., ['accuracy', 'sparse_top_k_categorical_accuracy']
 
 # Training Configuration
