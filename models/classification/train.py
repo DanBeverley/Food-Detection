@@ -7,6 +7,8 @@ import traceback
 
 import tensorflow as tf
 from tensorflow.keras import models, layers, optimizers, losses, callbacks, applications, metrics
+from tensorflow.keras.applications import MobileNetV2 # Added for MobileNetV2
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input as mobilenet_v2_preprocess_input # Added for MobileNetV2
 from tensorflow.keras import mixed_precision # For TF >= 2.11 (and Keras 3)
 
 from typing import Dict, Tuple, Any
@@ -168,6 +170,8 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
             base_model = base_model_class(include_top=False, input_shape=input_shape, weights=weights)
         except AttributeError:
             raise ValueError(f"Unsupported ConvNeXt variant: {architecture}")
+    elif architecture == "MobileNetV2": # Added MobileNetV2
+        base_model = MobileNetV2(include_top=False, input_shape=input_shape, weights=weights)
     else:
         raise ValueError(f"Unsupported architecture: {architecture}")
 
