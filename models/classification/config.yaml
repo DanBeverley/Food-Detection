@@ -24,8 +24,8 @@ model:
   # Classification Head Configuration
   classification_head:
     pooling: "GlobalAveragePooling2D" 
-    dense_layers: [256] 
-    dropout: 0.5 
+    dense_layers: [128] 
+    dropout: 0.6 
     activation: "relu" 
     final_activation: "softmax"
     kernel_l2_factor: 0.001 # Add L2 regularization factor (e.g., 0.001, set to 0.0 or remove to disable)
@@ -61,14 +61,14 @@ training:
       enabled: true
       monitor: "val_loss"
       mode: "min"
-      patience: 10
+      patience: 15
       restore_best_weights: true
     reduce_lr_on_plateau:
       enabled: true
       monitor: "val_loss"
       mode: "min"
       factor: 0.2
-      patience: 5
+      patience: 3
       min_lr: 0.000001
     tensorboard:
       enabled: true
