@@ -7,23 +7,97 @@ import traceback
 
 import tensorflow as tf
 from tensorflow.keras import models, layers, optimizers, losses, callbacks, applications, metrics
-from typing import Dict, Tuple
+from tensorflow.keras.mixed_precision import experimental as mixed_precision_experimental # For TF < 2.11
+from tensorflow.keras import mixed_precision # For TF >= 2.11
 
-# Configure TensorFlow to use only the first GPU and enable memory growth
-logger = logging.getLogger(__name__) # Get logger early for GPU setup logging
-try:
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
-        logger.info(f"Found GPUs: {gpus}")
-        # Restrict TensorFlow to only use the first GPU
-        tf.config.experimental.set_visible_devices(gpus[0], 'GPU')
-        # Enable memory growth for the selected GPU
-        tf.config.experimental.set_memory_growth(gpus[0], True)
-        logger.info(f"Restricted TensorFlow to use GPU: {gpus[0].name} and enabled memory growth.")
+from typing import Dict, Tuple, Any
+
+logger = logging.getLogger(__name__) # Get logger early
+
+def initialize_strategy() -> tf.distribute.Strategy:
+    """Initializes and returns the appropriate TensorFlow distribution strategy."""
+    try:
+        # Try to connect to a TPU cluster
+        tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver.connect()
+        if tpu_resolver: # TPU found
+            logger.info(f'Running on TPU: {tpu_resolver.master()}')
+            tf.config.experimental_connect_to_cluster(tpu_resolver)
+            tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
+            strategy = tf.distribute.TPUStrategy(tpu_resolver)
+            logger.info(f"TPU strategy initialized with {strategy.num_replicas_in_sync} replicas.")
+            return strategy
+    except ValueError as e:
+        # TPUClusterResolver.connect() raises ValueError if TPU is not found or already initialized.
+        logger.info(f"TPU not found or error connecting: {e}. Checking for GPUs.")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during TPU initialization: {e}. Checking for GPUs.")
+
+    # Fallback to GPU/CPU strategy
+    try:
+        gpus = tf.config.experimental.list_physical_devices('GPU')
+        if gpus:
+            logger.info(f"Found GPUs: {gpus}")
+            # Restrict TensorFlow to only use the first GPU for simplicity if multiple are present
+            # and not using MirroredStrategy explicitly for multi-GPU in this script yet.
+            tf.config.experimental.set_visible_devices(gpus[0], 'GPU')
+            tf.config.experimental.set_memory_growth(gpus[0], True)
+            logger.info(f"Restricted TensorFlow to use GPU: {gpus[0].name} and enabled memory growth.")
+            # For single GPU, default strategy is fine. For multiple, MirroredStrategy would be explicit.
+            # tf.distribute.get_strategy() will reflect this single visible GPU.
+        else:
+            logger.warning("No GPUs found by TensorFlow. Training will use CPU.")
+    except Exception as e:
+        logger.error(f"Error during GPU setup: {e}. TensorFlow might use default GPU settings or CPU.")
+    
+    # Default strategy for CPU or single configured GPU
+    # If multiple GPUs were visible and no specific strategy chosen, MirroredStrategy would be default.
+    # Since we made only one GPU visible, this will effectively be OneDeviceStrategy on that GPU.
+    strategy = tf.distribute.get_strategy()
+    logger.info(f"Using default strategy (CPU or single GPU): {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
+    return strategy
+
+# Potentially set mixed precision policy based on config
+def set_mixed_precision_policy(config: Dict, strategy: tf.distribute.Strategy):
+    if config.get('training', {}).get('use_mixed_precision', False):
+        policy_name = ''
+        if isinstance(strategy, tf.distribute.TPUStrategy):
+            policy_name = 'mixed_bfloat16' # TPUs prefer bfloat16
+            logger.info("TPU detected, using 'mixed_bfloat16' for mixed precision.")
+        else:
+            # Check GPU compatibility for float16 (Compute Capability >= 7.0)
+            gpu_compatible = False
+            try:
+                gpus = tf.config.experimental.list_physical_devices('GPU')
+                if gpus:
+                    # Check details of the visible GPU (we made only one visible earlier)
+                    details = tf.config.experimental.get_device_details(gpus[0])
+                    if details.get('compute_capability', (0,0))[0] >= 7:
+                        gpu_compatible = True
+            except Exception as e:
+                logger.warning(f"Could not get GPU details for mixed precision check: {e}")
+
+            if gpu_compatible:
+                policy_name = 'mixed_float16'
+                logger.info("Compatible GPU detected, using 'mixed_float16' for mixed precision.")
+            else:
+                logger.warning("Mixed precision enabled in config, but no compatible GPU (Compute Capability >= 7.0) or TPU found. Mixed precision will not be used effectively for GPU.")
+                # Fallback to no policy or float32 if GPU not compatible
+                return 
+
+        if policy_name:
+            logger.info(f"Setting mixed precision policy to '{policy_name}'.")
+            if hasattr(tf.keras.mixed_precision, 'set_global_policy'):
+                policy = mixed_precision.Policy(policy_name)
+                mixed_precision.set_global_policy(policy)
+                logger.info(f"Using tf.keras.mixed_precision.set_global_policy. Compute dtype: {policy.compute_dtype}, Variable dtype: {policy.variable_dtype}")
+            elif hasattr(mixed_precision_experimental, 'set_policy'): # Older TF
+                policy = mixed_precision_experimental.Policy(policy_name)
+                mixed_precision_experimental.set_policy(policy)
+                logger.info(f"Using tf.keras.mixed_precision.experimental.set_policy (older TF). Compute dtype: {policy.compute_dtype}, Variable dtype: {policy.variable_dtype}")
+            else:
+                logger.warning(f"Could not set mixed precision policy. API not found.")
     else:
-        logger.warning("No GPUs found by TensorFlow. Training will use CPU.")
-except Exception as e:
-    logger.error(f"Error during GPU setup: {e}. TensorFlow might use default GPU settings or CPU.")
+        logger.info("Mixed precision training not enabled in config.")
 
 from data import load_classification_data, _get_project_root
 
@@ -192,7 +266,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     model.summary(print_fn=logger.info)
     return model
 
-def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset, config: Dict, index_to_label_map: Dict) -> None:
+def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset, config: Dict, index_to_label_map: Dict, strategy: tf.distribute.Strategy) -> None:
     """
     Train the classification model with callbacks and save artifacts.
 
@@ -202,6 +276,7 @@ def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset
         val_dataset: Validation tf.data.Dataset.
         config: Dictionary containing training configuration (the entire content of config.yaml).
         index_to_label_map: Mapping from integer index to string label.
+        strategy: Distribution strategy.
 
     Raises:
         RuntimeError: If training fails.
@@ -340,12 +415,11 @@ def main(config_path: str):
         logger.error(f"An unexpected error occurred while loading config {config_path}: {e}")
         return
 
-    if config.get('training', {}).get('use_mixed_precision', False):
-        logger.info("Using mixed precision training.")
-        policy = tf.keras.mixed_precision.Policy('mixed_float16')
-        tf.keras.mixed_precision.set_global_policy(policy)
-    else:
-        logger.info("Using full precision training (float32).")
+    # Initialize distribution strategy (TPU, GPU, CPU)
+    strategy = initialize_strategy()
+
+    # Set mixed precision policy if enabled, after strategy initialization
+    set_mixed_precision_policy(config, strategy)
 
     paths_cfg = config.get('paths', {})
     project_root = _get_project_root()
@@ -388,8 +462,46 @@ def main(config_path: str):
         else:
             logger.warning(f"Unsupported LR scheduler: {schedule_name}. Using static LR.")
     
-    model = build_model(num_classes, config, learning_rate_to_use)
-    train_model(model, train_dataset, val_dataset, config, index_to_label_map)
+    # Calculate effective batch size for logging
+    per_replica_batch_size = config.get('data', {}).get('batch_size', 32)
+    global_batch_size = per_replica_batch_size * strategy.num_replicas_in_sync
+    logger.info(f"Per-replica batch size: {per_replica_batch_size}")
+    logger.info(f"Global batch size (per-replica * num_replicas): {global_batch_size}")
+    logger.info(f"Number of replicas for training: {strategy.num_replicas_in_sync}")
+
+    # --- All model building, optimizer creation, and model.compile() must be within strategy.scope() ---
+    with strategy.scope():
+        logger.info("Building model within strategy scope...")
+        # Re-get learning rate here as it might be adjusted by scheduler config later if that's moved into scope too
+        learning_rate_to_use = optimizer_cfg.get('learning_rate', 0.001) 
+        # If LR scheduler callback modifies optimizer's LR directly, it should be fine.
+        # If optimizer itself is re-created based on scheduler, that creation must be in scope.
+        
+        model = build_model(
+            num_classes=len(index_to_label_map),
+            config=config, # Pass the full config
+            learning_rate_to_use=learning_rate_to_use # Pass initial LR
+        )
+        if model is None:
+            logger.error("Model building failed. Exiting training.")
+            return
+        logger.info("Model built successfully within strategy scope.")
+
+        # Optimizer and Loss are usually implicitly handled by compile being in scope,
+        # but if you create custom optimizer/loss objects, do it here.
+        # Example: 
+        # optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_to_use)
+        # loss_fn = tf.keras.losses.SparseCategoricalCrossentropy()
+        # model.compile(optimizer=optimizer, loss=loss_fn, metrics=["accuracy"])
+        # For now, build_model handles compilation internally based on config, which is fine.
+
+    if model is None: # Should be caught above, but double check before callbacks
+        logger.error("Model is None before setting up callbacks. Exiting.")
+        return
+
+    # Callbacks
+    # Callbacks are generally fine outside the scope, but they operate on the strategy-aware model.
+    train_model(model, train_dataset, val_dataset, config, index_to_label_map, strategy)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train a classification model using a YAML configuration file.")
