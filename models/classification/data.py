@@ -24,28 +24,30 @@ def _get_preprocess_fn(architecture: str):
     if architecture in _PREPROCESS_FN_CACHE:
         return _PREPROCESS_FN_CACHE[architecture]
 
-    if architecture.startswith("EfficientNetV2"):
-        from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
-    elif architecture.startswith("EfficientNet"):
-        from tensorflow.keras.applications.efficientnet import preprocess_input
-    elif architecture.startswith("ResNet") or architecture.startswith("ConvNeXt") or architecture.startswith("MobileNet") :
-        # Assuming a common pattern for these, e.g., tf.keras.applications.resnet.preprocess_input
-        try:
-            module_name = architecture.lower().split('v')[0] # e.g. resnet, mobilenet
-            if module_name == "convnext": # tf.keras.applications.convnext.preprocess_input
-                module = __import__(f"tensorflow.keras.applications.{module_name}", fromlist=['preprocess_input'])
-            else: # e.g. tf.keras.applications.resnet50.preprocess_input
-                module = __import__(f"tensorflow.keras.applications.{architecture.lower()}", fromlist=['preprocess_input'])
-            preprocess_input = module.preprocess_input
-        except ImportError:
-            logger.warning(f"Could not dynamically import preprocess_input for {architecture}. Using generic rescaling.")
-            preprocess_input = lambda x: x / 255.0 # Fallback
+    preprocess_input_fn = None # Initialize to ensure it's always defined
+    if architecture == "MobileNet": # MobileNetV1
+        from tensorflow.keras.applications.mobilenet import preprocess_input as preprocess_input_fn
+    elif architecture == "MobileNetV2":
+        from tensorflow.keras.applications.mobilenet_v2 import preprocess_input as preprocess_input_fn
+    elif architecture == "MobileNetV3Small" or architecture == "MobileNetV3Large":
+        from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as preprocess_input_fn
+    elif architecture.startswith("EfficientNetV2"):
+        from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as preprocess_input_fn
+    elif architecture.startswith("EfficientNet"): # EfficientNetB0-B7
+            from tensorflow.keras.applications.efficientnet import preprocess_input as preprocess_input_fn
+    elif architecture.startswith("ResNet") and "V2" not in architecture: # ResNet50, ResNet101, ResNet152
+            from tensorflow.keras.applications.resnet import preprocess_input as preprocess_input_fn
+    elif architecture.startswith("ResNet") and "V2" in architecture: # ResNet50V2 etc.
+            from tensorflow.keras.applications.resnet_v2 import preprocess_input as preprocess_input_fn
+    elif architecture.startswith("ConvNeXt"):
+            from tensorflow.keras.applications.convnext import preprocess_input as preprocess_input_fn
+    # Add other architectures explicitly if needed for future use
     else:
-        logger.warning(f"Unknown architecture {architecture} for preprocess_input. Using generic rescaling.")
-        preprocess_input = lambda x: x / 255.0 # Fallback
+        logger.warning(f"Preprocessing function not explicitly defined or imported for {architecture}. Using generic scaling (image / 255.0). This may be suboptimal.")
+        preprocess_input_fn = lambda x: x / 255.0 # Fallback generic scaling
     
-    _PREPROCESS_FN_CACHE[architecture] = preprocess_input
-    return preprocess_input
+    _PREPROCESS_FN_CACHE[architecture] = preprocess_input_fn
+    return preprocess_input_fn
 
 def _build_augmentation_pipeline(config: Dict) -> Optional[tf.keras.Sequential]:
     """Builds a data augmentation pipeline from the config."""
@@ -78,9 +80,140 @@ def _build_augmentation_pipeline(config: Dict) -> Optional[tf.keras.Sequential]:
     if aug_config.get("height_shift_range", 0) > 0:
         pipeline.add(tf.keras.layers.RandomTranslation(height_factor=aug_config['height_shift_range'], width_factor=0))
     pipeline.add(tf.keras.layers.Resizing(config['image_size'][0], config['image_size'][1]))
-
-    logger.info(f"Built augmentation pipeline with {len(pipeline.layers)-1} augmentation layers.")
     return pipeline
+
+# MixUp function (to be applied after batching)
+@tf.function
+def mixup(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_classes: int) -> Tuple[tf.Tensor, tf.Tensor]:
+    """Applies MixUp augmentation to a batch of images and labels.
+
+    Args:
+        batch_images: A batch of images (batch_size, height, width, channels).
+        batch_labels: A batch of labels (batch_size,). Assumed to be integer class indices.
+        alpha: The alpha parameter for the Beta distribution (controls mixing strength).
+        num_classes: The total number of classes for one-hot encoding the labels.
+
+    Returns:
+        A tuple of (mixed_images, mixed_labels).
+    """
+    batch_size = tf.shape(batch_images)[0]
+    # Ensure labels are one-hot encoded for mixing
+    # If labels are already one-hot, this tf.one_hot will need to be adjusted or skipped.
+    # Assuming batch_labels are sparse (indices) based on sparse_categorical_crossentropy typical usage.
+    labels_one_hot = tf.one_hot(tf.cast(batch_labels, dtype=tf.int32), depth=num_classes)
+
+    # Sample lambda from a Beta distribution
+    # Gamma(alpha, 1) / (Gamma(alpha,1) + Gamma(alpha,1)) if alpha > 0 else 1
+    # tf.random.gamma requires alpha > 0.
+    # If alpha is 0, it implies no mixing, so lambda is 1.
+    if alpha > 0.0:
+        beta_dist = tf.compat.v1.distributions.Beta(alpha, alpha)
+        lambda_val = beta_dist.sample(batch_size)
+        # Reshape lambda for broadcasting: (batch_size,) -> (batch_size, 1, 1, 1) for images, (batch_size, 1) for labels
+        lambda_img = tf.reshape(lambda_val, [batch_size, 1, 1, 1])
+        lambda_lbl = tf.reshape(lambda_val, [batch_size, 1])
+    else: # No mixing if alpha is 0
+        lambda_img = tf.ones((batch_size, 1, 1, 1), dtype=tf.float32)
+        lambda_lbl = tf.ones((batch_size, 1), dtype=tf.float32)
+
+    # Shuffle the batch to create pairs for mixing
+    # Use tf.random.shuffle to ensure reproducibility with global/op seeds if set
+    shuffled_indices = tf.random.shuffle(tf.range(batch_size))
+    
+    shuffled_images = tf.gather(batch_images, shuffled_indices)
+    shuffled_labels_one_hot = tf.gather(labels_one_hot, shuffled_indices)
+
+    # Perform MixUp
+    mixed_images = lambda_img * batch_images + (1.0 - lambda_img) * shuffled_images
+    mixed_labels = lambda_lbl * labels_one_hot + (1.0 - lambda_lbl) * shuffled_labels_one_hot
+    
+    return mixed_images, mixed_labels
+
+# CutMix function (to be applied after batching)
+@tf.function
+def cutmix(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_classes: int) -> Tuple[tf.Tensor, tf.Tensor]:
+    """Applies CutMix augmentation to a batch of images and labels.
+
+    Args:
+        batch_images: A batch of images (batch_size, height, width, channels).
+        batch_labels: A batch of labels. Assumed to be one-hot if coming after MixUp,
+                      or sparse (indices) if MixUp is disabled.
+        alpha: The alpha parameter for the Beta distribution (controls patch size).
+        num_classes: The total number of classes for one-hot encoding if labels are sparse.
+
+    Returns:
+        A tuple of (mixed_images, mixed_labels).
+    """
+    batch_size = tf.shape(batch_images)[0]
+    image_h = tf.shape(batch_images)[1]
+    image_w = tf.shape(batch_images)[2]
+
+    # Ensure labels are one-hot. If MixUp was applied, labels are already one-hot.
+    # If MixUp was not applied, batch_labels are likely sparse.
+    if len(tf.shape(batch_labels)) == 1: # Sparse labels (batch_size,)
+        labels_one_hot = tf.one_hot(tf.cast(batch_labels, dtype=tf.int32), depth=num_classes)
+    else: # Already one-hot (batch_size, num_classes)
+        labels_one_hot = batch_labels
+
+    # Sample lambda from a Beta distribution
+    if alpha > 0.0:
+        beta_dist = tf.compat.v1.distributions.Beta(alpha, alpha)
+        lambda_val = beta_dist.sample(1)[0] # Sample a single lambda for the batch
+    else: # No mixing if alpha is 0
+        return batch_images, labels_one_hot # Or original batch_labels if it was sparse
+
+    # Shuffle the batch to create pairs for mixing
+    shuffled_indices = tf.random.shuffle(tf.range(batch_size))
+    shuffled_images = tf.gather(batch_images, shuffled_indices)
+    shuffled_labels_one_hot = tf.gather(labels_one_hot, shuffled_indices)
+
+    # Calculate patch coordinates
+    cut_ratio = tf.math.sqrt(1.0 - lambda_val) # Proportional to patch size
+    cut_h = tf.cast(cut_ratio * tf.cast(image_h, tf.float32), tf.int32)
+    cut_w = tf.cast(cut_ratio * tf.cast(image_w, tf.float32), tf.int32)
+
+    # Uniformly sample the center of the patch
+    center_y = tf.random.uniform(shape=[], minval=0, maxval=image_h, dtype=tf.int32)
+    center_x = tf.random.uniform(shape=[], minval=0, maxval=image_w, dtype=tf.int32)
+
+    y1 = tf.clip_by_value(center_y - cut_h // 2, 0, image_h)
+    y2 = tf.clip_by_value(center_y + cut_h // 2, 0, image_h)
+    x1 = tf.clip_by_value(center_x - cut_w // 2, 0, image_w)
+    x2 = tf.clip_by_value(center_x + cut_w // 2, 0, image_w)
+
+    # Create mask
+    # Mask has 1s where the patch from the shuffled image should be, 0s otherwise.
+    patch_height = y2 - y1
+    patch_width = x2 - x1
+
+    # Ensure patch area is not zero before division
+    actual_patch_area = tf.cast(patch_height * patch_width, tf.float32)
+    total_area = tf.cast(image_h * image_w, tf.float32)
+    
+    # Adjust lambda based on the actual patch area that fits within the image
+    # lambda_val here represents the proportion of the first image in the mix
+    lambda_adjusted = 1.0 - (actual_patch_area / tf.maximum(total_area, 1e-8)) # Avoid division by zero if total_area is somehow 0
+
+    # Create the mask for pasting
+    mask_shape = (batch_size, image_h, image_w, 1) # Mask will be broadcast to channels
+    padding = [[y1, image_h - y2], [x1, image_w - x2]]
+    mask_patch = tf.ones([batch_size, patch_height, patch_width, 1], dtype=tf.float32)
+    # Pad the patch to create the full image mask. Padded areas are 0.
+    # Correct padding for tf.pad: it pads *around* the patch.
+    # We want to create a mask that is 1 in the patch area and 0 outside.
+    # A more direct way to create the mask:
+    mask_y = tf.logical_and(tf.range(image_h)[:, tf.newaxis] >= y1, tf.range(image_h)[:, tf.newaxis] < y2)
+    mask_x = tf.logical_and(tf.range(image_w)[tf.newaxis, :] >= x1, tf.range(image_w)[tf.newaxis, :] < x2)
+    mask_2d = tf.cast(tf.logical_and(mask_y, mask_x), tf.float32) # (H, W)
+    mask = mask_2d[tf.newaxis, :, :, tf.newaxis] # (1, H, W, 1)
+    mask = tf.tile(mask, [batch_size, 1, 1, 1]) # (B, H, W, 1)
+
+    # Apply CutMix
+    # Original image where mask is 0, shuffled image where mask is 1.
+    cutmix_images = batch_images * (1.0 - mask) + shuffled_images * mask
+    cutmix_labels = labels_one_hot * lambda_adjusted + shuffled_labels_one_hot * (1.0 - lambda_adjusted)
+
+    return cutmix_images, cutmix_labels
 
 def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, Dict[int, str]]:
     """
@@ -206,10 +339,6 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
         train_paths = [d['path'] for d in all_items]
         train_labels = [d['label'] for d in all_items]
 
-    if not train_paths:
-        raise ValueError("Training set is empty after split. Check dataset or split_ratio.")
-    logger.info(f"Train samples: {len(train_paths)}, Validation samples: {len(val_paths)}")
-
     augmentation_pipeline = _build_augmentation_pipeline(data_cfg) # Pass data_cfg for augmentation settings
     preprocess_fn = _get_preprocess_fn(architecture)
 
@@ -241,11 +370,40 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
     logger.info("Applying .cache() to the training dataset after mapping. This will use more RAM but speed up subsequent epochs.")
     train_dataset = train_dataset.cache() # Cache after mapping
     train_dataset = train_dataset.shuffle(buffer_size=max(1000, len(train_paths)))
-    train_dataset = train_dataset.batch(batch_size)
-    train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
-    logger.info("Training dataset created.")
+    train_dataset = train_dataset.batch(batch_size, drop_remainder=True) 
+    val_dataset = val_dataset.batch(batch_size, drop_remainder=False)
 
-    val_dataset = None
+    # Apply MixUp if enabled (after batching)
+    mixup_config = data_cfg.get('augmentation', {}).get('mixup', {})
+    if mixup_config.get('enabled', False):
+        mixup_alpha = float(mixup_config.get('alpha', 0.2))
+        if mixup_alpha > 0.0:
+            logger.info(f"Applying MixUp augmentation to training data with alpha={mixup_alpha}.")
+            # Need num_classes for one-hot encoding in mixup function
+            if not index_to_label: # Should have been loaded earlier
+                raise ValueError("Label map is required for MixUp to determine num_classes.")
+            num_classes = len(index_to_label)
+            train_dataset = train_dataset.map(lambda x, y: mixup(x, y, alpha=mixup_alpha, num_classes=num_classes), num_parallel_calls=AUTOTUNE)
+        else:
+            logger.info("MixUp is enabled in config but alpha is 0.0. No MixUp will be applied.")
+
+    # Apply CutMix if enabled (after batching, and after MixUp if MixUp was applied)
+    cutmix_config = data_cfg.get('augmentation', {}).get('cutmix', {})
+    if cutmix_config.get('enabled', False):
+        cutmix_alpha = float(cutmix_config.get('alpha', 1.0))
+        if cutmix_alpha > 0.0:
+            logger.info(f"Applying CutMix augmentation to training data with alpha={cutmix_alpha}.")
+            if not index_to_label: # Should have been loaded earlier
+                raise ValueError("Label map is required for CutMix to determine num_classes.")
+            num_classes = len(index_to_label)
+            # The 'mixup' function one-hots labels, so if mixup was applied, labels are already one-hot.
+            # The 'cutmix' function handles both sparse and one-hot labels internally.
+            train_dataset = train_dataset.map(lambda x, y: cutmix(x, y, alpha=cutmix_alpha, num_classes=num_classes), num_parallel_calls=AUTOTUNE)
+        else:
+            logger.info("CutMix is enabled in config but alpha is 0.0. No CutMix will be applied.")
+
+    # Prefetching
+    train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
     if val_paths:
         val_dataset = tf.data.Dataset.from_tensor_slices((val_paths, val_labels))
         val_dataset = val_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=False), num_parallel_calls=AUTOTUNE)
