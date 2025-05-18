@@ -7,7 +7,7 @@ from PIL import Image
 import logging
 from pathlib import Path
 import json
-from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
+from .data import _get_preprocess_fn
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -135,6 +135,7 @@ def load_classification_model(tflite_model_path: str, labels_path: str = None):
     return interpreter, input_details, output_details, class_labels
 
 def preprocess_classification_image(
+    architecture: str, 
     image_path: str = None, 
     image_data: np.ndarray = None, 
     target_size_hw: tuple = None
@@ -144,6 +145,8 @@ def preprocess_classification_image(
         raise ValueError("Either image_path or image_data must be provided.")
     if target_size_hw is None:
         raise ValueError("target_size_hw must be provided.")
+    if not architecture:
+        raise ValueError("architecture must be provided for dynamic preprocessing.")
 
     try:
         if image_data is not None:
@@ -159,8 +162,9 @@ def preprocess_classification_image(
         # Ensure image is float32 in [0, 255] range before preprocessing
         img_array = np.array(img_resized, dtype=np.float32)
         
-        # Apply EfficientNetV2 preprocessing
-        preprocessed_img = preprocess_input(img_array)
+        # Get and apply the correct preprocessing function
+        preprocess_fn = _get_preprocess_fn(architecture)
+        preprocessed_img = preprocess_fn(img_array)
 
         # Add batch dimension
         input_data = np.expand_dims(preprocessed_img, axis=0)
@@ -178,6 +182,7 @@ def run_classification_inference(
     input_details: list,
     output_details: list,
     model_input_size_hw: tuple, # Keep this required
+    architecture: str, # ADD: architecture string
     class_labels: list = None,
     image_path: str = None, # Make path optional
     image_data: np.ndarray = None # Add image_data
@@ -190,6 +195,7 @@ def run_classification_inference(
         input_details: Interpreter input details.
         output_details: Interpreter output details.
         model_input_size_hw: Expected input size (H, W) of the TFLite model.
+        architecture (str): The model architecture string (e.g., 'MobileNetV2', 'EfficientNetV2B0').
         class_labels (list, optional): List of class labels corresponding to output indices.
         image_path (str, optional): Path to the input image.
         image_data (np.ndarray, optional): NumPy array of the image (RGB format).
@@ -199,12 +205,16 @@ def run_classification_inference(
                Label is the string from class_labels if provided, otherwise the class index.
     """
     if image_data is None and image_path is None:
-        logging.error("Either image_path or image_data must be provided to run_classification_inference.")
+        logging.error("No image data or image path provided for classification inference.")
         return None, None
-    # model_input_size_hw is already checked effectively by its use in preprocess_classification_image
+    if not architecture:
+        logging.error("Architecture not provided for preprocessing in classification inference.")
+        return None, None
 
     try:
+        # Preprocess the image (pass architecture)
         input_data = preprocess_classification_image(
+            architecture=architecture, 
             image_path=image_path, 
             image_data=image_data, 
             target_size_hw=model_input_size_hw
@@ -260,103 +270,80 @@ def run_classification_inference(
 
 def predict_standalone(config_path: str, image_path: str, top_k: int = 1):
     """Loads TFLite model and performs classification prediction (Standalone mode)."""
-     # Load Configuration
-    try:
-        project_root = _get_project_root()
-        if not os.path.isabs(config_path):
-             config_path = os.path.join(project_root, config_path)
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-    except FileNotFoundError:
+    project_root = _get_project_root()
+    if not os.path.isabs(config_path):
+        config_path = str(project_root / config_path)
+
+    if not os.path.exists(config_path):
         logging.error(f"Configuration file not found: {config_path}")
         return
+
+    if not os.path.exists(image_path):
+        logging.error(f"Image file not found: {image_path}")
+        return
+
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
     except Exception as e:
-        logging.error(f"Error reading or parsing configuration file {config_path}: {e}")
+        logging.error(f"Error loading or parsing YAML configuration from {config_path}: {e}")
         return
 
-    # Extract necessary info from config (assuming pipeline config format)
-    try:
-        tflite_model_rel_path = config['models']['classification_tflite']
-        model_input_size_hw = tuple(config['model_params']['classification_input_size'])
-        # Define where labels file should be (e.g., relative to model)
-        labels_rel_path = config.get('models', {}).get('classification_labels', None) # Or derive from model path
+    # Extract necessary paths and parameters from the pipeline config
+    # This assumes structure of config_pipeline.yaml
+    models_cfg = config.get('models', {})
+    model_params_cfg = config.get('model_params', {})
 
-    except KeyError as e:
-         logging.error(f"Missing key in configuration file {config_path}: {e}")
-         return
+    tflite_model_rel_path = models_cfg.get('classification_tflite')
+    label_map_rel_path = model_params_cfg.get('classification_label_map')
+    # ADD: Get architecture from model_params config (or model config if stored there)
+    # This needs to align with where architecture is stored in your config.yaml for classification training
+    # For now, let's assume it's in model_params_cfg for consistency with other params like input_size.
+    # If your classification's config.yaml has model: { architecture: ... }, adjust accordingly.
+    classification_config_rel_path = model_params_cfg.get('classification_config_path', 'models/classification/config.yaml') # Path to actual classification config
+    classification_config_abs_path = project_root / classification_config_rel_path
+    
+    clf_architecture = "Unknown"
+    if os.path.exists(classification_config_abs_path):
+        with open(classification_config_abs_path, 'r') as f_clf_cfg:
+            clf_cfg_content = yaml.safe_load(f_clf_cfg)
+            clf_architecture = clf_cfg_content.get('model',{}).get('architecture', 'Unknown')
+    else:
+        logging.warning(f"Classification config file not found at {classification_config_abs_path}, cannot determine architecture for preprocessing.")
+        # Fallback or error, for now, let it try Unknown which _get_preprocess_fn handles with a warning.
 
-    tflite_model_path = os.path.join(project_root, tflite_model_rel_path)
-    labels_path = os.path.join(project_root, labels_rel_path) if labels_rel_path else None
-
-    if not os.path.exists(tflite_model_path):
-        logging.error(f"TFLite model file not found: {tflite_model_path}")
+    if not tflite_model_rel_path or not label_map_rel_path:
+        logging.error("TFLite model path or label map path not found in pipeline config.")
         return
 
-    # Load Model and Labels
-    try:
-        interpreter, input_details, output_details, class_labels = load_classification_model(tflite_model_path, labels_path)
-        if class_labels is None:
-             logging.warning("Proceeding without class labels. Output will be indices.")
-    except Exception:
-        return
+    tflite_model_abs_path = str(project_root / tflite_model_rel_path)
+    label_map_abs_path = str(project_root / label_map_rel_path)
 
-    # Preprocess Image
+    input_size_hw = tuple(model_params_cfg.get('classification_input_size', [224, 224]))
+
+    logging.info(f"Using TFLite model: {tflite_model_abs_path}")
+    logging.info(f"Using label map: {label_map_abs_path}")
+    logging.info(f"Using input size (H,W): {input_size_hw}")
+    logging.info(f"Using architecture for preprocessing: {clf_architecture}")
+
     try:
-        input_data = preprocess_classification_image(
-            image_path=image_path, 
-            target_size_hw=model_input_size_hw
+        interpreter, input_details, output_details, class_labels = load_classification_model(
+            tflite_model_abs_path, label_map_abs_path
         )
-    except Exception:
-        return 
+        if not interpreter or not class_labels:
+            logging.error("Failed to load model or labels. Exiting.")
+            return
 
-    # Check input tensor type and scale if necessary
-    input_dtype = input_details[0]['dtype']
-    if input_dtype == np.uint8:
-            scale, zero_point = input_details[0]['quantization']
-            input_data = (input_data / scale + zero_point).astype(input_dtype)
+        predicted_label, confidence = run_classification_inference(
+            interpreter, input_details, output_details,
+            model_input_size_hw=input_size_hw,
+            architecture=clf_architecture, # ADD: pass architecture
+            class_labels=class_labels,
+            image_path=image_path
+        )
 
-    # Run Inference
-    try:
-        interpreter.set_tensor(input_details[0]['index'], input_data)
-        interpreter.invoke()
-        output_data = interpreter.get_tensor(output_details[0]['index'])[0]
-
-        # Handle quantized output if necessary
-        output_dtype = output_details[0]['dtype']
-        if output_dtype == np.uint8:
-            scale, zero_point = output_details[0]['quantization']
-            if scale != 0:
-                 output_data = (output_data.astype(np.float32) - zero_point) * scale
-            else:
-                 output_data = output_data.astype(np.float32)
-
-        # Apply softmax if needed (as in run_inference)
-        if not np.isclose(np.sum(output_data), 1.0, atol=0.1):
-             output_data = tf.nn.softmax(output_data).numpy()
-
-        # Get top K predictions
-        # Use partition instead of sort for efficiency if K is small
-        # top_k_indices = np.argsort(output_data)[-top_k:][::-1]
-        num_classes = len(output_data)
-        k = min(top_k, num_classes)
-        top_k_indices = np.argpartition(output_data, -k)[-k:]
-        # Sort the top-k indices by confidence
-        top_k_indices = top_k_indices[np.argsort(output_data[top_k_indices])][::-1]
-
-
-        print(f"\nTop {k} predictions for: {os.path.basename(image_path)}")
-        print("-----------------------------")
-        for i in top_k_indices:
-            confidence = float(output_data[i])
-            if class_labels:
-                 if 0 <= i < len(class_labels):
-                     label = class_labels[i]
-                 else:
-                     label = f"Index {i} (out of range)"
-            else:
-                label = f"Index {i}"
-            print(f"{label:<20} : {confidence:.4f}")
-        print("-----------------------------")
+        if predicted_label is not None:
+            print(f"\nPredicted label: {predicted_label} (confidence: {confidence:.4f})")
 
     except Exception as e:
         logging.exception(f"Error during classification inference: {e}")

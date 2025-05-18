@@ -333,6 +333,20 @@ def analyze_food_item(
             class_label_map_path_rel = model_params_config.get('classification_label_map')
             # Get the confidence threshold, default to 0.6 if not in config
             confidence_threshold = model_params_config.get('classification_confidence_threshold', 0.6)
+            # Get architecture from the classification's own config file
+            classification_config_rel_path = model_params_config.get('classification_config_path', 'models/classification/config.yaml')
+            classification_config_abs_path = project_root / classification_config_rel_path
+            clf_architecture = "Unknown"
+            if os.path.exists(classification_config_abs_path):
+                try:
+                    with open(classification_config_abs_path, 'r') as f_clf_cfg:
+                        clf_cfg_content = yaml.safe_load(f_clf_cfg)
+                        clf_architecture = clf_cfg_content.get('model',{}).get('architecture', 'Unknown')
+                    logging.info(f"Image: {image_basename} - Determined classification architecture: {clf_architecture} from {classification_config_abs_path}")
+                except Exception as e_clf_cfg:
+                    logging.warning(f"Image: {image_basename} - Error loading classification config {classification_config_abs_path} to get architecture: {e_clf_cfg}. Defaulting to 'Unknown'.")
+            else:
+                logging.warning(f"Image: {image_basename} - Classification config {classification_config_abs_path} not found. Defaulting architecture to 'Unknown'.")
 
             if not class_model_path_rel or not class_input_size_config or not class_label_map_path_rel:
                 logging.error(f"Image: {image_basename} - Classification model path, input size, or label map missing in config. Skipping classification.")
@@ -355,7 +369,8 @@ def analyze_food_item(
                     classified_label, classified_confidence = run_classification_inference(
                         class_model, class_input_details, class_output_details, class_labels,
                         image_data=cropped_image_for_classification, 
-                        target_size_hw=target_class_size
+                        model_input_size_hw=target_class_size, # Renamed from target_size_hw for clarity
+                        architecture=clf_architecture # pass architecture
                     )
                     results['timing']['classification_inference'] = time.time() - t0_class_inference
 
