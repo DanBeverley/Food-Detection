@@ -1,6 +1,6 @@
 data:
   metadata_path: "data/classification/metadata.json" 
-  image_size: [160, 160]
+  image_size: [224, 224] 
   batch_size: 16 
   split_ratio: 0.2
 
@@ -14,66 +14,76 @@ data:
     horizontal_flip: true
     brightness_range: [0.8, 1.2] 
 
+    # MixUp Augmentation (applied after batching)
+    mixup:
+      enabled: true
+      alpha: 0.2 # Controls the intensity of interpolation, 0.2 is a common value
+
+    # CutMix Augmentation (applied after batching, potentially after MixUp)
+    cutmix:
+      enabled: false # Set to true to enable CutMix
+      alpha: 1.0 # Controls patch size distribution, 1.0 is common
+
 # Model Configuration 
 model:
-  architecture: "MobileNetV2" 
+  architecture: "MobileNetV3Small" 
   use_pretrained_weights: true 
   fine_tune: true 
-  fine_tune_layers: 20 
+  fine_tune_layers: 15 
 
   # Classification Head Configuration
   classification_head:
     pooling: "GlobalAveragePooling2D" 
     dense_layers: [128] 
-    dropout: 0.6 
+    dropout: 0.5 
     activation: "relu" 
     final_activation: "softmax"
-    kernel_l2_factor: 0.001 # Add L2 regularization factor (e.g., 0.001, set to 0.0 or remove to disable)
+    kernel_l2_factor: 0.001 
 
 # --- Optimizer Configuration ---
 optimizer:
-  name: "Adam" # 'Adam', 'SGD', 'RMSprop' (potentially 'AdamW' if tensorflow-addons installed)
-  learning_rate: 0.0001
-  # momentum: 0.9 # Only used for SGD
-  # weight_decay: 0.0001 # Only used for AdamW
+  name: "Adam" 
+  learning_rate: 0.0001 
+  # momentum: 0.9 
+  # weight_decay: 0.0001 
 
 # Loss Function Configuration 
 loss:
-  name: "sparse_categorical_crossentropy" # 'sparse_categorical_crossentropy', 'categorical_crossentropy' (requires one-hot labels)
+  name: "sparse_categorical_crossentropy" 
 
 # Metrics Configuration
-metrics: ["accuracy"] # List of metrics, e.g., ['accuracy', 'sparse_top_k_categorical_accuracy']
+metrics: ["accuracy"] 
 
 # Training Configuration
 training:
-  epochs: 100 # Set epochs for full training, early stopping will manage duration
+  epochs: 100 
   use_mixed_precision: true
-  use_tpu: false # Explicitly set to false for GPU training
+  use_tpu: false 
   callbacks:
     model_checkpoint:
       enabled: true
-      monitor: "val_loss"
-      mode: "min"
+      monitor: "val_accuracy"
+      mode: "max"
       save_best_only: true
       save_weights_only: false
-      filename_template: "model_epoch-{epoch:02d}_val_loss-{val_loss:.2f}.h5"
+      filename_template: "model_epoch-{epoch:02d}_val_acc-{val_accuracy:.2f}.h5"
     early_stopping:
       enabled: true
-      monitor: "val_loss"
-      mode: "min"
-      patience: 15
+      monitor: "val_accuracy"
+      mode: "max"
+      patience: 20 
       restore_best_weights: true
     reduce_lr_on_plateau:
-      enabled: false # Disabled as cosine_decay is primary LR scheduler
-      monitor: "val_loss"
-      mode: "min"
-      factor: 0.2
-      patience: 5 # Original was 3, slightly more relaxed if re-enabled
+      enabled: true 
+      monitor: "val_accuracy" 
+      mode: "max" 
+      factor: 0.2 
+      patience: 7 
       min_lr: 0.000001
     tensorboard:
       enabled: true
-      log_dir: "logs/classification/" # Will be created relative to project root
-      histogram_freq: 0 # Set to 1 to enable histograms (can consume disk space)
+      log_dir: "logs/classification/" 
+      histogram_freq: 0 
       write_graph: false
       update_freq: "epoch"
     lr_scheduler:
@@ -83,23 +93,20 @@ training:
 
 # Paths Configuration (Used by Train and Export)
 paths:
-  # Directory where the prepare_classification_dataset.py script saves its output.
-  # This directory should contain 'metadata.json' and 'label_map.json'.
-  # This is also the directory from which train.py will load these files.
-  data_dir: "data/classification" # General directory for processed classification data
-  metadata_filename: "metadata.json" # To be found in data_dir
-  label_map_dir: "data/classification" # Path relative to project root, where label_map.json is found
-  label_map_filename: "label_map.json" # To be found in label_map_dir
+  data_dir: "data/classification" 
+  metadata_filename: "metadata.json" 
+  label_map_dir: "data/classification" 
+  label_map_filename: "label_map.json" 
   model_save_dir: "trained_models/classification/" 
   log_dir: "logs/classification/"
   tflite_export_dir: "trained_models/classification/exported/" 
 
 export:
-  tflite_filename: "classification_model_full_default.tflite" # Renamed for clarity
+  tflite_filename: "classification_model_full_default.tflite" 
 
   # Quantization Settings
   quantization:
-    type: "none" # Set to 'none' for initial Keras training. Change to 'int8' or 'float16' for export later.
+    type: "none" 
     representative_dataset: 
       enabled: true 
       num_samples: 100 
