@@ -1,6 +1,7 @@
 import os
 import yaml 
 import tensorflow as tf
+import tensorflow_addons as tfa
 import numpy as np
 import logging
 from typing import Tuple, Dict, Optional, List, Any
@@ -205,38 +206,54 @@ def _random_flip_left_right(image: tf.Tensor, mask: tf.Tensor, prob_tf: tf.Tenso
     should_apply = tf.random.uniform(shape=[], dtype=tf.float32) < prob_tf
     return tf.cond(should_apply, flip_fn, no_flip_fn)
 
+@tf.function(reduce_retracing=True)
 def _adjust_brightness(image: tf.Tensor, mask: tf.Tensor, brightness_delta_tf: tf.Tensor, prob_tf: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Conditionally applies brightness adjustment with probability prob_tf."""
-    def apply_aug_fn():
-        # Ensure image is float for random_brightness, then cast back if needed (or ensure uint8 input is handled by op)
-        # tf.image.random_brightness expects float or an integer type it supports.
-        # Assuming image input here is uint8 as per image_for_aug.
-        # Let's cast to float32, apply brightness, then clip and cast back to uint8.
-        img_float = tf.cast(image, tf.float32)
-        bright_image_float = tf.image.random_brightness(img_float, max_delta=brightness_delta_tf)
-        bright_image_uint8 = tf.saturate_cast(bright_image_float, dtype=image.dtype) # Cast back to original dtype
-        return bright_image_uint8, mask # Mask is unchanged by brightness
-    def no_aug_fn():
+    """Conditionally applies brightness adjustment with probability prob_tf.
+    Ensures that the output image dtype matches the input image dtype.
+    """
+    def apply_aug_fn() -> Tuple[tf.Tensor, tf.Tensor]:
+        original_dtype = image.dtype
+        
+        # Convert image to float32 in range [0, 1] for tf.image.adjust_brightness
+        # if it's not already in that format.
+        if original_dtype != tf.float32:
+            img_float = tf.image.convert_image_dtype(image, dtype=tf.float32)
+        else:
+            img_float = image # Assume it's already in [0,1] if float32
+
+        adjusted_img_float = tf.image.adjust_brightness(img_float, delta=brightness_delta_tf)
+        # Clip to ensure values remain in [0, 1] after adjustment, which is important
+        # before converting back to uint8 or other integer types.
+        adjusted_img_float_clipped = tf.clip_by_value(adjusted_img_float, 0.0, 1.0)
+
+        # Convert back to original dtype. saturate=True handles clipping for integer types.
+        final_image = tf.image.convert_image_dtype(adjusted_img_float_clipped, dtype=original_dtype, saturate=True)
+        
+        return final_image, mask # Mask is not changed by brightness
+
+    def no_aug_fn() -> Tuple[tf.Tensor, tf.Tensor]:
         return image, mask
+
     should_apply = tf.random.uniform(shape=[], dtype=tf.float32) < prob_tf
     return tf.cond(should_apply, apply_aug_fn, no_aug_fn)
 
 @tf.function(reduce_retracing=True)
 def _rotate_image_and_mask(image: tf.Tensor, mask: tf.Tensor, max_angle_deg_tf: tf.Tensor, prob_tf: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Conditionally rotates image and mask using tf.image.transform."""
+    """Conditionally rotates image and mask using tfa.image.rotate."""
     def apply_rotation_fn():
         max_angle_rad = max_angle_deg_tf * (math.pi / 180.0)
-        angle = tf.random.uniform(shape=[], minval=-max_angle_rad, maxval=max_angle_rad)
-        
+        angle = tf.random.uniform(shape=[], minval=-max_angle_rad, maxval=max_angle_rad) # angle is already in radians here
         img_dtype = image.dtype
         msk_dtype = mask.dtype
         image_float = tf.cast(image, tf.float32)
         mask_float = tf.cast(mask, tf.float32)
 
-        # tf.image.transform rotates counter-clockwise around the center of the image when 'transforms' is a scalar angle.
-        rotated_image_float = tf.image.transform(images=image_float, transforms=angle, interpolation='BILINEAR', fill_mode='REFLECT')
-        rotated_mask_float = tf.image.transform(images=mask_float, transforms=angle, interpolation='NEAREST', fill_mode='CONSTANT') # fill_value=0 is default for CONSTANT
-
+        # The 'angle' variable IS ALREADY IN RADIANS.
+        # Use tfa.image.rotate for direct rotation with a scalar angle.
+        rotated_image_float = tfa.image.rotate(images=image_float, angles=angle, interpolation='BILINEAR', fill_mode='REFLECT')
+        # For masks, NEAREST interpolation and CONSTANT fill (with 0) is usually preferred.
+        # tfa.image.rotate also supports fill_mode, which defaults to 'CONSTANT' and fill_value 0.0
+        rotated_mask_float = tfa.image.rotate(images=mask_float, angles=angle, interpolation='NEAREST', fill_mode='CONSTANT') 
         rotated_image_out = tf.cast(rotated_image_float, img_dtype)
         rotated_mask_out = tf.cast(rotated_mask_float, msk_dtype)
         
@@ -249,34 +266,35 @@ def _rotate_image_and_mask(image: tf.Tensor, mask: tf.Tensor, max_angle_deg_tf: 
 
 @tf.function(reduce_retracing=True)
 def _shift_image_and_mask(image: tf.Tensor, mask: tf.Tensor, width_shift_fraction_tf: tf.Tensor, height_shift_fraction_tf: tf.Tensor, prob_tf: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Conditionally shifts image and mask using tf.image.transform."""
+    """Conditionally applies random width and height shifts to image and mask."""
     def apply_shift_fn():
-        img_shape = tf.shape(image)
-        img_height_float = tf.cast(img_shape[0], tf.float32)
-        img_width_float = tf.cast(img_shape[1], tf.float32)
-
-        dx = tf.random.uniform(shape=[], minval=-width_shift_fraction_tf, maxval=width_shift_fraction_tf) * img_width_float
-        dy = tf.random.uniform(shape=[], minval=-height_shift_fraction_tf, maxval=height_shift_fraction_tf) * img_height_float
-        
-        # Transformation matrix for translation [1, 0, dx, 0, 1, dy, 0, 0]
-        # Positive dx shifts right, positive dy shifts down.
-        transform_matrix = tf.convert_to_tensor([1.0, 0.0, dx,  # ax, ay, a0 (x component)
-                                                 0.0, 1.0, dy,  # bx, by, b0 (y component)
-                                                 0.0, 0.0], dtype=tf.float32) # Perspective components (not used for affine)
-        
         img_dtype = image.dtype
         msk_dtype = mask.dtype
         image_float = tf.cast(image, tf.float32)
         mask_float = tf.cast(mask, tf.float32)
+        
+        image_height = tf.cast(tf.shape(image_float)[0], tf.float32)
+        image_width = tf.cast(tf.shape(image_float)[1], tf.float32)
 
-        shifted_image_float = tf.image.transform(image_float, transform_matrix, interpolation='BILINEAR', fill_mode='REFLECT')
-        shifted_mask_float = tf.image.transform(mask_float, transform_matrix, interpolation='NEAREST', fill_mode='CONSTANT')
-
+        # Max shift in pixels
+        max_dx = width_shift_fraction_tf * image_width
+        max_dy = height_shift_fraction_tf * image_height
+        
+        # Random shift values
+        dx = tf.random.uniform(shape=[], minval=-max_dx, maxval=max_dx)
+        dy = tf.random.uniform(shape=[], minval=-max_dy, maxval=max_dy)
+        
+        # Transformation matrix for translation: [1, 0, dx, 0, 1, dy, 0, 0]
+        transform_matrix = tf.convert_to_tensor([1.0, 0.0, dx, 0.0, 1.0, dy, 0.0, 0.0], dtype=tf.float32)
+        
+        shifted_image_float = tfa.image.transform(image_float, transform_matrix, interpolation='BILINEAR', fill_mode='REFLECT')
+        shifted_mask_float = tfa.image.transform(mask_float, transform_matrix, interpolation='NEAREST', fill_mode='CONSTANT')
+        
         shifted_image_out = tf.cast(shifted_image_float, img_dtype)
         shifted_mask_out = tf.cast(shifted_mask_float, msk_dtype)
-        
         return shifted_image_out, shifted_mask_out
-        
+
+    # Conditionally apply the shift
     def no_shift_fn():
         return image, mask
     should_apply = tf.random.uniform(shape=[], dtype=tf.float32) < prob_tf
@@ -285,6 +303,9 @@ def _shift_image_and_mask(image: tf.Tensor, mask: tf.Tensor, width_shift_fractio
 def _zoom_image_and_mask(image: tf.Tensor, mask: tf.Tensor, zoom_range_fraction_tf: tf.Tensor, prob_tf: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
     """Conditionally zooms image and mask using tf.image.resize and crop/pad."""
     def apply_zoom_fn():
+        original_img_dtype = image.dtype
+        original_msk_dtype = mask.dtype
+
         img_shape = tf.shape(image)
         original_height = img_shape[0]
         original_width = img_shape[1]
@@ -294,14 +315,33 @@ def _zoom_image_and_mask(image: tf.Tensor, mask: tf.Tensor, zoom_range_fraction_
         new_height = tf.cast(tf.cast(original_height, tf.float32) * scale, tf.int32)
         new_width = tf.cast(tf.cast(original_width, tf.float32) * scale, tf.int32)
 
-        img_scaled = tf.image.resize(image, [new_height, new_width], method=tf.image.ResizeMethod.BILINEAR)
-        msk_scaled = tf.image.resize(mask, [new_height, new_width], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
+        # tf.image.resize on uint8 inputs produces float32 [0,255]. On float32 inputs, it stays float32.
+        img_resized_for_zoom = tf.image.resize(image, [new_height, new_width], method=tf.image.ResizeMethod.BILINEAR)
+        # For masks, NEAREST_NEIGHBOR is typically used and preserves integer dtypes or float dtypes.
+        msk_resized_for_zoom = tf.image.resize(mask, [new_height, new_width], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
 
-        # Crop or pad back to original size
-        # Note: tf.image.resize_with_crop_or_pad handles both image (float/uint8) and mask (uint8/int32 usually) dtypes correctly.
-        img_zoomed = tf.image.resize_with_crop_or_pad(img_scaled, original_height, original_width)
-        msk_zoomed = tf.image.resize_with_crop_or_pad(msk_scaled, original_height, original_width)
-        return img_zoomed, msk_zoomed
+        # tf.image.resize_with_crop_or_pad preserves the dtype of its input.
+        # So, img_zoomed_processed will have the same dtype as img_resized_for_zoom (likely float32).
+        img_zoomed_processed = tf.image.resize_with_crop_or_pad(img_resized_for_zoom, original_height, original_width)
+        msk_zoomed_processed = tf.image.resize_with_crop_or_pad(msk_resized_for_zoom, original_height, original_width)
+
+        # Cast image back to its original input dtype
+        if original_img_dtype == tf.uint8:
+            # img_zoomed_processed is float32 (expected range [0,255] if input was uint8)
+            final_image = tf.saturate_cast(img_zoomed_processed, tf.uint8)
+        elif original_img_dtype == tf.float32:
+            # If input image was already float32, the resize and crop_or_pad operations maintained its float32 type.
+            final_image = img_zoomed_processed
+        else:
+            # For any other dtypes, attempt a direct cast.
+            final_image = tf.cast(img_zoomed_processed, original_img_dtype)
+        
+        # Ensure mask is also consistently typed back to its original dtype if it changed.
+        if msk_zoomed_processed.dtype != original_msk_dtype:
+            msk_zoomed_processed = tf.cast(msk_zoomed_processed, original_msk_dtype)
+
+        return final_image, msk_zoomed_processed
+
     def no_zoom_fn():
         return image, mask
     should_apply = tf.random.uniform(shape=[], dtype=tf.float32) < prob_tf
