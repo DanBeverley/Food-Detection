@@ -338,6 +338,9 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
         logger.info("Split ratio is 0. Using all data for training, validation set will be None.")
         train_paths = [d['path'] for d in all_items]
         train_labels = [d['label'] for d in all_items]
+        val_paths = [] # Initialize as empty
+        val_labels = [] # Initialize as empty
+        val_dataset = None # Explicitly set to None
 
     augmentation_pipeline = _build_augmentation_pipeline(data_cfg) # Pass data_cfg for augmentation settings
     preprocess_fn = _get_preprocess_fn(architecture)
@@ -371,7 +374,15 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
     train_dataset = train_dataset.cache() # Cache after mapping
     train_dataset = train_dataset.shuffle(buffer_size=max(1000, len(train_paths)))
     train_dataset = train_dataset.batch(batch_size, drop_remainder=True) 
-    val_dataset = val_dataset.batch(batch_size, drop_remainder=False)
+
+    # Create and process val_dataset only if val_paths is not empty
+    if val_paths:
+        val_dataset = tf.data.Dataset.from_tensor_slices((val_paths, val_labels))
+        val_dataset = val_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=False), num_parallel_calls=AUTOTUNE) # No augmentation for validation
+        logger.info("Applying .cache() to the validation dataset after mapping.")
+        val_dataset = val_dataset.cache() # Cache after mapping
+        val_dataset = val_dataset.batch(batch_size, drop_remainder=False)
+    # If val_paths was empty, val_dataset remains None as set above
 
     # Apply MixUp if enabled (after batching)
     mixup_config = data_cfg.get('augmentation', {}).get('mixup', {})
@@ -384,6 +395,10 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
                 raise ValueError("Label map is required for MixUp to determine num_classes.")
             num_classes = len(index_to_label)
             train_dataset = train_dataset.map(lambda x, y: mixup(x, y, alpha=mixup_alpha, num_classes=num_classes), num_parallel_calls=AUTOTUNE)
+            # Optionally apply to validation set if it exists and if desired (usually not for validation)
+            # if val_dataset is not None and mixup_config.get('apply_to_validation', False):
+            #     logger.info(f"Applying MixUp augmentation to validation data with alpha={mixup_alpha}.")
+            #     val_dataset = val_dataset.map(lambda x, y: mixup(x, y, alpha=mixup_alpha, num_classes=num_classes), num_parallel_calls=AUTOTUNE)
         else:
             logger.info("MixUp is enabled in config but alpha is 0.0. No MixUp will be applied.")
 
@@ -393,23 +408,20 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
         cutmix_alpha = float(cutmix_config.get('alpha', 1.0))
         if cutmix_alpha > 0.0:
             logger.info(f"Applying CutMix augmentation to training data with alpha={cutmix_alpha}.")
-            if not index_to_label: # Should have been loaded earlier
+            if not index_to_label:
                 raise ValueError("Label map is required for CutMix to determine num_classes.")
             num_classes = len(index_to_label)
-            # The 'mixup' function one-hots labels, so if mixup was applied, labels are already one-hot.
-            # The 'cutmix' function handles both sparse and one-hot labels internally.
             train_dataset = train_dataset.map(lambda x, y: cutmix(x, y, alpha=cutmix_alpha, num_classes=num_classes), num_parallel_calls=AUTOTUNE)
+            # Optionally apply to validation set if it exists and if desired (usually not for validation)
+            # if val_dataset is not None and cutmix_config.get('apply_to_validation', False):
+            #     logger.info(f"Applying CutMix augmentation to validation data with alpha={cutmix_alpha}.")
+            #     val_dataset = val_dataset.map(lambda x, y: cutmix(x, y, alpha=cutmix_alpha, num_classes=num_classes), num_parallel_calls=AUTOTUNE)
         else:
             logger.info("CutMix is enabled in config but alpha is 0.0. No CutMix will be applied.")
 
-    # Prefetching
+    # Prefetch for performance
     train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
-    if val_paths:
-        val_dataset = tf.data.Dataset.from_tensor_slices((val_paths, val_labels))
-        val_dataset = val_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=False), num_parallel_calls=AUTOTUNE)
-        logger.info("Applying .cache() to the validation dataset after mapping.")
-        val_dataset = val_dataset.cache() # Cache after mapping
-        val_dataset = val_dataset.batch(batch_size)
+    if val_dataset is not None:
         val_dataset = val_dataset.prefetch(buffer_size=AUTOTUNE)
         logger.info("Validation dataset created.")
     else:
