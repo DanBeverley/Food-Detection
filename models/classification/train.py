@@ -7,20 +7,17 @@ import traceback
 
 import tensorflow as tf
 from tensorflow.keras import models, layers, optimizers, losses, callbacks, applications, metrics
-from tensorflow.keras.applications import MobileNetV2 # Added for MobileNetV2
-from tensorflow.keras.applications.mobilenet_v2 import preprocess_input as mobilenet_v2_preprocess_input # Added for MobileNetV2
-from tensorflow.keras import mixed_precision # For TF >= 2.11 (and Keras 3)
+from tensorflow.keras.applications import mobilenet_v2, mobilenet_v3, efficientnet_v2, convnext
+from tensorflow.keras import mixed_precision
 
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, List, Optional
 
-logger = logging.getLogger(__name__) # Get logger early
+logger = logging.getLogger(__name__)
 
 def initialize_strategy() -> tf.distribute.Strategy:
-    """Initializes and returns the appropriate TensorFlow distribution strategy."""
     try:
-        # Try to connect to a TPU cluster
         tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver.connect()
-        if tpu_resolver: # TPU found
+        if tpu_resolver:
             logger.info(f'Running on TPU: {tpu_resolver.master()}')
             tf.config.experimental_connect_to_cluster(tpu_resolver)
             tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
@@ -28,49 +25,36 @@ def initialize_strategy() -> tf.distribute.Strategy:
             logger.info(f"TPU strategy initialized with {strategy.num_replicas_in_sync} replicas.")
             return strategy
     except ValueError as e:
-        # TPUClusterResolver.connect() raises ValueError if TPU is not found or already initialized.
         logger.info(f"TPU not found or error connecting: {e}. Checking for GPUs.")
     except Exception as e:
         logger.error(f"An unexpected error occurred during TPU initialization: {e}. Checking for GPUs.")
 
-    # Fallback to GPU/CPU strategy
-    try:
-        gpus = tf.config.experimental.list_physical_devices('GPU')
-        if gpus:
-            logger.info(f"Found GPUs: {gpus}")
-            # Restrict TensorFlow to only use the first GPU for simplicity if multiple are present
-            # and not using MirroredStrategy explicitly for multi-GPU in this script yet.
-            tf.config.experimental.set_visible_devices(gpus[0], 'GPU')
-            tf.config.experimental.set_memory_growth(gpus[0], True)
-            logger.info(f"Restricted TensorFlow to use GPU: {gpus[0].name} and enabled memory growth.")
-            # For single GPU, default strategy is fine. For multiple, MirroredStrategy would be explicit.
-            # tf.distribute.get_strategy() will reflect this single visible GPU.
-        else:
-            logger.warning("No GPUs found by TensorFlow. Training will use CPU.")
-    except Exception as e:
-        logger.error(f"Error during GPU setup: {e}. TensorFlow might use default GPU settings or CPU.")
-    
-    # Default strategy for CPU or single configured GPU
-    # If multiple GPUs were visible and no specific strategy chosen, MirroredStrategy would be default.
-    # Since we made only one GPU visible, this will effectively be OneDeviceStrategy on that GPU.
-    strategy = tf.distribute.get_strategy()
-    logger.info(f"Using default strategy (CPU or single GPU): {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
-    return strategy
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        logger.info(f"Found GPUs: {gpus}")
+        tf.config.experimental.set_visible_devices(gpus[0], 'GPU')
+        tf.config.experimental.set_memory_growth(gpus[0], True)
+        logger.info(f"Restricted TensorFlow to use GPU: {gpus[0].name} and enabled memory growth.")
+        strategy = tf.distribute.get_strategy()
+        logger.info(f"Using default strategy (CPU or single GPU): {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
+        return strategy
+    else:
+        logger.warning("No GPUs found by TensorFlow. Training will use CPU.")
+        strategy = tf.distribute.get_strategy()
+        logger.info(f"Using default strategy (CPU): {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
+        return strategy
 
-# Potentially set mixed precision policy based on config
 def set_mixed_precision_policy(config: Dict, strategy: tf.distribute.Strategy):
     if config.get('training', {}).get('use_mixed_precision', False):
         policy_name = ''
         if isinstance(strategy, tf.distribute.TPUStrategy):
-            policy_name = 'mixed_bfloat16' # TPUs prefer bfloat16
+            policy_name = 'mixed_bfloat16'
             logger.info("TPU detected, using 'mixed_bfloat16' for mixed precision.")
         else:
-            # Check GPU compatibility for float16 (Compute Capability >= 7.0)
             gpu_compatible = False
             try:
                 gpus = tf.config.experimental.list_physical_devices('GPU')
                 if gpus:
-                    # Check details of the visible GPU (we made only one visible earlier)
                     details = tf.config.experimental.get_device_details(gpus[0])
                     if details.get('compute_capability', (0,0))[0] >= 7:
                         gpu_compatible = True
@@ -82,8 +66,7 @@ def set_mixed_precision_policy(config: Dict, strategy: tf.distribute.Strategy):
                 logger.info("Compatible GPU detected, using 'mixed_float16' for mixed precision.")
             else:
                 logger.warning("Mixed precision enabled in config, but no compatible GPU (Compute Capability >= 7.0) or TPU found. Mixed precision will not be used effectively for GPU.")
-                # Fallback to no policy or float32 if GPU not compatible
-                return 
+                return
 
         if policy_name:
             logger.info(f"Setting mixed precision policy to '{policy_name}'.")
@@ -98,12 +81,10 @@ def set_mixed_precision_policy(config: Dict, strategy: tf.distribute.Strategy):
 
 from data import load_classification_data, _get_project_root
 
-# Set TensorFlow global logging level
 tf.get_logger().setLevel('INFO')
 
 logger = logging.getLogger(__name__)
 
-# Custom Callback for detailed logging
 class DetailedLoggingCallback(callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
@@ -111,130 +92,190 @@ class DetailedLoggingCallback(callbacks.Callback):
         for metric, value in logs.items():
             log_message += f" - {metric}: {value:.4f}"
         logger.info(log_message)
-        print(log_message, flush=True) # Also print directly with flush
+        print(log_message, flush=True)
 
-    # Optional: For batch-level logging (can be very verbose)
-    # def on_batch_end(self, batch, logs=None):
-    #     logs = logs or {}
-    #     if batch % 10 == 0: # Log every 10 batches
-    #         log_message = f"Epoch {self.params['epochs']}, Batch {batch}"
-    #         for metric, value in logs.items():
-    #             log_message += f" - {metric}: {value:.4f}"
-    #         logger.info(log_message)
-    #         print(log_message, flush=True)
-
+    def on_batch_end(self, batch, logs=None):
+        logs = logs or {}
+        if batch % 10 == 0:
+            log_message = f"Epoch {self.params['epochs']}, Batch {batch}"
+            for metric, value in logs.items():
+                log_message += f" - {metric}: {value:.4f}"
+            logger.info(log_message)
+            print(log_message, flush=True)
 
 def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.Model:
-    """
-    Build and compile a classification model based on the configuration.
+    model_cfg = config.get('model', {})
+    data_cfg = config.get('data', {})
+    optimizer_cfg = config.get('optimizer', {})
+    loss_cfg = config.get('loss', {})
+    metrics_cfg = config.get('metrics', ['accuracy'])
 
-    Args:
-        num_classes: Number of output classes.
-        config: Dictionary containing classification training configuration (the entire content of config.yaml).
-        learning_rate_to_use: The learning rate value (float) or a tf.keras.optimizers.schedules.LearningRateSchedule instance.
-
-    Returns:
-        Compiled Keras model.
-
-    Raises:
-        ValueError: If configuration is invalid or architecture is unsupported.
-    """
-    model_cfg = config.get('model', {}) 
-    data_cfg = config.get('data', {})   
-    optimizer_cfg = config.get('optimizer', {}) 
-    loss_cfg = config.get('loss', {}) 
-    metrics_cfg = config.get('metrics', ['accuracy']) 
-
-    architecture = model_cfg.get('architecture', 'EfficientNetV2B0')
+    architecture = model_cfg.get('architecture', 'MobileNetV3Small')
     image_size_list = data_cfg.get('image_size', [224, 224])
     image_size = tuple(image_size_list)
 
     use_pretrained = model_cfg.get('use_pretrained_weights', True)
-    fine_tune = model_cfg.get('fine_tune', False)
-    fine_tune_layers = model_cfg.get('fine_tune_layers', 10)
+    fine_tune_rgb = model_cfg.get('fine_tune', False)
+    fine_tune_layers_rgb = model_cfg.get('fine_tune_layers', 10)
     weights = 'imagenet' if use_pretrained else None
 
-    input_shape = (*image_size, 3)
+    active_input_layers_list = []
+    all_branch_features = []
 
-    logger.info(f"Building model with architecture: {architecture}, input_shape: {input_shape}, num_classes: {num_classes}")
+    rgb_input_shape = (*image_size, 3)
+    rgb_input_tensor = layers.Input(shape=rgb_input_shape, name='rgb_input')
+    active_input_layers_list.append(rgb_input_tensor)
+    logger.info(f"RGB Input: shape={rgb_input_shape}")
 
-    if architecture.startswith('EfficientNetV2'):
-        try:
+    logger.info(f"Building RGB branch with architecture: {architecture}")
+    preprocess_fn = None
+    base_model_class = None
+
+    if architecture == "MobileNetV2":
+        base_model_class = applications.MobileNetV2
+        preprocess_fn = mobilenet_v2.preprocess_input
+    elif architecture == "MobileNetV3Small":
+        base_model_class = applications.MobileNetV3Small
+        preprocess_fn = mobilenet_v3.preprocess_input
+    elif architecture == "MobileNetV3Large":
+        base_model_class = applications.MobileNetV3Large
+        preprocess_fn = mobilenet_v3.preprocess_input
+    elif architecture.startswith('EfficientNetV2'):
+        if hasattr(applications, architecture):
             base_model_class = getattr(applications, architecture)
-            base_model = base_model_class(include_top=False, input_shape=input_shape, weights=weights)
-        except AttributeError:
+            preprocess_fn = efficientnet_v2.preprocess_input
+        else:
             raise ValueError(f"Unsupported EfficientNetV2 variant: {architecture}")
     elif architecture.startswith('ConvNeXt'):
-        try:
+        if hasattr(applications, architecture):
             base_model_class = getattr(applications, architecture)
-            base_model = base_model_class(include_top=False, input_shape=input_shape, weights=weights)
-        except AttributeError:
-            raise ValueError(f"Unsupported ConvNeXt variant: {architecture}")
-    elif architecture == "MobileNetV2": # Added MobileNetV2
-        base_model = MobileNetV2(include_top=False, input_shape=input_shape, weights=weights)
-    else:
-        raise ValueError(f"Unsupported architecture: {architecture}")
-
-    base_model.trainable = fine_tune
-    if fine_tune and fine_tune_layers > 0:
-        for layer in base_model.layers:
-            layer.trainable = False
-        if fine_tune_layers < len(base_model.layers):
-             logger.info(f"Fine-tuning: Unfreezing the top {fine_tune_layers} layers of the base model.")
-             for layer in base_model.layers[-fine_tune_layers:]:
-                 layer.trainable = True
+            preprocess_fn = convnext.preprocess_input
         else:
-            logger.warning(f"fine_tune_layers ({fine_tune_layers}) >= number of layers in base model ({len(base_model.layers)}). Unfreezing all base model layers.")
-            for layer in base_model.layers:
-                layer.trainable = True
-    elif fine_tune: 
-        logger.info("Fine-tuning: Unfreezing all layers of the base model.")
-        for layer in base_model.layers:
+            raise ValueError(f"Unsupported ConvNeXt variant: {architecture}")
+    else:
+        raise ValueError(f"Unsupported architecture for RGB base model: {architecture}")
+    
+    if preprocess_fn is None:
+        raise ValueError(f"Preprocess function not found for architecture: {architecture}")
+
+    preprocessed_rgb = preprocess_fn(rgb_input_tensor)
+
+    rgb_base_model = base_model_class(include_top=False, input_shape=rgb_input_shape, weights=weights)
+    
+    rgb_base_model.trainable = fine_tune_rgb
+    if fine_tune_rgb and fine_tune_layers_rgb > 0:
+        for layer in rgb_base_model.layers[:-fine_tune_layers_rgb]:
+            layer.trainable = False
+        for layer in rgb_base_model.layers[-fine_tune_layers_rgb:]:
+            layer.trainable = True
+        logger.info(f"RGB Fine-tuning: Unfreezing the top {fine_tune_layers_rgb} layers of {architecture}.")
+    elif fine_tune_rgb:
+        logger.info(f"RGB Fine-tuning: Unfreezing all layers of {architecture}.")
+        for layer in rgb_base_model.layers:
             layer.trainable = True
     else:
-         logger.info("Feature Extraction: Freezing all layers of the base model.")
-         for layer in base_model.layers:
+        logger.info(f"RGB Feature Extraction: Freezing all layers of {architecture}.")
+        for layer in rgb_base_model.layers:
             layer.trainable = False
 
+    rgb_features_map = rgb_base_model(preprocessed_rgb)
+
     head_config = model_cfg.get('classification_head', {})
-    pooling_layer = head_config.get('pooling', 'GlobalAveragePooling2D')
-    dense_layers_units = head_config.get('dense_layers', [256])
+    pooling_layer_name = head_config.get('pooling', 'GlobalAveragePooling2D')
+    
+    if pooling_layer_name and hasattr(layers, pooling_layer_name):
+        pooled_rgb_features = getattr(layers, pooling_layer_name)(name='rgb_pool')(rgb_features_map)
+    elif pooling_layer_name:
+        logger.warning(f"Pooling layer '{pooling_layer_name}' for RGB branch not found in tf.keras.layers. Defaulting to GlobalAveragePooling2D.")
+        pooled_rgb_features = layers.GlobalAveragePooling2D(name='rgb_gap_fallback')(rgb_features_map)
+    else:
+        logger.info("No pooling layer specified for RGB branch, using GlobalAveragePooling2D.")
+        pooled_rgb_features = layers.GlobalAveragePooling2D(name='rgb_gap_default')(rgb_features_map)
+    
+    all_branch_features.append(pooled_rgb_features)
+
+    if data_cfg.get('use_depth_map', False):
+        depth_input_shape = (*image_size, 1)
+        depth_input_tensor = layers.Input(shape=depth_input_shape, name='depth_input')
+        active_input_layers_list.append(depth_input_tensor)
+        logger.info(f"Depth Input: shape={depth_input_shape}, adding Depth processing branch.")
+
+        depth_x = layers.Conv2D(32, (3, 3), padding='same', activation='relu', name='depth_conv1')(depth_input_tensor)
+        depth_x = layers.BatchNormalization(name='depth_bn1')(depth_x)
+        depth_x = layers.MaxPooling2D((2, 2), name='depth_pool1')(depth_x)
+
+        depth_x = layers.Conv2D(64, (3, 3), padding='same', activation='relu', name='depth_conv2')(depth_x)
+        depth_x = layers.BatchNormalization(name='depth_bn2')(depth_x)
+        depth_x = layers.MaxPooling2D((2, 2), name='depth_pool2')(depth_x)
+
+        depth_x = layers.Conv2D(128, (3, 3), padding='same', activation='relu', name='depth_conv3')(depth_x)
+        depth_x = layers.BatchNormalization(name='depth_bn3')(depth_x)
+        depth_x = layers.MaxPooling2D((2, 2), name='depth_pool3')(depth_x)
+        
+        processed_depth_features = layers.GlobalAveragePooling2D(name='depth_gap')(depth_x)
+        all_branch_features.append(processed_depth_features)
+        logger.info(f"Depth branch added with output shape: {processed_depth_features.shape}")
+
+    if data_cfg.get('use_point_cloud', False):
+        pc_config = data_cfg.get('point_cloud', {})
+        num_points = pc_config.get('num_points', 4096)
+        pc_input_shape = (num_points, 3)
+        pc_input_tensor = layers.Input(shape=pc_input_shape, name='pc_input')
+        active_input_layers_list.append(pc_input_tensor)
+        logger.info(f"Point Cloud Input: shape={pc_input_shape}, adding Point Cloud processing branch.")
+
+        pc_x = layers.Conv1D(64, 1, activation='relu', name='pc_conv1d_1')(pc_input_tensor)
+        pc_x = layers.BatchNormalization(name='pc_bn_1')(pc_x)
+        pc_x = layers.Conv1D(128, 1, activation='relu', name='pc_conv1d_2')(pc_x)
+        pc_x = layers.BatchNormalization(name='pc_bn_2')(pc_x)
+        pc_x = layers.Conv1D(256, 1, activation='relu', name='pc_conv1d_3')(pc_x)
+        pc_x = layers.BatchNormalization(name='pc_bn_3')(pc_x)
+        pc_x = layers.Conv1D(512, 1, activation='relu', name='pc_conv1d_4')(pc_x)
+        pc_x = layers.BatchNormalization(name='pc_bn_4')(pc_x)
+        processed_pc_features = layers.GlobalMaxPooling1D(name='pc_gmp')(pc_x)
+        all_branch_features.append(processed_pc_features)
+        logger.info(f"Point Cloud branch added with output shape: {processed_pc_features.shape}")
+
+    if len(all_branch_features) > 1:
+        logger.info(f"Fusing {len(all_branch_features)} feature branches: {[f.name for f in all_branch_features]}")
+        merged_features = layers.Concatenate(name='feature_fusion')(all_branch_features)
+    elif all_branch_features:
+        merged_features = all_branch_features[0]
+    else:
+        raise ValueError("No feature branches were built. Check model and data configuration.")
+    
+    logger.info(f"Merged feature tensor shape: {merged_features.shape}")
+    x = merged_features
+
+    head_config = model_cfg.get('classification_head', {})
+    dense_layers_units = head_config.get('dense_layers', [128])
     dropout_rate = head_config.get('dropout', 0.5)
     activation = head_config.get('activation', 'relu')
     final_activation = head_config.get('final_activation', 'softmax')
     kernel_l2_factor = head_config.get('kernel_l2_factor', 0.0)
-
-    inputs = layers.Input(shape=input_shape)
-    x = base_model(inputs, training=fine_tune)
-
-    if pooling_layer == 'GlobalAveragePooling2D':
-        x = layers.GlobalAveragePooling2D()(x)
-    elif pooling_layer == 'GlobalMaxPooling2D':
-        x = layers.GlobalMaxPooling2D()(x)
-    else:
-        x = layers.Flatten()(x)
 
     kernel_regularizer = None
     if kernel_l2_factor > 0:
         kernel_regularizer = tf.keras.regularizers.l2(kernel_l2_factor)
         logger.info(f"Applying L2 kernel regularization with factor: {kernel_l2_factor} to Dense layers in head.")
 
-    for units in dense_layers_units:
-        x = layers.Dense(units, activation=activation, kernel_regularizer=kernel_regularizer)(x)
+    for i, units in enumerate(dense_layers_units):
+        x = layers.Dense(units, activation=activation, kernel_regularizer=kernel_regularizer, name=f"head_dense_{i}_{units}")(x)
         if dropout_rate > 0:
-            x = layers.Dropout(dropout_rate)(x)
+            x = layers.Dropout(dropout_rate, name=f"head_dropout_{i}_{units}")(x)
 
-    outputs = layers.Dense(num_classes, activation=final_activation)(x) 
-    model = models.Model(inputs, outputs)
+    outputs = layers.Dense(num_classes, activation=final_activation, name='output_predictions')(x)
 
-    current_learning_rate = learning_rate_to_use 
+    model = models.Model(inputs=active_input_layers_list, outputs=outputs, name=f"{architecture}_multi_modal_classification")
+    logger.info(f"Successfully built multi-modal model: {model.name} with {len(active_input_layers_list)} inputs.")
+
     optimizer_name = optimizer_cfg.get('name', 'Adam').lower()
 
     if optimizer_name == 'adam':
-        optimizer = optimizers.Adam(learning_rate=current_learning_rate)
+        optimizer = optimizers.Adam(learning_rate=learning_rate_to_use)
     elif optimizer_name == 'sgd':
         momentum = optimizer_cfg.get('momentum', 0.9)
-        optimizer = optimizers.SGD(learning_rate=current_learning_rate, momentum=momentum)
+        optimizer = optimizers.SGD(learning_rate=learning_rate_to_use, momentum=momentum)
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
@@ -243,7 +284,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     if loss_fn_name == 'sparse_categorical_crossentropy':
         loss_fn = losses.SparseCategoricalCrossentropy(from_logits=(final_activation != 'softmax'))
     elif loss_fn_name == 'categorical_crossentropy':
-         loss_fn = losses.CategoricalCrossentropy(from_logits=(final_activation != 'softmax'))
+        loss_fn = losses.CategoricalCrossentropy(from_logits=(final_activation != 'softmax'))
     else:
         raise ValueError(f"Unsupported loss function: {loss_fn_name}")
 
@@ -253,42 +294,28 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         if m_name_lower == 'accuracy':
             metrics_list.append('accuracy')
         elif m_name_lower == 'sparse_categorical_accuracy':
-             metrics_list.append(metrics.SparseCategoricalAccuracy())
+            metrics_list.append(metrics.SparseCategoricalAccuracy())
         elif m_name_lower == 'sparse_top_k_categorical_accuracy':
-             k = loss_cfg.get('top_k', 5) 
-             metrics_list.append(metrics.SparseTopKCategoricalAccuracy(k=k, name=f'top_{k}_accuracy'))
+            k = loss_cfg.get('top_k', 5)
+            metrics_list.append(metrics.SparseTopKCategoricalAccuracy(k=k, name=f'top_{k}_accuracy'))
         else:
             logger.warning(f"Unsupported metric '{m_name}' specified in config. Skipping.")
 
-    logger.info(f"Compiling model with optimizer: {optimizer_name}, learning_rate: {current_learning_rate}, loss: {loss_fn_name}, metrics: {[m.name if hasattr(m, 'name') else m for m in metrics_list]}")
+    logger.info(f"Compiling model with optimizer: {optimizer_name}, learning_rate: {learning_rate_to_use}, loss: {loss_fn_name}, metrics: {[m.name if hasattr(m, 'name') else m for m in metrics_list]}")
     model.compile(optimizer=optimizer, loss=loss_fn, metrics=metrics_list)
     model.summary(print_fn=logger.info)
     return model
 
 def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset, config: Dict, index_to_label_map: Dict, strategy: tf.distribute.Strategy) -> None:
-    """
-    Train the classification model with callbacks and save artifacts.
-
-    Args:
-        model: Compiled Keras model.
-        train_dataset: Training tf.data.Dataset.
-        val_dataset: Validation tf.data.Dataset.
-        config: Dictionary containing training configuration (the entire content of config.yaml).
-        index_to_label_map: Mapping from integer index to string label.
-        strategy: Distribution strategy.
-
-    Raises:
-        RuntimeError: If training fails.
-    """
     training_cfg = config.get('training', {})
     paths_cfg = config.get('paths', {})
 
     epochs = training_cfg.get('epochs', 50)
 
     model_dir = paths_cfg.get('model_save_dir', 'trained_models/classification')
-    log_dir_rel = paths_cfg.get('log_dir', 'logs/classification') 
+    log_dir_rel = paths_cfg.get('log_dir', 'logs/classification')
     label_map_filename = paths_cfg.get('label_map_filename', 'label_map.json')
-    checkpoint_dir_rel = config.get('checkpoint_dir', os.path.join(model_dir, 'checkpoints')) 
+    checkpoint_dir_rel = config.get('checkpoint_dir', os.path.join(model_dir, 'checkpoints'))
 
     project_root = _get_project_root()
     model_dir_abs = os.path.join(project_root, model_dir)
@@ -305,13 +332,12 @@ def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset
     callbacks_list = []
     callbacks_config = training_cfg.get('callbacks', {})
 
-    # Add the custom logging callback first
     callbacks_list.append(DetailedLoggingCallback())
 
     mc_cfg = callbacks_config.get('model_checkpoint', {})
     if mc_cfg.get('enabled', True):
         checkpoint_filename = mc_cfg.get('filename_template', 'model_epoch-{epoch:02d}_val_loss-{val_loss:.2f}.h5')
-        model_checkpoint_path = os.path.join(checkpoint_dir_abs, checkpoint_filename) 
+        model_checkpoint_path = os.path.join(checkpoint_dir_abs, checkpoint_filename)
         logger.info(f"ModelCheckpoints will be saved to: {model_checkpoint_path}")
         callbacks_list.append(
             callbacks.ModelCheckpoint(
@@ -351,19 +377,13 @@ def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset
     
     tb_cfg = callbacks_config.get('tensorboard', {})
     if tb_cfg.get('enabled', True):
-        # Ensure log_dir for TensorBoard is absolute and unique if needed
-        tb_log_dir_rel = tb_cfg.get('log_dir', 'logs/classification_tb') # Use a distinct name like classification_tb
+        tb_log_dir_rel = tb_cfg.get('log_dir', 'logs/classification_tb')
         if not os.path.isabs(tb_log_dir_rel):
             tb_log_dir_abs = os.path.join(_get_project_root(), tb_log_dir_rel)
         else:
             tb_log_dir_abs = tb_log_dir_rel
         
-        # Optional: Add a timestamp to make log dirs unique per run
-        # from datetime import datetime
-        # current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
-        # tb_log_dir_abs = os.path.join(tb_log_dir_abs, current_time)
-
-        os.makedirs(tb_log_dir_abs, exist_ok=True) # Ensure it exists
+        os.makedirs(tb_log_dir_abs, exist_ok=True)
         logger.info(f"TensorBoard logs (within train_model) will be saved to: {tb_log_dir_abs}")
         callbacks_list.append(
             callbacks.TensorBoard(
@@ -414,32 +434,27 @@ def main(config_path: str):
         logger.error(f"An unexpected error occurred while loading config {config_path}: {e}")
         return
 
-    # Initialize distribution strategy (TPU, GPU, CPU)
     strategy = initialize_strategy()
 
-    # Set mixed precision policy if enabled, after strategy initialization
     set_mixed_precision_policy(config, strategy)
 
     paths_cfg = config.get('paths', {})
     project_root = _get_project_root()
 
     data_dir_rel = paths_cfg.get('data_dir', 'data/classification')
-    data_dir_abs = os.path.join(project_root, data_dir_rel) 
+    data_dir_abs = os.path.join(project_root, data_dir_rel)
 
     metadata_filename = paths_cfg.get('metadata_filename', 'metadata.json')
     metadata_path_abs = os.path.join(data_dir_abs, metadata_filename)
 
-    label_map_dir_rel = paths_cfg.get('label_map_dir', data_dir_rel) # Default to data_dir if not specified
+    label_map_dir_rel = paths_cfg.get('label_map_dir', data_dir_rel)
     label_map_filename = paths_cfg.get('label_map_filename', 'label_map.json')
     label_map_dir_abs = os.path.join(project_root, label_map_dir_rel)
-    label_map_path_abs = os.path.join(label_map_dir_abs, label_map_filename) # This path is now primarily for reference/logging if load_classification_data handles it
+    label_map_path_abs = os.path.join(label_map_dir_abs, label_map_filename)
 
     logger.info(f"Expecting metadata to be read by load_classification_data using relative path from config: {paths_cfg.get('data_dir', 'data/classification')}/{paths_cfg.get('metadata_filename', 'metadata.json')}")
     logger.info(f"Expecting label map to be read by load_classification_data using relative path from config: {label_map_dir_rel}/{label_map_filename}")
 
-    # Call load_classification_data with the main config object.
-    # The function load_classification_data is responsible for extracting
-    # metadata_path, label_map_path, image_size, batch_size, etc., from the config.
     train_dataset, val_dataset, num_classes, index_to_label_map = load_classification_data(config)
 
     if not train_dataset or not val_dataset:
@@ -452,7 +467,7 @@ def main(config_path: str):
     lr_schedule_cfg = config.get('training', {}).get('lr_scheduler', {})
     optimizer_cfg = config.get('optimizer', {})
     base_learning_rate = optimizer_cfg.get('learning_rate', 0.001)
-    learning_rate_to_use = base_learning_rate 
+    learning_rate_to_use = base_learning_rate
 
     if lr_schedule_cfg.get('enabled', False):
         schedule_name = lr_schedule_cfg.get('name', '').lower()
@@ -461,45 +476,30 @@ def main(config_path: str):
         else:
             logger.warning(f"Unsupported LR scheduler: {schedule_name}. Using static LR.")
     
-    # Calculate effective batch size for logging
     per_replica_batch_size = config.get('data', {}).get('batch_size', 32)
     global_batch_size = per_replica_batch_size * strategy.num_replicas_in_sync
     logger.info(f"Per-replica batch size: {per_replica_batch_size}")
     logger.info(f"Global batch size (per-replica * num_replicas): {global_batch_size}")
     logger.info(f"Number of replicas for training: {strategy.num_replicas_in_sync}")
 
-    # --- All model building, optimizer creation, and model.compile() must be within strategy.scope() ---
     with strategy.scope():
         logger.info("Building model within strategy scope...")
-        # Re-get learning rate here as it might be adjusted by scheduler config later if that's moved into scope too
-        learning_rate_to_use = optimizer_cfg.get('learning_rate', 0.001) 
-        # If LR scheduler callback modifies optimizer's LR directly, it should be fine.
-        # If optimizer itself is re-created based on scheduler, that creation must be in scope.
+        learning_rate_to_use = optimizer_cfg.get('learning_rate', 0.001)
         
         model = build_model(
             num_classes=len(index_to_label_map),
-            config=config, # Pass the full config
-            learning_rate_to_use=learning_rate_to_use # Pass initial LR
+            config=config,
+            learning_rate_to_use=learning_rate_to_use
         )
         if model is None:
             logger.error("Model building failed. Exiting training.")
             return
         logger.info("Model built successfully within strategy scope.")
 
-        # Optimizer and Loss are usually implicitly handled by compile being in scope,
-        # but if you create custom optimizer/loss objects, do it here.
-        # Example: 
-        # optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_to_use)
-        # loss_fn = tf.keras.losses.SparseCategoricalCrossentropy()
-        # model.compile(optimizer=optimizer, loss=loss_fn, metrics=["accuracy"])
-        # For now, build_model handles compilation internally based on config, which is fine.
-
-    if model is None: # Should be caught above, but double check before callbacks
+    if model is None:
         logger.error("Model is None before setting up callbacks. Exiting.")
         return
 
-    # Callbacks
-    # Callbacks are generally fine outside the scope, but they operate on the strategy-aware model.
     train_model(model, train_dataset, val_dataset, config, index_to_label_map, strategy)
 
 if __name__ == '__main__':
@@ -507,4 +507,4 @@ if __name__ == '__main__':
     parser.add_argument("--config", type=str, required=True,
                         help="Path to the classification model's YAML configuration file.")
     args = parser.parse_args()
-    main(args.config) 
+    main(args.config)

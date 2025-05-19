@@ -2,13 +2,15 @@ import json
 import os
 import tensorflow as tf
 from typing import Tuple, List, Dict, Optional
-# import numpy as np # Not strictly used in the refactored load_classification_data
+import numpy as np # Not strictly used in the refactored load_classification_data
 import logging
 from sklearn.model_selection import train_test_split
 import pathlib
 # import glob # No longer needed
 from tqdm import tqdm # Import tqdm
 import trimesh # For point cloud processing
+import traceback # For detailed error traceback
+import random # Import for random sampling
 
 # Dynamic import for preprocess_input
 _PREPROCESS_FN_CACHE = {}
@@ -216,14 +218,14 @@ def cutmix(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_c
 
     return cutmix_images, cutmix_labels
 
-def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, Dict[int, str]]:
+def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, Dict[int, str]]:
     """
     Load and prepare classification data using a metadata.json file.
     Refactored to read from metadata_path, use label_map_path from paths config.
     Args:
         config: Dictionary from classification/config.yaml.
     Returns:
-        Tuple of (train_dataset, val_dataset, num_classes, index_to_label_map).
+        Tuple of (train_dataset, val_dataset, test_dataset, num_classes, index_to_label_map).
     """
     project_root = _get_project_root()
 
@@ -263,303 +265,461 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
         with open(metadata_path, 'r') as f:
             all_items = json.load(f)
         with open(label_map_path, 'r') as f:
-            label_to_index = json.load(f)
+            label_map_loaded = json.load(f)
+            # Invert the map and convert index to int: {class_name: index_int}
+            label_to_index = {name: int(idx) for idx, name in label_map_loaded.items()}
+            index_to_label = {int(idx): name for idx, name in label_map_loaded.items()}
     
-        index_to_label = {v: k for k, v in label_to_index.items()}
-        num_classes = len(label_to_index)
+        num_classes_from_map = len(label_to_index)
+        configured_num_classes = config['model'].get('num_classes', num_classes_from_map)
 
         logger.info(f"Found {len(all_items)} total image items in metadata.")
-        logger.info(f"Number of classes: {num_classes} from {label_map_path}.")
+        logger.info(f"Number of classes: {num_classes_from_map} from {label_map_path}.")
 
         # Prepare lists for all modalities
         all_rgb_paths = []
-        all_depth_paths = [] # Store paths or empty strings
-        all_pc_paths = []    # Store paths or empty strings
-        all_labels_numeric = []
-        all_instance_ids = []
+        all_labels_numeric = [] # Initialize all_labels_numeric
+        all_depth_paths = []
+        all_pc_paths = []    
 
-        for item in tqdm(all_items, desc="Processing metadata items"):
-            rgb_path_str = item['path']
+        skipped_missing_path = 0
+        skipped_missing_label = 0
+        processed_count = 0
+
+        # Progress bar setup
+        progress_bar = tqdm(all_items, desc="Processing metadata items", unit="item")
+
+        for item in progress_bar:
+            # Check for explicit image_path first
+            rgb_path_str = item['image_path']
             # Basic validation: ensure rgb_path_str is not empty and exists
             if not rgb_path_str or not pathlib.Path(rgb_path_str).exists():
-                logger.warning(f"RGB path missing or file not found: '{rgb_path_str}' for item {item.get('instance_id', 'N/A')}. Skipping item.")
+                logger.warning(f"RGB path missing or file not found: '{rgb_path_str}' for item {item.get('instance_name', 'N/A')}. Skipping item.")
+                skipped_missing_path += 1
                 continue
+            
             all_rgb_paths.append(rgb_path_str)
-            all_labels_numeric.append(label_to_index[item['label']])
-            instance_id = item['instance_id']
-            all_instance_ids.append(instance_id)
+            class_name = item.get('class_name')
+            current_label = None
+            if class_name and class_name in label_to_index:
+                current_label = label_to_index[class_name]
+            elif class_name:
+                logger.warning(f"Class name '{class_name}' found in metadata item {rgb_path_str} but not in label_map. Skipping item.")
+                skipped_missing_label += 1
+                # Remove the already added rgb_path if label is invalid
+                if all_rgb_paths and all_rgb_paths[-1] == rgb_path_str:
+                    all_rgb_paths.pop()
+                continue 
+            else:
+                logger.warning(f"Missing 'class_name' in metadata for item {rgb_path_str}. Skipping item.")
+                skipped_missing_label += 1
+                if all_rgb_paths and all_rgb_paths[-1] == rgb_path_str:
+                    all_rgb_paths.pop()
+                continue
+            all_labels_numeric.append(current_label)
+            
+            # instance_id or instance_name is used for constructing depth/pc paths if they follow a pattern like .../class_name/instance_id_or_name/...
+            # Prioritize 'instance_id', then 'instance_name', then a default if neither exists (though usually one should for multi-modal)
+            instance_identifier = item.get('instance_id', item.get('instance_name', ''))
+            # all_instance_ids.append(instance_identifier) # Though this list itself isn't directly used for stratified split anymore
 
             depth_path_str = "" # Default to empty string
             if use_depth_map:
-                rgb_path_obj = pathlib.Path(rgb_path_str)
-                # Depth path construction logic (assuming it's correct as per previous steps)
-                potential_depth_path = rgb_path_obj.parent.parent / depth_map_dir_name / rgb_path_obj.name
-                if potential_depth_path.exists():
+                # Path for depth map: data_root / class_name / instance_name / depth_dir_name / frame_number.png (example)
+                # We need a robust way to get the frame_filename or identifier from rgb_path_str
+                frame_filename = pathlib.Path(rgb_path_str).name
+                # Assuming depth maps are in a subfolder relative to the RGB image's folder, or a parallel folder structure
+                # Example: E:\_MetaFood3D_new_RGBD_videos\RGBD_videos\Carrot\carrot_2\original\72.jpg
+                # Depth:   E:\_MetaFood3D_new_RGBD_videos\RGBD_videos\Carrot\carrot_2\depth\72.png (if .png)
+                # This logic assumes depth map has the same stem but possibly different suffix and parent dir named depth_map_dir_name
+                potential_depth_path = pathlib.Path(rgb_path_str).parent.parent / depth_map_dir_name / frame_filename
+                # More flexible: allow depth_map_dir_name to be relative to instance folder or class folder
+                # This example assumes depth_map_dir_name is a sibling to 'original' if rgb_path_str contains 'original'
+                # This might need adjustment based on exact dataset structure.
+                # For now, let's assume a simpler structure for classification where depth might be alongside RGB or given directly.
+                # If 'depth_path' is in metadata, use it. Otherwise, try to derive.
+                if 'depth_path' in item and item['depth_path']:
+                    potential_depth_path = pathlib.Path(item['depth_path'])
+                elif instance_identifier: # Try to derive if instance_identifier is present
+                     # This derivation is a placeholder and likely needs to match your *actual* structure for classification data
+                    potential_depth_path = pathlib.Path(rgb_path_str).parent.parent / depth_map_dir_name / frame_filename # Simplified assumption
+                else: # Cannot derive without instance identifier or explicit path
+                    potential_depth_path = None
+
+                if potential_depth_path and potential_depth_path.exists():
                     depth_path_str = str(potential_depth_path)
                 else:
-                    logger.debug(f"Depth map not found for {rgb_path_str} at {potential_depth_path}. Will use empty path.")
+                    logger.debug(f"Depth map not found for {rgb_path_str} (tried {potential_depth_path}). Will use zeros.")
             all_depth_paths.append(depth_path_str)
 
             pc_path_str = "" # Default to empty string
             if use_point_cloud:
-                food_class_from_label = item['label'] 
+                food_class_from_label = item['class_name'] 
                 # PC path construction logic (assuming it's correct as per previous steps)
-                potential_pc_path = pathlib.Path(point_cloud_root_dir) / pc_sampling_rate_dir / food_class_from_label / instance_id / (instance_id + pc_suffix)
-                if potential_pc_path.exists():
+                # Point clouds are often per-instance rather than per-frame.
+                # The metadata should ideally link an RGB frame to its corresponding (potentially single) instance point cloud.
+                if 'point_cloud_path' in item and item['point_cloud_path']:
+                    potential_pc_path = pathlib.Path(item['point_cloud_path'])
+                elif instance_identifier: # Try to derive if instance_identifier is present
+                    potential_pc_path = pathlib.Path(point_cloud_root_dir) / pc_sampling_rate_dir / food_class_from_label / instance_identifier / (instance_identifier + pc_suffix)
+                else:
+                    potential_pc_path = None
+                
+                if potential_pc_path and potential_pc_path.exists():
                     pc_path_str = str(potential_pc_path)
                 else:
-                    logger.debug(f"Point cloud not found for instance {instance_id} (class {food_class_from_label}) at {potential_pc_path}. Will use empty path.")
+                    logger.debug(f"Point cloud not found for {rgb_path_str} (food_class: {food_class_from_label}, instance: {instance_identifier}, tried {potential_pc_path}). Will use zeros.")
             all_pc_paths.append(pc_path_str)
 
-        if not all_rgb_paths:
-            raise ValueError("No image paths were loaded. Check metadata file and paths.")
+            processed_count += 1
+            if processed_count % 20000 == 0: # Log progress every 20000 items for full dataset
+                logger.info(f"Processed {processed_count}/{len(all_items)} metadata items...")
 
-        # Stratified split if split_ratio > 0 and < 1
-        if 0 < split_ratio < 1:
-            # Create a unique ID for each item for consistent splitting if metadata doesn't have one
-            # Using instance_id for splitting to keep frames from same instance together if possible,
-            # but stratification is on labels.
-            # For proper instance-level split, group by instance_id first.
-            # Current split is per-image, stratified by label.
+        logger.info(f"Finished processing metadata. {processed_count} items prepared for dataset creation.")
+        logger.info(f"Skipped {skipped_missing_path} items due to missing RGB path.")
+        logger.info(f"Skipped {skipped_missing_label} items due to missing or invalid class_name.")
 
-            # Generate indices for splitting
-            indices = list(range(len(all_rgb_paths)))
+        if not all_rgb_paths or not all_labels_numeric:
+            logger.error("No valid data items found after processing metadata. Aborting.")
+            return None, None, None, 0, {}
+
+        # --- (Optional) Subset Sampling for Debugging/Testing ---
+        debug_max_total_samples = data_cfg.get('debug_max_total_samples', None)
+        if debug_max_total_samples and isinstance(debug_max_total_samples, int) and debug_max_total_samples > 0:
+            if debug_max_total_samples < len(all_rgb_paths):
+                logger.info(f"Debug mode: Sampling {debug_max_total_samples} images from the total {len(all_rgb_paths)} images for quick testing.")
+                # Ensure consistent sampling if a global seed is set elsewhere, or seed here if needed
+                # random.seed(data_cfg.get('random_seed', 42)) # Optionally seed for reproducibility of subset
+                
+                # Create pairs of (path, label_index) for sampling to keep them aligned
+                paired_data = list(zip(all_rgb_paths, all_labels_numeric, all_depth_paths, all_pc_paths))
+                sampled_pairs = random.sample(paired_data, debug_max_total_samples)
+                
+                # Unzip the sampled pairs
+                all_rgb_paths, all_labels_numeric, all_depth_paths, all_pc_paths = zip(*sampled_pairs)
+                
+                # Convert tuples back to lists
+                all_rgb_paths = list(all_rgb_paths)
+                all_labels_numeric = list(all_labels_numeric)
+                all_depth_paths = list(all_depth_paths) # Keep even if empty based on use_depth_map
+                all_pc_paths = list(all_pc_paths)     # Keep even if empty based on use_point_cloud
+
+                logger.info(f"Sampled down to {len(all_rgb_paths)} images for debug run.")
+            else:
+                logger.info(f"debug_max_total_samples ({debug_max_total_samples}) is >= total images ({len(all_rgb_paths)}). Using all images.")
+        # --- End Subset Sampling ---
+
+        # Initialize lists for paths for each split
+        train_rgb_paths, val_rgb_paths, test_rgb_paths = [], [], []
+        train_labels, val_labels, test_labels = [], [], []
+        train_depth_paths, val_depth_paths, test_depth_paths = [], [], []
+        train_pc_paths, val_pc_paths, test_pc_paths = [], [], []
+
+        if len(all_rgb_paths) > 1: # Need at least 2 samples to split
+            temp_labels_for_stratify = all_labels_numeric if isinstance(all_labels_numeric, list) else list(all_labels_numeric)
+            # Stratify only if there are at least 2 samples for each class present in the stratify array
+            # Or more simply, if there's more than one unique class in the labels to stratify by.
+            can_stratify_initial = len(set(temp_labels_for_stratify)) > 1
+
+            train_rgb_paths, temp_rgb_paths, train_labels, temp_labels = train_test_split(
+                all_rgb_paths, temp_labels_for_stratify, 
+                test_size=split_ratio, 
+                random_state=42, 
+                stratify=temp_labels_for_stratify if can_stratify_initial else None
+            )
+            if use_depth_map:
+                train_depth_paths, temp_depth_paths, _, _ = train_test_split(
+                    all_depth_paths, temp_labels_for_stratify, test_size=split_ratio, random_state=42, stratify=temp_labels_for_stratify if can_stratify_initial else None)
+            if use_point_cloud:
+                train_pc_paths, temp_pc_paths, _, _ = train_test_split(
+                    all_pc_paths, temp_labels_for_stratify, test_size=split_ratio, random_state=42, stratify=temp_labels_for_stratify if can_stratify_initial else None)
+
+            temp_labels_list = list(temp_labels) if not isinstance(temp_labels, list) else temp_labels
+            can_stratify_temp = len(set(temp_labels_list)) > 1
+
+            if len(temp_rgb_paths) > 1:
+                val_rgb_paths, test_rgb_paths, val_labels, test_labels = train_test_split(
+                    temp_rgb_paths, temp_labels_list, 
+                    test_size=0.5, 
+                    random_state=42,
+                    stratify=temp_labels_list if can_stratify_temp else None
+                )
+                if use_depth_map:
+                    val_depth_paths, test_depth_paths, _, _ = train_test_split(
+                        temp_depth_paths, temp_labels_list, test_size=0.5, random_state=42, stratify=temp_labels_list if can_stratify_temp else None)
+                if use_point_cloud:
+                    val_pc_paths, test_pc_paths, _, _ = train_test_split(
+                        temp_pc_paths, temp_labels_list, test_size=0.5, random_state=42, stratify=temp_labels_list if can_stratify_temp else None)
+            else:
+                val_rgb_paths, test_rgb_paths = temp_rgb_paths, []
+                val_labels, test_labels = temp_labels_list, []
+                if use_depth_map: val_depth_paths, test_depth_paths = temp_depth_paths, []
+                if use_point_cloud: val_pc_paths, test_pc_paths = temp_pc_paths, []
+                logger.warning("Temp set has less than 2 samples. Cannot split into validation and test. Assigning all to validation.")
+        else:
+            train_rgb_paths, val_rgb_paths, test_rgb_paths = all_rgb_paths, [], []
+            train_labels, val_labels, test_labels = all_labels_numeric, [], []
+            if use_depth_map: train_depth_paths, val_depth_paths, test_depth_paths = all_depth_paths, [], []
+            if use_point_cloud: train_pc_paths, val_pc_paths, test_pc_paths = all_pc_paths, [], []
+            logger.warning("Less than 2 samples in total. Cannot perform train/val/test split. Assigning all to training set.")
+
+        logger.info(f"Dataset split: Train: {len(train_rgb_paths)}, Validation: {len(val_rgb_paths)}, Test: {len(test_rgb_paths)} samples.")
+
+        # Prepare path tuples for tf.data.Dataset
+        def create_path_tuples(rgb_paths_list, depth_paths_list, pc_paths_list):
+            output_list = []
+            # Iterate based on the primary list of RGB paths
+            for i in range(len(rgb_paths_list)):
+                rgb_p = rgb_paths_list[i]
+                
+                depth_p = ""
+                # Check if depth map is used, if the list is long enough, and if the specific path is not empty
+                if use_depth_map and i < len(depth_paths_list) and depth_paths_list[i]:
+                    depth_p = depth_paths_list[i]
+                
+                pc_p = ""
+                # Check if point cloud is used, if the list is long enough, and if the specific path is not empty
+                if use_point_cloud and i < len(pc_paths_list) and pc_paths_list[i]:
+                    pc_p = pc_paths_list[i]
+                    
+                output_list.append((rgb_p, depth_p, pc_p)) # Append a TUPLE of paths
+            return output_list
+
+        train_path_tuples = create_path_tuples(train_rgb_paths, train_depth_paths, train_pc_paths)
+        val_path_tuples = create_path_tuples(val_rgb_paths, val_depth_paths, val_pc_paths)
+        test_path_tuples = create_path_tuples(test_rgb_paths, test_depth_paths, test_pc_paths) 
+
+        # Prepare data for tf.data.Dataset
+        # Ensure all path lists are of the same length, padded with empty strings if necessary
+        # This should already be handled by appending empty strings above.
+
+        path_tuples = list(zip(all_rgb_paths, all_depth_paths, all_pc_paths))
+        all_labels_numeric_tf = tf.constant(all_labels_numeric, dtype=tf.int32)
+
+        logger.info(f"Total items loaded: {len(all_rgb_paths)}")
+        logger.info(f"Number of unique classes found: {num_classes_from_map}")
+        logger.info(f"Class to index mapping: {label_to_index}")
+        logger.info(f"Using random_seed: {42} for splits.")
+
+        # Stratified split based on labels
+        # Ensure all_labels_numeric is suitable for stratify argument (e.g., list or array-like)
+        # Assuming batch_labels are sparse (indices) based on sparse_categorical_crossentropy typical usage.
         
-            # Stratified split based on labels
-            # Ensure all_labels_numeric is suitable for stratify argument (e.g., list or array-like)
+        indices = list(range(len(path_tuples)))
+        if split_ratio > 0 and split_ratio < 1:
             train_indices, val_indices = train_test_split(
                 indices, 
                 test_size=split_ratio, 
-                random_state=42, # for reproducibility
-                stratify=all_labels_numeric
+                stratify=all_labels_numeric, # Use the numeric labels for stratification
+                random_state=42
             )
-
-            train_rgb_paths = [all_rgb_paths[i] for i in train_indices]
-            train_depth_paths = [all_depth_paths[i] for i in train_indices]
-            train_pc_paths = [all_pc_paths[i] for i in train_indices]
-            train_labels = [all_labels_numeric[i] for i in train_indices]
-
-            val_rgb_paths = [all_rgb_paths[i] for i in val_indices]
-            val_depth_paths = [all_depth_paths[i] for i in val_indices]
-            val_pc_paths = [all_pc_paths[i] for i in val_indices]
-            val_labels = [all_labels_numeric[i] for i in val_indices]
-        
-            logger.info(f"Training samples: {len(train_rgb_paths)}, Validation samples: {len(val_rgb_paths)}")
-            val_dataset = None # Initialize, will be created if val_rgb_paths is not empty
-
+            logger.info(f"Split data: {len(train_indices)} training, {len(val_indices)} validation samples.")
         elif split_ratio == 0: # Use all data for training, no validation set
-            logger.info("Split ratio is 0. Using all data for training, validation set will be None.")
-            train_rgb_paths = all_rgb_paths
-            train_depth_paths = all_depth_paths
-            train_pc_paths = all_pc_paths
-            train_labels = all_labels_numeric
-            val_rgb_paths, val_depth_paths, val_pc_paths, val_labels = [], [], [], []
-            val_dataset = None
-        elif split_ratio == 1: # Use all data for validation, no training set (uncommon)
-            logger.info("Split ratio is 1. Using all data for validation, training set will be None.")
-            val_rgb_paths = all_rgb_paths
-            val_depth_paths = all_depth_paths
-            val_pc_paths = all_pc_paths
-            val_labels = all_labels_numeric
-            train_rgb_paths, train_depth_paths, train_pc_paths, train_labels = [], [], [], []
-            train_dataset = None # Should not proceed to train if no training data
-            if not train_rgb_paths:
-                logger.warning("Training dataset is empty because split_ratio is 1.")
+            train_indices = indices
+            val_indices = []
+            logger.info(f"Using all {len(train_indices)} samples for training. No validation split.")
+        elif split_ratio == 1: # Use all data for validation (uncommon, but handle)
+            train_indices = []
+            val_indices = indices
+            logger.info(f"Using all {len(val_indices)} samples for validation. No training split.")
         else:
-            raise ValueError(f"split_ratio must be between 0 and 1, got {split_ratio}")
+            logger.error(f"Invalid split_ratio: {split_ratio}. Must be between 0 and 1.")
+            return None, None, None, 0, {}
 
+        train_path_tuples = [path_tuples[i] for i in train_indices]
+        train_labels = [all_labels_numeric_tf[i] for i in train_indices]
+        
+        val_path_tuples = [path_tuples[i] for i in val_indices]
+        val_labels = [all_labels_numeric_tf[i] for i in val_indices]
 
-        augmentation_pipeline = _build_augmentation_pipeline(data_cfg)
-        preprocess_fn_rgb = _get_preprocess_fn(architecture)
+        # Create tf.data.Dataset objects
+        # For training dataset
+        if train_path_tuples:
+            train_dataset = tf.data.Dataset.from_tensor_slices((train_path_tuples, train_labels))
+            train_dataset = train_dataset.shuffle(buffer_size=len(train_path_tuples), seed=42, reshuffle_each_iteration=True) # Shuffle before mapping
+            augmentation_pipeline = _build_augmentation_pipeline(data_cfg)
+            preprocess_fn_rgb = _get_preprocess_fn(architecture)
 
-        depth_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('depth_map', {})
-        pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
+            depth_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('depth_map', {})
+            pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
 
-        # Helper function for point cloud processing (to be wrapped by tf.py_function)
-        def _load_and_preprocess_point_cloud_py(pc_path_bytes: bytes, num_points_target: int, normalization_method: str) -> np.ndarray:
-            pc_path = pc_path_bytes.decode('utf-8')
-            try:
-                if not pc_path or not pathlib.Path(pc_path).exists():
-                    # logger.debug(f"Point cloud file not found or path empty: {pc_path}. Returning zeros.") # Called too often from tf.py_function
-                    return np.zeros((num_points_target, 3), dtype=np.float32)
-
-                # Load point cloud using trimesh
-                # For .ply, trimesh.load usually returns a Trimesh object or PointCloud object
-                mesh_or_points = trimesh.load(pc_path, process=False) # process=False to avoid early processing
-                
-                if isinstance(mesh_or_points, trimesh.Trimesh):
-                    # If it's a mesh, sample points from its surface, or use vertices if sampling fails/not preferred
-                    if mesh_or_points.vertices.shape[0] == 0:
-                        # logger.warning(f"Mesh {pc_path} has no vertices. Returning zeros.")
+            # Helper function for point cloud processing (to be wrapped by tf.py_function)
+            def _load_and_preprocess_point_cloud_py(pc_path_bytes: bytes, num_points_target_tensor: tf.Tensor, normalization_method_tensor: tf.Tensor) -> np.ndarray:
+                pc_path = pc_path_bytes.numpy().decode('utf-8')
+                num_points_target = num_points_target_tensor.numpy() # Convert num_points_target tensor to Python int
+                current_normalization_method = normalization_method_tensor.numpy().decode('utf-8') # Convert normalization_method tensor to Python string
+                try:
+                    if not pc_path or not pathlib.Path(pc_path).exists():
                         return np.zeros((num_points_target, 3), dtype=np.float32)
-                    # Option 1: Use vertices directly if number is reasonable or sampling is not desired
-                    # points = mesh_or_points.vertices
-                    # Option 2: Sample points from the surface (more uniform for complex meshes)
-                    # points, _ = trimesh.sample.sample_surface(mesh_or_points, num_points_target * 2) # Sample more initially
-                    # if points.shape[0] == 0:
-                    points = mesh_or_points.vertices # Fallback to vertices if sampling returns nothing
-                elif isinstance(mesh_or_points, trimesh.points.PointCloud):
-                    points = mesh_or_points.vertices
-                else:
-                    # logger.warning(f"Unsupported geometry type from {pc_path}: {type(mesh_or_points)}. Returning zeros.")
-                    return np.zeros((num_points_target, 3), dtype=np.float32)
 
-                if points.shape[0] == 0:
-                    # logger.debug(f"No points found in {pc_path}. Returning zeros.")
-                    return np.zeros((num_points_target, 3), dtype=np.float32)
-
-                # Subsample or pad to num_points_target
-                if points.shape[0] > num_points_target:
-                    indices = np.random.choice(points.shape[0], num_points_target, replace=False)
-                    points = points[indices]
-                elif points.shape[0] < num_points_target:
-                    if points.shape[0] == 0: # Should be caught above, but defensive
+                    mesh_or_points = trimesh.load(pc_path, process=False) 
+                    
+                    if isinstance(mesh_or_points, trimesh.Trimesh):
+                        if mesh_or_points.vertices.shape[0] == 0:
+                            return np.zeros((num_points_target, 3), dtype=np.float32)
+                        points = mesh_or_points.vertices 
+                    elif isinstance(mesh_or_points, trimesh.points.PointCloud):
+                        points = mesh_or_points.vertices
+                    else:
                         return np.zeros((num_points_target, 3), dtype=np.float32)
-                    indices = np.random.choice(points.shape[0], num_points_target, replace=True)
-                    points = points[indices]
-            
-                # Normalize coordinates
-                points = points.astype(np.float32) # Ensure float32 for calculations
-                points_mean = np.mean(points, axis=0)
-                points_centered = points - points_mean
 
-                if normalization_method == 'unit_sphere':
-                    max_dist = np.max(np.linalg.norm(points_centered, axis=1))
-                    if max_dist < 1e-6: max_dist = 1.0 # Avoid division by zero
-                    points_normalized = points_centered / max_dist
-                elif normalization_method == 'unit_cube':
-                    # Scale to fit within a [-1, 1] cube, maintaining aspect ratio
-                    max_abs_coord = np.max(np.abs(points_centered))
-                    if max_abs_coord < 1e-6: max_abs_coord = 1.0 # Avoid division by zero
-                    points_normalized = points_centered / max_abs_coord
-                    points_normalized = np.clip(points_normalized, -1.0, 1.0) # Ensure strictly within cube
-                elif normalization_method == 'centered_only': # Only center, no scaling
-                    points_normalized = points_centered
-                else: # 'none' or unknown
-                    points_normalized = points # Use original points (potentially after centering if desired for 'none')
-            
-                return points_normalized.astype(np.float32)
+                    if points.shape[0] == 0:
+                        return np.zeros((num_points_target, 3), dtype=np.float32)
 
-            except Exception as e:
-                # logger.error(f"Error processing point cloud {pc_path}: {e}. Returning zeros.") # Called too often
-                # This print helps during debugging when logger isn't configured for tf.py_function context
-                # print(f"CASCADE_DEBUG: Error in _load_and_preprocess_point_cloud_py for {pc_path}: {e}")
-                return np.zeros((num_points_target, 3), dtype=np.float32)
-
-        # Updated load_and_preprocess signature and logic
-        def load_and_preprocess(input_paths: Tuple[tf.Tensor, tf.Tensor, tf.Tensor], label: tf.Tensor, augment: bool = False) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
-            rgb_path, depth_path_tensor, pc_path_tensor = input_paths
-
-            # --- RGB Image Processing ---
-            image_string = tf.io.read_file(rgb_path)
-            rgb_image = tf.image.decode_image(image_string, channels=3, expand_animations=False, dtype=tf.uint8)
-            rgb_image = tf.image.resize(rgb_image, image_size)
-            rgb_image_float = tf.cast(rgb_image, tf.float32)
-            rgb_image_float.set_shape([*image_size, 3])
-
-            if augment and augmentation_pipeline is not None:
-                img_for_aug = tf.expand_dims(rgb_image_float, axis=0)
-                img_aug = augmentation_pipeline(img_for_aug, training=True)
-                rgb_image_float = tf.squeeze(img_aug, axis=0)
-                rgb_image_float = tf.clip_by_value(rgb_image_float, 0.0, 255.0)
-        
-            rgb_image_preprocessed = preprocess_fn_rgb(rgb_image_float)
-            inputs = {'rgb_input': rgb_image_preprocessed}
-
-            # --- Depth Map Processing ---
-            if use_depth_map:
-                # Check if depth_path_tensor is not an empty string
-                depth_exists_cond = tf.strings.length(depth_path_tensor) > 0
+                    # Subsample or pad to num_points_target
+                    if points.shape[0] > num_points_target:
+                        indices = np.random.choice(points.shape[0], num_points_target, replace=False)
+                        points = points[indices]
+                    elif points.shape[0] < num_points_target:
+                        if points.shape[0] == 0: 
+                            return np.zeros((num_points_target, 3), dtype=np.float32)
+                        indices = np.random.choice(points.shape[0], num_points_target, replace=True)
+                        points = points[indices]
                 
-                def load_and_process_depth():
-                    depth_string = tf.io.read_file(depth_path_tensor)
-                    # Try decoding as PNG, then JPEG if PNG fails, common for depth maps
-                    try:
-                        depth_image_decoded = tf.image.decode_png(depth_string, channels=1, dtype=tf.uint8) # Or tf.uint16 if applicable
-                    except tf.errors.InvalidArgumentError:
-                        depth_image_decoded = tf.image.decode_jpeg(depth_string, channels=1)
-                
-                    depth_image_resized = tf.image.resize(depth_image_decoded, image_size)
-                    depth_image_float = tf.cast(depth_image_resized, tf.float32)
-                
-                    norm_method = depth_prep_cfg.get('normalization', 'min_max_local')
-                    if norm_method == 'min_max_local':
-                        min_val = tf.reduce_min(depth_image_float)
-                        max_val = tf.reduce_max(depth_image_float)
-                        denominator = max_val - min_val
-                        depth_normalized = tf.cond(denominator < 1e-6, 
-                                                   lambda: tf.zeros_like(depth_image_float), 
-                                                   lambda: (depth_image_float - min_val) / denominator)
-                    elif norm_method == 'fixed_range':
-                        fixed_min = float(depth_prep_cfg.get('fixed_min_val', 0.0))
-                        fixed_max = float(depth_prep_cfg.get('fixed_max_val', 255.0)) # Assuming 8-bit like range if not specified
-                        denominator = fixed_max - fixed_min
-                        if denominator < 1e-6: denominator = 1.0 # Avoid division by zero, treat as no normalization
-                        depth_normalized = (depth_image_float - fixed_min) / denominator
-                        depth_normalized = tf.clip_by_value(depth_normalized, 0.0, 1.0)
-                    else: # Default or 'none'
-                        depth_normalized = depth_image_float / 255.0 # Assuming 0-255 range needs scaling to 0-1
+                    # Normalize coordinates
+                    points = points.astype(np.float32) 
+                    points_mean = np.mean(points, axis=0)
+                    points_centered = points - points_mean
 
-                    depth_normalized.set_shape([*image_size, 1])
-                    return depth_normalized
+                    if current_normalization_method == 'unit_sphere':
+                        max_dist = np.max(np.linalg.norm(points_centered, axis=1))
+                        if max_dist < 1e-6: max_dist = 1.0 
+                        points_normalized = points_centered / max_dist
+                    elif current_normalization_method == 'unit_cube':
+                        # Scale to fit within a [-1, 1] cube, maintaining aspect ratio
+                        max_abs_coord = np.max(np.abs(points_centered))
+                        if max_abs_coord < 1e-6: max_abs_coord = 1.0
+                        points_normalized = points_centered / max_abs_coord
+                        points_normalized = np.clip(points_normalized, -1.0, 1.0) 
+                    elif current_normalization_method == 'centered_only': 
+                        points_normalized = points_centered
+                    else: 
+                        points_normalized = points 
             
-                def zeros_for_depth():
-                    return tf.zeros([*image_size, 1], dtype=tf.float32)
+                    return points_normalized.astype(np.float32)
 
-                inputs['depth_input'] = tf.cond(depth_exists_cond, load_and_process_depth, zeros_for_depth)
+                except Exception as e:
+                    return np.zeros((num_points_target, 3), dtype=np.float32)
 
-            # --- Point Cloud Processing ---
-            if use_point_cloud:
-                num_points_target = int(pc_prep_cfg.get('num_points', 4096))
-                normalization_method_str = pc_prep_cfg.get('normalization', 'unit_sphere')
-            
-                pc_exists_cond = tf.strings.length(pc_path_tensor) > 0
+            # Updated load_and_preprocess signature and logic
+            def load_and_preprocess(input_paths: Tuple[tf.Tensor, tf.Tensor, tf.Tensor], label: tf.Tensor, augment: bool = False) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
+                rgb_path = input_paths[0]
+                depth_path_tensor = input_paths[1]
+                pc_path_tensor = input_paths[2]
 
-                def load_and_process_pc():
-                    pc_data = tf.py_function(_load_and_preprocess_point_cloud_py, 
-                                             inp=[pc_path_tensor, num_points_target, normalization_method_str], 
-                                             Tout=tf.float32)
-                    pc_data.set_shape([num_points_target, 3])
-                    return pc_data
+                # --- RGB Image Processing ---
+                image_string = tf.io.read_file(rgb_path)
+                rgb_image = tf.image.decode_image(image_string, channels=3, expand_animations=False, dtype=tf.uint8)
+                rgb_image = tf.image.resize(rgb_image, image_size)
+                rgb_image_float = tf.cast(rgb_image, tf.float32)
+                rgb_image_float.set_shape([*image_size, 3])
 
-                def zeros_for_pc():
-                    return tf.zeros([num_points_target, 3], dtype=tf.float32)
-            
-                inputs['pc_input'] = tf.cond(pc_exists_cond, load_and_process_pc, zeros_for_pc)
+                if augment and augmentation_pipeline is not None:
+                    img_for_aug = tf.expand_dims(rgb_image_float, axis=0)
+                    img_aug = augmentation_pipeline(img_for_aug, training=True)
+                    rgb_image_float = tf.squeeze(img_aug, axis=0)
+                    rgb_image_float = tf.clip_by_value(rgb_image_float, 0.0, 255.0)
         
-            return inputs, label
+                rgb_image_preprocessed = preprocess_fn_rgb(rgb_image_float)
+                inputs = {'rgb_input': rgb_image_preprocessed}
 
-        AUTOTUNE = tf.data.AUTOTUNE
+                # --- Depth Map Processing ---
+                if use_depth_map:
+                    # Check if depth_path_tensor is not an empty string
+                    depth_exists_cond = tf.strings.length(depth_path_tensor) > 0
+                    
+                    def load_and_process_depth():
+                        depth_string = tf.io.read_file(depth_path_tensor)
+                        # Try decoding as PNG, then JPEG if PNG fails, common for depth maps
+                        try:
+                            depth_image_decoded = tf.image.decode_png(depth_string, channels=1, dtype=tf.uint8) # Or tf.uint16 if applicable
+                        except tf.errors.InvalidArgumentError:
+                            depth_image_decoded = tf.image.decode_jpeg(depth_string, channels=1)
+                    
+                        depth_image_resized = tf.image.resize(depth_image_decoded, image_size)
+                        depth_image_float = tf.cast(depth_image_resized, tf.float32)
+                    
+                        norm_method = depth_prep_cfg.get('normalization', 'min_max_local')
+                        if norm_method == 'min_max_local':
+                            min_val = tf.reduce_min(depth_image_float)
+                            max_val = tf.reduce_max(depth_image_float)
+                            denominator = max_val - min_val
+                            depth_normalized = tf.cond(denominator < 1e-6, 
+                                                       lambda: tf.zeros_like(depth_image_float), 
+                                                       lambda: (depth_image_float - min_val) / denominator)
+                        elif norm_method == 'fixed_range':
+                            fixed_min = float(depth_prep_cfg.get('fixed_min_val', 0.0))
+                            fixed_max = float(depth_prep_cfg.get('fixed_max_val', 255.0)) # Assuming 8-bit like range if not specified
+                            denominator = fixed_max - fixed_min
+                            if denominator < 1e-6: denominator = 1.0 # Avoid division by zero, treat as no normalization
+                            depth_normalized = (depth_image_float - fixed_min) / denominator
+                            depth_normalized = tf.clip_by_value(depth_normalized, 0.0, 1.0)
+                        else: # Default or 'none'
+                            depth_normalized = depth_image_float / 255.0 # Assuming 0-255 range needs scaling to 0-1
 
-        if not train_rgb_paths:
-            logger.warning("Training dataset is empty. Cannot proceed with training.")
-            # Return empty/None datasets or raise error, depending on desired behavior
-            # For now, will lead to error later if train_dataset is used when None.
-            train_dataset = None
-        else:
-            train_input_slices = (tf.constant(train_rgb_paths, dtype=tf.string),
-                                  tf.constant(train_depth_paths, dtype=tf.string),
-                                  tf.constant(train_pc_paths, dtype=tf.string))
-        
-            train_dataset = tf.data.Dataset.from_tensor_slices((train_input_slices, tf.constant(train_labels, dtype=tf.int32)))
-            train_dataset = train_dataset.map(lambda paths_tuple, lbl: load_and_preprocess(paths_tuple, lbl, augment=data_cfg.get('augmentation', {}).get('enabled', False)), num_parallel_calls=AUTOTUNE)
+                        depth_normalized.set_shape([*image_size, 1])
+                        return depth_normalized
+                
+                    def zeros_for_depth():
+                        return tf.zeros([*image_size, 1], dtype=tf.float32)
+
+                    inputs['depth_input'] = tf.cond(depth_exists_cond, load_and_process_depth, zeros_for_depth)
+
+                # --- Point Cloud Processing ---
+                if use_point_cloud:
+                    num_points_target = int(pc_prep_cfg.get('num_points', 4096))
+                    normalization_method_str = pc_prep_cfg.get('normalization', 'unit_sphere')
+                
+                    pc_exists_cond = tf.strings.length(pc_path_tensor) > 0
+
+                    def load_and_process_pc():
+                        pc_data = tf.py_function(_load_and_preprocess_point_cloud_py, 
+                                                 inp=[pc_path_tensor, num_points_target, normalization_method_str], 
+                                                 Tout=tf.float32)
+                        pc_data.set_shape([num_points_target, 3])
+                        return pc_data
+
+                    def zeros_for_pc():
+                        return tf.zeros([num_points_target, 3], dtype=tf.float32)
+                
+                    inputs['pc_input'] = tf.cond(pc_exists_cond, load_and_process_pc, zeros_for_pc)
+            
+                return inputs, label
+
+            AUTOTUNE = tf.data.AUTOTUNE
+
+            train_dataset = train_dataset.map(lambda x, y: load_and_preprocess(x, y, augment=data_cfg.get('augmentation', {}).get('enabled', False)), num_parallel_calls=AUTOTUNE)
             logger.info("Applying .cache() to the training dataset after mapping. This will use more RAM but speed up subsequent epochs.")
             train_dataset = train_dataset.cache()
-            train_dataset = train_dataset.shuffle(buffer_size=max(1000, len(train_rgb_paths)))
             train_dataset = train_dataset.batch(batch_size, drop_remainder=True)
 
-        if not val_rgb_paths:
-            logger.info("Validation dataset is empty or not created (split_ratio might be 0 or 1).")
-            val_dataset = None
         else:
-            val_input_slices = (tf.constant(val_rgb_paths, dtype=tf.string),
-                                tf.constant(val_depth_paths, dtype=tf.string),
-                                tf.constant(val_pc_paths, dtype=tf.string))
-            val_dataset = tf.data.Dataset.from_tensor_slices((val_input_slices, tf.constant(val_labels, dtype=tf.int32)))
-            val_dataset = val_dataset.map(lambda paths_tuple, lbl: load_and_preprocess(paths_tuple, lbl, augment=False), num_parallel_calls=AUTOTUNE)
+            train_dataset = None
+            logger.info("Training dataset is empty after split.")
+
+        # For validation dataset
+        if val_path_tuples:
+            val_dataset = tf.data.Dataset.from_tensor_slices((val_path_tuples, val_labels))
+            val_dataset = val_dataset.map(lambda x, y: load_and_preprocess(x, y, augment=False), num_parallel_calls=AUTOTUNE)
             logger.info("Applying .cache() to the validation dataset after mapping.")
             val_dataset = val_dataset.cache()
             val_dataset = val_dataset.batch(batch_size, drop_remainder=False) # No drop_remainder for validation
+        else:
+            val_dataset = None
+            logger.info("Validation dataset is empty after split.")
+
+        # For test dataset
+        if test_path_tuples:
+            test_dataset = tf.data.Dataset.from_tensor_slices((test_path_tuples, test_labels))
+            test_dataset = test_dataset.map(lambda x, y: load_and_preprocess(x, y, augment=False), num_parallel_calls=AUTOTUNE)
+            logger.info("Applying .cache() to the test dataset after mapping.")
+            test_dataset = test_dataset.cache()
+            test_dataset = test_dataset.batch(batch_size, drop_remainder=False)
+            test_dataset = test_dataset.prefetch(buffer_size=AUTOTUNE)
+            logger.info("Test dataset created and prefetched.")
+        else:
+            test_dataset = None
+            logger.info("Test dataset is empty after split.")
 
         # Apply MixUp if enabled (after batching)
         # Note: MixUp and CutMix currently operate on a single image input.
@@ -577,7 +737,7 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
                 # Adapting MixUp for dictionary inputs
                 def apply_mixup_to_dict(inputs_dict, labels_sparse):
                     rgb_images = inputs_dict['rgb_input']
-                    mixed_rgb_images, mixed_labels_one_hot = mixup(rgb_images, labels_sparse, alpha=mixup_alpha, num_classes=num_classes)
+                    mixed_rgb_images, mixed_labels_one_hot = mixup(rgb_images, labels_sparse, alpha=mixup_alpha, num_classes=num_classes_from_map)
                     # inputs_dict['rgb_input'] = mixed_rgb_images # This would modify the dict in place if not careful
                     # Create a new dict for output to avoid issues with tensor immutability / graph mode
                     updated_inputs = inputs_dict.copy() # Shallow copy is usually fine for this structure
@@ -602,7 +762,7 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
                     rgb_images = inputs_dict['rgb_input']
                     # If mixup was applied, labels_mixed_or_sparse are one-hot. Otherwise, they are sparse.
                     # CutMix internal logic handles this via `if len(tf.shape(batch_labels)) == 1:`
-                    cutmixed_rgb_images, cutmixed_labels = cutmix(rgb_images, labels_mixed_or_sparse, alpha=cutmix_alpha, num_classes=num_classes)
+                    cutmixed_rgb_images, cutmixed_labels = cutmix(rgb_images, labels_mixed_or_sparse, alpha=cutmix_alpha, num_classes=num_classes_from_map)
                     updated_inputs = inputs_dict.copy()
                     updated_inputs['rgb_input'] = cutmixed_rgb_images
                     return updated_inputs, cutmixed_labels
@@ -620,6 +780,26 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
             val_dataset = val_dataset.prefetch(buffer_size=AUTOTUNE)
             logger.info("Validation dataset created and prefetched.")
     
-        return train_dataset, val_dataset, num_classes, index_to_label
+        return train_dataset, val_dataset, test_dataset, num_classes_from_map, index_to_label
+    except Exception as e:
+        logger.error(f"Failed to load classification data: {e}")
+        traceback.print_exc() 
+        return None, None, None, 0, {} 
 
-# --- load_test_data and other functions will be refactored in subsequent steps --- 
+    debug_max_total_samples = data_cfg.get('debug_max_total_samples', None)
+    if debug_max_total_samples and isinstance(debug_max_total_samples, int) and debug_max_total_samples > 0:
+        if debug_max_total_samples < len(all_rgb_paths):
+            logger.info(f"Debug mode: Sampling {debug_max_total_samples} images from the total {len(all_rgb_paths)} images for quick testing.")
+            # Ensure consistent sampling if a global seed is set elsewhere, or seed here if needed
+            # random.seed(data_cfg.get('random_seed', 42)) # Optionally seed for reproducibility of subset
+            
+            # Create pairs of (path, label_index) for sampling to keep them aligned
+            paired_data = list(zip(all_rgb_paths, all_labels_numeric))
+            sampled_pairs = random.sample(paired_data, debug_max_total_samples)
+            
+            all_rgb_paths, all_labels_numeric = zip(*sampled_pairs)
+            all_rgb_paths = list(all_rgb_paths)
+            all_labels_numeric = list(all_labels_numeric)
+            logger.info(f"Sampled down to {len(all_rgb_paths)} images for debug run.")
+        else:
+            logger.info(f"debug_max_total_samples ({debug_max_total_samples}) is >= total images ({len(all_rgb_paths)}). Using all images.")
