@@ -4,6 +4,16 @@ data:
   batch_size: 16 
   split_ratio: 0.2
 
+  # New: Depth Map Configuration
+  use_depth_map: false
+  depth_map_dir_name: "depth" # Name of the subfolder containing depth maps within an instance folder
+
+  # New: Point Cloud Configuration
+  use_point_cloud: false
+  point_cloud_root_dir: "E:/_MetaFood3D_new_Point_cloud/Point_cloud" # Root directory for all point clouds
+  point_cloud_sampling_rate_dir: "4096" # Subdirectory under point_cloud_root_dir indicating sampling rate
+  point_cloud_suffix: "_sampled_1.ply" # Suffix for the point cloud file (e.g., <instance_id><suffix>)
+
   augmentation:
     enabled: true
     rotation_range: 20 
@@ -23,6 +33,23 @@ data:
     cutmix:
       enabled: false # Set to true to enable CutMix
       alpha: 1.0 # Controls patch size distribution, 1.0 is common
+
+  # New: Preprocessing for additional modalities
+  modalities_preprocessing:
+    depth:
+      normalize: true
+      # normalization_type: "min_max" # Options: "min_max" (scale to 0-1), "standard_score" (z-score)
+      # For depth, typically raw values are in mm or meters. Scaling to 0-1 or using specific depth ranges might be needed.
+      # We can also consider converting depth to disparity or other representations.
+      # For now, let's assume depth images are single channel and will be normalized to [0, 1] if normalize=true.
+      # Actual normalization strategy might need to be refined in data.py.
+
+    point_cloud:
+      num_points: 4096 # Target number of points (sample or pad to this number)
+      normalize: true
+      # normalization_type: "bounding_box_min_max" # Scale points within their bounding box to [-1, 1] or [0, 1]
+      # Other options: "global_min_max" (if a global range is known), "mean_std_dev"
+      # Actual normalization strategy to be implemented in data.py using trimesh/open3d.      
 
 # Model Configuration 
 model:
