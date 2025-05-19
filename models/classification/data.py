@@ -8,6 +8,7 @@ from sklearn.model_selection import train_test_split
 import pathlib
 # import glob # No longer needed
 from tqdm import tqdm # Import tqdm
+import trimesh # For point cloud processing
 
 # Dynamic import for preprocess_input
 _PREPROCESS_FN_CACHE = {}
@@ -230,214 +231,395 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
         data_cfg = config['data']
         paths_cfg = config['paths']
         model_cfg = config['model']
-        metadata_path_str = data_cfg['metadata_path']
+        architecture = model_cfg['architecture']
         image_size = tuple(data_cfg['image_size'])
         batch_size = data_cfg['batch_size']
-        split_ratio = data_cfg['split_ratio']
-        random_seed = data_cfg.get('random_seed', 42)
-        label_map_filename = paths_cfg['label_map_filename']
-        # Ensure we use the explicitly defined label_map_dir from config
-        label_map_dir_str = paths_cfg['label_map_dir'] 
-        architecture = model_cfg['architecture']
-    except KeyError as e:
-        raise ValueError(f"Configuration error: missing key {e} in classification config.")
+        split_ratio = data_cfg.get('split_ratio', 0.2) # Default to 0.2 if not specified
 
-    metadata_file = project_root / metadata_path_str
-    if not metadata_file.is_file():
-        raise FileNotFoundError(f"Metadata JSON file not found: {metadata_file}")
+        # New: Configs for additional modalities
+        use_depth_map = data_cfg.get('use_depth_map', False)
+        depth_map_dir_name = data_cfg.get('depth_map_dir_name', 'depth')
+        use_point_cloud = data_cfg.get('use_point_cloud', False)
+        point_cloud_root_dir = data_cfg.get('point_cloud_root_dir', '')
+        pc_sampling_rate_dir = data_cfg.get('point_cloud_sampling_rate_dir', '')
+        pc_suffix = data_cfg.get('point_cloud_suffix', '_sampled_1.ply')
 
-    label_map_file = project_root / label_map_dir_str / label_map_filename
-    logger.info(f"DEBUG: Attempting to load label map from resolved path: {str(label_map_file)}")
-    if not label_map_file.is_file():
-        logger.error(f"DEBUG: Label map file components: project_root='{project_root}', label_map_dir_str='{label_map_dir_str}', label_map_filename='{label_map_filename}'")
-        raise FileNotFoundError(f"Label map file not found: {label_map_file}. Run prepare_classification_dataset.py first.")
+        # Construct metadata_path and label_map_path using paths_cfg
+        # Ensure paths are absolute if they are relative to project root or a specific data_dir
+        project_root = _get_project_root()
+        base_data_dir = project_root / paths_cfg.get('data_dir', 'data/classification')
 
-    logger.info(f"Loading label map from: {label_map_file}")
-    with open(label_map_file, 'r') as f:
-        loaded_label_map = json.load(f)
-    index_to_label = {int(k): str(v) for k, v in loaded_label_map.items()}
-    label_to_index = {v: k for k, v in index_to_label.items()}
-    num_classes = len(index_to_label)
-    logger.info(f"Loaded {num_classes} classes.")
-    logger.info(f"DEBUG: First 3 entries in index_to_label: {dict(list(index_to_label.items())[:3])}")
-    logger.info(f"DEBUG: First 3 entries in label_to_index: {dict(list(label_to_index.items())[:3])}")
+        metadata_filename = paths_cfg.get('metadata_filename', 'metadata.json')
+        metadata_path = base_data_dir / metadata_filename
 
-    if num_classes == 0:
-        raise ValueError("Label map is empty.")
+        label_map_filename = paths_cfg.get('label_map_filename', 'label_map.json')
+        label_map_path = base_data_dir / label_map_filename # Corrected to use base_data_dir
 
-    logger.info(f"Loading data from metadata: {metadata_file}")
-    with open(metadata_file, 'r') as f:
-        metadata_list = json.load(f)
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
+        if not label_map_path.exists():
+            raise FileNotFoundError(f"Label map file not found: {label_map_path}")
+
+        with open(metadata_path, 'r') as f:
+            all_items = json.load(f)
+        with open(label_map_path, 'r') as f:
+            label_to_index = json.load(f)
     
-    all_items = []
-    logger.info(f"DEBUG: Processing metadata_list. Total items: {len(metadata_list)}. First 3 items raw:")
-    for i, item_raw in enumerate(metadata_list[:3]):
-        logger.info(f"DEBUG: Raw metadata item {i}: {item_raw}")
+        index_to_label = {v: k for k, v in label_to_index.items()}
+        num_classes = len(label_to_index)
 
-    logger.info("Processing metadata entries from metadata.json...")
-    for item in tqdm(metadata_list, desc="Validating image paths from metadata.json"):
-        class_name = item.get('class_name')
-        img_path = item.get('image_path')
-        instance_name = item.get('instance_name')
+        logger.info(f"Found {len(all_items)} total image items in metadata.")
+        logger.info(f"Number of classes: {num_classes} from {label_map_path}.")
 
-        if not (class_name and img_path and instance_name):
-            logger.warning(f"Skipping incomplete metadata item: {item}")
-            continue
+        # Prepare lists for all modalities
+        all_rgb_paths = []
+        all_depth_paths = [] # Store paths or empty strings
+        all_pc_paths = []    # Store paths or empty strings
+        all_labels_numeric = []
+        all_instance_ids = []
+
+        for item in tqdm(all_items, desc="Processing metadata items"):
+            rgb_path_str = item['path']
+            # Basic validation: ensure rgb_path_str is not empty and exists
+            if not rgb_path_str or not pathlib.Path(rgb_path_str).exists():
+                logger.warning(f"RGB path missing or file not found: '{rgb_path_str}' for item {item.get('instance_id', 'N/A')}. Skipping item.")
+                continue
+            all_rgb_paths.append(rgb_path_str)
+            all_labels_numeric.append(label_to_index[item['label']])
+            instance_id = item['instance_id']
+            all_instance_ids.append(instance_id)
+
+            depth_path_str = "" # Default to empty string
+            if use_depth_map:
+                rgb_path_obj = pathlib.Path(rgb_path_str)
+                # Depth path construction logic (assuming it's correct as per previous steps)
+                potential_depth_path = rgb_path_obj.parent.parent / depth_map_dir_name / rgb_path_obj.name
+                if potential_depth_path.exists():
+                    depth_path_str = str(potential_depth_path)
+                else:
+                    logger.debug(f"Depth map not found for {rgb_path_str} at {potential_depth_path}. Will use empty path.")
+            all_depth_paths.append(depth_path_str)
+
+            pc_path_str = "" # Default to empty string
+            if use_point_cloud:
+                food_class_from_label = item['label'] 
+                # PC path construction logic (assuming it's correct as per previous steps)
+                potential_pc_path = pathlib.Path(point_cloud_root_dir) / pc_sampling_rate_dir / food_class_from_label / instance_id / (instance_id + pc_suffix)
+                if potential_pc_path.exists():
+                    pc_path_str = str(potential_pc_path)
+                else:
+                    logger.debug(f"Point cloud not found for instance {instance_id} (class {food_class_from_label}) at {potential_pc_path}. Will use empty path.")
+            all_pc_paths.append(pc_path_str)
+
+        if not all_rgb_paths:
+            raise ValueError("No image paths were loaded. Check metadata file and paths.")
+
+        # Stratified split if split_ratio > 0 and < 1
+        if 0 < split_ratio < 1:
+            # Create a unique ID for each item for consistent splitting if metadata doesn't have one
+            # Using instance_id for splitting to keep frames from same instance together if possible,
+            # but stratification is on labels.
+            # For proper instance-level split, group by instance_id first.
+            # Current split is per-image, stratified by label.
+
+            # Generate indices for splitting
+            indices = list(range(len(all_rgb_paths)))
         
-        class_in_map = class_name in label_to_index
-        if not class_in_map:
-            logger.warning(f"Class '{class_name}' in metadata (img: {img_path}) not in label_map. Skipping.")
-            continue
+            # Stratified split based on labels
+            # Ensure all_labels_numeric is suitable for stratify argument (e.g., list or array-like)
+            train_indices, val_indices = train_test_split(
+                indices, 
+                test_size=split_ratio, 
+                random_state=42, # for reproducibility
+                stratify=all_labels_numeric
+            )
+
+            train_rgb_paths = [all_rgb_paths[i] for i in train_indices]
+            train_depth_paths = [all_depth_paths[i] for i in train_indices]
+            train_pc_paths = [all_pc_paths[i] for i in train_indices]
+            train_labels = [all_labels_numeric[i] for i in train_indices]
+
+            val_rgb_paths = [all_rgb_paths[i] for i in val_indices]
+            val_depth_paths = [all_depth_paths[i] for i in val_indices]
+            val_pc_paths = [all_pc_paths[i] for i in val_indices]
+            val_labels = [all_labels_numeric[i] for i in val_indices]
         
-        img_file_exists = pathlib.Path(img_path).is_file()
-        if not img_file_exists:
-             logger.warning(f"Image file not found: {img_path} (from metadata). Skipping.")
-             continue
-        all_items.append({
-            'path': str(img_path),
-            'label': label_to_index[class_name],
-            'instance_id': f"{class_name}_{instance_name}"
-        })
+            logger.info(f"Training samples: {len(train_rgb_paths)}, Validation samples: {len(val_rgb_paths)}")
+            val_dataset = None # Initialize, will be created if val_rgb_paths is not empty
 
-    if not all_items:
-        raise ValueError(f"No valid image data loaded from metadata file: {metadata_file}. Check content and label_map.")
-    logger.info(f"Found {len(all_items)} total valid image entries from metadata.")
-
-    train_paths, val_paths = [], []
-    train_labels, val_labels = [], []
-
-    if split_ratio > 0.0:
-        unique_instance_ids = sorted(list(set(d['instance_id'] for d in all_items)))
-        if len(unique_instance_ids) < 2 and len(all_items) > 1:
-             logger.warning(f"Only {len(unique_instance_ids)} unique instance(s) found for {len(all_items)} items. Instance-aware split might behave like random split.")
-             # Fallback to stratified split on labels if too few instances for meaningful instance split
-             all_paths = [d['path'] for d in all_items]
-             all_labels = [d['label'] for d in all_items]
-             if len(set(all_labels)) > 1: # Stratify only if multiple classes exist
-                 train_paths, val_paths, train_labels, val_labels = train_test_split(
-                    all_paths, all_labels, test_size=split_ratio, random_state=random_seed, stratify=all_labels)
-             else: # Single class, simple split is fine
-                 train_paths, val_paths, train_labels, val_labels = train_test_split(
-                    all_paths, all_labels, test_size=split_ratio, random_state=random_seed)
-        elif len(unique_instance_ids) < 2:
-            logger.warning("Not enough unique instances for instance-aware split. Using all data for training, validation will be empty.")
-            train_paths = [d['path'] for d in all_items]
-            train_labels = [d['label'] for d in all_items]
+        elif split_ratio == 0: # Use all data for training, no validation set
+            logger.info("Split ratio is 0. Using all data for training, validation set will be None.")
+            train_rgb_paths = all_rgb_paths
+            train_depth_paths = all_depth_paths
+            train_pc_paths = all_pc_paths
+            train_labels = all_labels_numeric
+            val_rgb_paths, val_depth_paths, val_pc_paths, val_labels = [], [], [], []
+            val_dataset = None
+        elif split_ratio == 1: # Use all data for validation, no training set (uncommon)
+            logger.info("Split ratio is 1. Using all data for validation, training set will be None.")
+            val_rgb_paths = all_rgb_paths
+            val_depth_paths = all_depth_paths
+            val_pc_paths = all_pc_paths
+            val_labels = all_labels_numeric
+            train_rgb_paths, train_depth_paths, train_pc_paths, train_labels = [], [], [], []
+            train_dataset = None # Should not proceed to train if no training data
+            if not train_rgb_paths:
+                logger.warning("Training dataset is empty because split_ratio is 1.")
         else:
-            train_instance_ids, val_instance_ids = train_test_split(
-                unique_instance_ids, test_size=split_ratio, random_state=random_seed)
-            logger.info(f"Instance split: {len(train_instance_ids)} train, {len(val_instance_ids)} val instances.")
-            for item in all_items:
-                if item['instance_id'] in train_instance_ids:
-                    train_paths.append(item['path'])
-                    train_labels.append(item['label'])
-                elif item['instance_id'] in val_instance_ids:
-                    val_paths.append(item['path'])
-                    val_labels.append(item['label'])
-    else: # split_ratio is 0 or not specified for validation
-        logger.info("Split ratio is 0. Using all data for training, validation set will be None.")
-        train_paths = [d['path'] for d in all_items]
-        train_labels = [d['label'] for d in all_items]
-        val_paths = [] # Initialize as empty
-        val_labels = [] # Initialize as empty
-        val_dataset = None # Explicitly set to None
+            raise ValueError(f"split_ratio must be between 0 and 1, got {split_ratio}")
 
-    augmentation_pipeline = _build_augmentation_pipeline(data_cfg) # Pass data_cfg for augmentation settings
-    preprocess_fn = _get_preprocess_fn(architecture)
 
-    def load_and_preprocess(path: str, label: int, augment: bool = False) -> Tuple[tf.Tensor, tf.Tensor]:
-        image_string = tf.io.read_file(path)
-        image = tf.image.decode_image(image_string, channels=3, expand_animations=False, dtype=tf.uint8) # Explicitly decode to uint8 first
-        image = tf.image.resize(image, image_size)
-        image = tf.cast(image, tf.float32) # Cast to float32 early
-        image.set_shape([*image_size, 3]) # Ensure shape consistency for the float32 image
+        augmentation_pipeline = _build_augmentation_pipeline(data_cfg)
+        preprocess_fn_rgb = _get_preprocess_fn(architecture)
 
-        # Augmentation happens BEFORE a Keras model's preprocess_input usually
-        if augment and augmentation_pipeline is not None: 
-            # Augmentation pipeline expects batch dim, then removes it
-            # Image is already float32 here
-            img_for_aug = tf.expand_dims(image, axis=0) 
-            img_aug = augmentation_pipeline(img_for_aug, training=True)
-            image = tf.squeeze(img_aug, axis=0)
-            image = tf.clip_by_value(image, 0.0, 255.0)
+        depth_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('depth_map', {})
+        pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
+
+        # Helper function for point cloud processing (to be wrapped by tf.py_function)
+        def _load_and_preprocess_point_cloud_py(pc_path_bytes: bytes, num_points_target: int, normalization_method: str) -> np.ndarray:
+            pc_path = pc_path_bytes.decode('utf-8')
+            try:
+                if not pc_path or not pathlib.Path(pc_path).exists():
+                    # logger.debug(f"Point cloud file not found or path empty: {pc_path}. Returning zeros.") # Called too often from tf.py_function
+                    return np.zeros((num_points_target, 3), dtype=np.float32)
+
+                # Load point cloud using trimesh
+                # For .ply, trimesh.load usually returns a Trimesh object or PointCloud object
+                mesh_or_points = trimesh.load(pc_path, process=False) # process=False to avoid early processing
+                
+                if isinstance(mesh_or_points, trimesh.Trimesh):
+                    # If it's a mesh, sample points from its surface, or use vertices if sampling fails/not preferred
+                    if mesh_or_points.vertices.shape[0] == 0:
+                        # logger.warning(f"Mesh {pc_path} has no vertices. Returning zeros.")
+                        return np.zeros((num_points_target, 3), dtype=np.float32)
+                    # Option 1: Use vertices directly if number is reasonable or sampling is not desired
+                    # points = mesh_or_points.vertices
+                    # Option 2: Sample points from the surface (more uniform for complex meshes)
+                    # points, _ = trimesh.sample.sample_surface(mesh_or_points, num_points_target * 2) # Sample more initially
+                    # if points.shape[0] == 0:
+                    points = mesh_or_points.vertices # Fallback to vertices if sampling returns nothing
+                elif isinstance(mesh_or_points, trimesh.points.PointCloud):
+                    points = mesh_or_points.vertices
+                else:
+                    # logger.warning(f"Unsupported geometry type from {pc_path}: {type(mesh_or_points)}. Returning zeros.")
+                    return np.zeros((num_points_target, 3), dtype=np.float32)
+
+                if points.shape[0] == 0:
+                    # logger.debug(f"No points found in {pc_path}. Returning zeros.")
+                    return np.zeros((num_points_target, 3), dtype=np.float32)
+
+                # Subsample or pad to num_points_target
+                if points.shape[0] > num_points_target:
+                    indices = np.random.choice(points.shape[0], num_points_target, replace=False)
+                    points = points[indices]
+                elif points.shape[0] < num_points_target:
+                    if points.shape[0] == 0: # Should be caught above, but defensive
+                        return np.zeros((num_points_target, 3), dtype=np.float32)
+                    indices = np.random.choice(points.shape[0], num_points_target, replace=True)
+                    points = points[indices]
+            
+                # Normalize coordinates
+                points = points.astype(np.float32) # Ensure float32 for calculations
+                points_mean = np.mean(points, axis=0)
+                points_centered = points - points_mean
+
+                if normalization_method == 'unit_sphere':
+                    max_dist = np.max(np.linalg.norm(points_centered, axis=1))
+                    if max_dist < 1e-6: max_dist = 1.0 # Avoid division by zero
+                    points_normalized = points_centered / max_dist
+                elif normalization_method == 'unit_cube':
+                    # Scale to fit within a [-1, 1] cube, maintaining aspect ratio
+                    max_abs_coord = np.max(np.abs(points_centered))
+                    if max_abs_coord < 1e-6: max_abs_coord = 1.0 # Avoid division by zero
+                    points_normalized = points_centered / max_abs_coord
+                    points_normalized = np.clip(points_normalized, -1.0, 1.0) # Ensure strictly within cube
+                elif normalization_method == 'centered_only': # Only center, no scaling
+                    points_normalized = points_centered
+                else: # 'none' or unknown
+                    points_normalized = points # Use original points (potentially after centering if desired for 'none')
+            
+                return points_normalized.astype(np.float32)
+
+            except Exception as e:
+                # logger.error(f"Error processing point cloud {pc_path}: {e}. Returning zeros.") # Called too often
+                # This print helps during debugging when logger isn't configured for tf.py_function context
+                # print(f"CASCADE_DEBUG: Error in _load_and_preprocess_point_cloud_py for {pc_path}: {e}")
+                return np.zeros((num_points_target, 3), dtype=np.float32)
+
+        # Updated load_and_preprocess signature and logic
+        def load_and_preprocess(input_paths: Tuple[tf.Tensor, tf.Tensor, tf.Tensor], label: tf.Tensor, augment: bool = False) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
+            rgb_path, depth_path_tensor, pc_path_tensor = input_paths
+
+            # --- RGB Image Processing ---
+            image_string = tf.io.read_file(rgb_path)
+            rgb_image = tf.image.decode_image(image_string, channels=3, expand_animations=False, dtype=tf.uint8)
+            rgb_image = tf.image.resize(rgb_image, image_size)
+            rgb_image_float = tf.cast(rgb_image, tf.float32)
+            rgb_image_float.set_shape([*image_size, 3])
+
+            if augment and augmentation_pipeline is not None:
+                img_for_aug = tf.expand_dims(rgb_image_float, axis=0)
+                img_aug = augmentation_pipeline(img_for_aug, training=True)
+                rgb_image_float = tf.squeeze(img_aug, axis=0)
+                rgb_image_float = tf.clip_by_value(rgb_image_float, 0.0, 255.0)
         
-        # Image is already float32
-        image_preprocessed = preprocess_fn(image)
-        return image_preprocessed, label
+            rgb_image_preprocessed = preprocess_fn_rgb(rgb_image_float)
+            inputs = {'rgb_input': rgb_image_preprocessed}
 
-    AUTOTUNE = tf.data.AUTOTUNE
+            # --- Depth Map Processing ---
+            if use_depth_map:
+                # Check if depth_path_tensor is not an empty string
+                depth_exists_cond = tf.strings.length(depth_path_tensor) > 0
+                
+                def load_and_process_depth():
+                    depth_string = tf.io.read_file(depth_path_tensor)
+                    # Try decoding as PNG, then JPEG if PNG fails, common for depth maps
+                    try:
+                        depth_image_decoded = tf.image.decode_png(depth_string, channels=1, dtype=tf.uint8) # Or tf.uint16 if applicable
+                    except tf.errors.InvalidArgumentError:
+                        depth_image_decoded = tf.image.decode_jpeg(depth_string, channels=1)
+                
+                    depth_image_resized = tf.image.resize(depth_image_decoded, image_size)
+                    depth_image_float = tf.cast(depth_image_resized, tf.float32)
+                
+                    norm_method = depth_prep_cfg.get('normalization', 'min_max_local')
+                    if norm_method == 'min_max_local':
+                        min_val = tf.reduce_min(depth_image_float)
+                        max_val = tf.reduce_max(depth_image_float)
+                        denominator = max_val - min_val
+                        depth_normalized = tf.cond(denominator < 1e-6, 
+                                                   lambda: tf.zeros_like(depth_image_float), 
+                                                   lambda: (depth_image_float - min_val) / denominator)
+                    elif norm_method == 'fixed_range':
+                        fixed_min = float(depth_prep_cfg.get('fixed_min_val', 0.0))
+                        fixed_max = float(depth_prep_cfg.get('fixed_max_val', 255.0)) # Assuming 8-bit like range if not specified
+                        denominator = fixed_max - fixed_min
+                        if denominator < 1e-6: denominator = 1.0 # Avoid division by zero, treat as no normalization
+                        depth_normalized = (depth_image_float - fixed_min) / denominator
+                        depth_normalized = tf.clip_by_value(depth_normalized, 0.0, 1.0)
+                    else: # Default or 'none'
+                        depth_normalized = depth_image_float / 255.0 # Assuming 0-255 range needs scaling to 0-1
 
-    train_dataset = tf.data.Dataset.from_tensor_slices((train_paths, train_labels))
-    # Apply specific per-image augmentations here if not handled by the sequential pipeline
-    train_dataset = train_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=data_cfg.get('augmentation', {}).get('enabled', False)), num_parallel_calls=AUTOTUNE)
-    logger.info("Applying .cache() to the training dataset after mapping. This will use more RAM but speed up subsequent epochs.")
-    train_dataset = train_dataset.cache() # Cache after mapping
-    train_dataset = train_dataset.shuffle(buffer_size=max(1000, len(train_paths)))
-    train_dataset = train_dataset.batch(batch_size, drop_remainder=True) 
+                    depth_normalized.set_shape([*image_size, 1])
+                    return depth_normalized
+            
+                def zeros_for_depth():
+                    return tf.zeros([*image_size, 1], dtype=tf.float32)
 
-    # Create and process val_dataset only if val_paths is not empty
-    if val_paths:
-        val_dataset = tf.data.Dataset.from_tensor_slices((val_paths, val_labels))
-        val_dataset = val_dataset.map(lambda p, l: load_and_preprocess(p, l, augment=False), num_parallel_calls=AUTOTUNE) # No augmentation for validation
-        logger.info("Applying .cache() to the validation dataset after mapping.")
-        val_dataset = val_dataset.cache() # Cache after mapping
-        val_dataset = val_dataset.batch(batch_size, drop_remainder=False)
-    # If val_paths was empty, val_dataset remains None as set above
+                inputs['depth_input'] = tf.cond(depth_exists_cond, load_and_process_depth, zeros_for_depth)
 
-    # Apply MixUp if enabled (after batching)
-    mixup_config = data_cfg.get('augmentation', {}).get('mixup', {})
-    if mixup_config.get('enabled', False):
-        mixup_alpha = float(mixup_config.get('alpha', 0.2))
-        if mixup_alpha > 0.0:
-            logger.info(f"Applying MixUp augmentation to training data with alpha={mixup_alpha}.")
-            # Need num_classes for one-hot encoding in mixup function
-            if not index_to_label: # Should have been loaded earlier
-                raise ValueError("Label map is required for MixUp to determine num_classes.")
-            num_classes = len(index_to_label)
-            train_dataset = train_dataset.map(lambda x, y: mixup(x, y, alpha=mixup_alpha, num_classes=num_classes), num_parallel_calls=AUTOTUNE)
-            # Optionally apply to validation set if it exists and if desired (usually not for validation)
-            # if val_dataset is not None and mixup_config.get('apply_to_validation', False):
-            #     logger.info(f"Applying MixUp augmentation to validation data with alpha={mixup_alpha}.")
-            #     val_dataset = val_dataset.map(lambda x, y: mixup(x, y, alpha=mixup_alpha, num_classes=num_classes), num_parallel_calls=AUTOTUNE)
+            # --- Point Cloud Processing ---
+            if use_point_cloud:
+                num_points_target = int(pc_prep_cfg.get('num_points', 4096))
+                normalization_method_str = pc_prep_cfg.get('normalization', 'unit_sphere')
+            
+                pc_exists_cond = tf.strings.length(pc_path_tensor) > 0
+
+                def load_and_process_pc():
+                    pc_data = tf.py_function(_load_and_preprocess_point_cloud_py, 
+                                             inp=[pc_path_tensor, num_points_target, normalization_method_str], 
+                                             Tout=tf.float32)
+                    pc_data.set_shape([num_points_target, 3])
+                    return pc_data
+
+                def zeros_for_pc():
+                    return tf.zeros([num_points_target, 3], dtype=tf.float32)
+            
+                inputs['pc_input'] = tf.cond(pc_exists_cond, load_and_process_pc, zeros_for_pc)
+        
+            return inputs, label
+
+        AUTOTUNE = tf.data.AUTOTUNE
+
+        if not train_rgb_paths:
+            logger.warning("Training dataset is empty. Cannot proceed with training.")
+            # Return empty/None datasets or raise error, depending on desired behavior
+            # For now, will lead to error later if train_dataset is used when None.
+            train_dataset = None
         else:
-            logger.info("MixUp is enabled in config but alpha is 0.0. No MixUp will be applied.")
+            train_input_slices = (tf.constant(train_rgb_paths, dtype=tf.string),
+                                  tf.constant(train_depth_paths, dtype=tf.string),
+                                  tf.constant(train_pc_paths, dtype=tf.string))
+        
+            train_dataset = tf.data.Dataset.from_tensor_slices((train_input_slices, tf.constant(train_labels, dtype=tf.int32)))
+            train_dataset = train_dataset.map(lambda paths_tuple, lbl: load_and_preprocess(paths_tuple, lbl, augment=data_cfg.get('augmentation', {}).get('enabled', False)), num_parallel_calls=AUTOTUNE)
+            logger.info("Applying .cache() to the training dataset after mapping. This will use more RAM but speed up subsequent epochs.")
+            train_dataset = train_dataset.cache()
+            train_dataset = train_dataset.shuffle(buffer_size=max(1000, len(train_rgb_paths)))
+            train_dataset = train_dataset.batch(batch_size, drop_remainder=True)
 
-    # Apply CutMix if enabled (after batching, and after MixUp if MixUp was applied)
-    cutmix_config = data_cfg.get('augmentation', {}).get('cutmix', {})
-    if cutmix_config.get('enabled', False):
-        cutmix_alpha = float(cutmix_config.get('alpha', 1.0))
-        if cutmix_alpha > 0.0:
-            logger.info(f"Applying CutMix augmentation to training data with alpha={cutmix_alpha}.")
-            if not index_to_label:
-                raise ValueError("Label map is required for CutMix to determine num_classes.")
-            num_classes = len(index_to_label)
-            train_dataset = train_dataset.map(lambda x, y: cutmix(x, y, alpha=cutmix_alpha, num_classes=num_classes), num_parallel_calls=AUTOTUNE)
-            # Optionally apply to validation set if it exists and if desired (usually not for validation)
-            # if val_dataset is not None and cutmix_config.get('apply_to_validation', False):
-            #     logger.info(f"Applying CutMix augmentation to validation data with alpha={cutmix_alpha}.")
-            #     val_dataset = val_dataset.map(lambda x, y: cutmix(x, y, alpha=cutmix_alpha, num_classes=num_classes), num_parallel_calls=AUTOTUNE)
+        if not val_rgb_paths:
+            logger.info("Validation dataset is empty or not created (split_ratio might be 0 or 1).")
+            val_dataset = None
         else:
-            logger.info("CutMix is enabled in config but alpha is 0.0. No CutMix will be applied.")
+            val_input_slices = (tf.constant(val_rgb_paths, dtype=tf.string),
+                                tf.constant(val_depth_paths, dtype=tf.string),
+                                tf.constant(val_pc_paths, dtype=tf.string))
+            val_dataset = tf.data.Dataset.from_tensor_slices((val_input_slices, tf.constant(val_labels, dtype=tf.int32)))
+            val_dataset = val_dataset.map(lambda paths_tuple, lbl: load_and_preprocess(paths_tuple, lbl, augment=False), num_parallel_calls=AUTOTUNE)
+            logger.info("Applying .cache() to the validation dataset after mapping.")
+            val_dataset = val_dataset.cache()
+            val_dataset = val_dataset.batch(batch_size, drop_remainder=False) # No drop_remainder for validation
 
-    # Prefetch for performance
-    train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
-    if val_dataset is not None:
-        val_dataset = val_dataset.prefetch(buffer_size=AUTOTUNE)
-        logger.info("Validation dataset created.")
-    else:
-        logger.info("Validation dataset is None as there are no validation samples or split_ratio was 0.")
+        # Apply MixUp if enabled (after batching)
+        # Note: MixUp and CutMix currently operate on a single image input.
+        # They will need to be adapted if they should affect depth/PC data or if model expects dict input.
+        # For now, they will apply to 'rgb_input' if the dataset yields dictionaries from load_and_preprocess.
+        # This part might need significant rework depending on how MixUp/CutMix should interact with multiple modalities.
+        mixup_config = data_cfg.get('augmentation', {}).get('mixup', {})
+        if train_dataset and mixup_config.get('enabled', False):
+            mixup_alpha = float(mixup_config.get('alpha', 0.2))
+            if mixup_alpha > 0.0:
+                logger.info(f"Applying MixUp augmentation to training data with alpha={mixup_alpha}.")
+                if not label_to_index: 
+                    raise ValueError("Label map is required for MixUp to determine num_classes.")
+            
+                # Adapting MixUp for dictionary inputs
+                def apply_mixup_to_dict(inputs_dict, labels_sparse):
+                    rgb_images = inputs_dict['rgb_input']
+                    mixed_rgb_images, mixed_labels_one_hot = mixup(rgb_images, labels_sparse, alpha=mixup_alpha, num_classes=num_classes)
+                    # inputs_dict['rgb_input'] = mixed_rgb_images # This would modify the dict in place if not careful
+                    # Create a new dict for output to avoid issues with tensor immutability / graph mode
+                    updated_inputs = inputs_dict.copy() # Shallow copy is usually fine for this structure
+                    updated_inputs['rgb_input'] = mixed_rgb_images
+                    return updated_inputs, mixed_labels_one_hot
+            
+                train_dataset = train_dataset.map(apply_mixup_to_dict, num_parallel_calls=AUTOTUNE)
+            else:
+                logger.info("MixUp is enabled in config but alpha is 0.0. No MixUp will be applied.")
 
-    # Developer mode: limit dataset size if specified (example, adapt as needed from original)
-    # if config.get('dev_mode', {}).get('enabled', False):
-    #     max_train_samples = config['dev_mode'].get('max_train_samples', None)
-    #     max_val_samples = config['dev_mode'].get('max_val_samples', None)
-    #     if max_train_samples:
-    #         train_dataset = train_dataset.take(max_train_samples // batch_size + 1)
-    #         logger.info(f"Dev mode: Training dataset limited to approx {max_train_samples} samples.")
-    #     if val_dataset and max_val_samples:
-    #         val_dataset = val_dataset.take(max_val_samples // batch_size + 1)
-    #         logger.info(f"Dev mode: Validation dataset limited to approx {max_val_samples} samples.")
+        # Apply CutMix if enabled (after batching, and after MixUp if MixUp was applied)
+        cutmix_config = data_cfg.get('augmentation', {}).get('cutmix', {})
+        if train_dataset and cutmix_config.get('enabled', False):
+            cutmix_alpha = float(cutmix_config.get('alpha', 1.0))
+            if cutmix_alpha > 0.0:
+                logger.info(f"Applying CutMix augmentation to training data with alpha={cutmix_alpha}.")
+                if not label_to_index:
+                    raise ValueError("Label map is required for CutMix to determine num_classes.")
 
-    return train_dataset, val_dataset, num_classes, index_to_label
+                # Adapting CutMix for dictionary inputs
+                def apply_cutmix_to_dict(inputs_dict, labels_mixed_or_sparse):
+                    rgb_images = inputs_dict['rgb_input']
+                    # If mixup was applied, labels_mixed_or_sparse are one-hot. Otherwise, they are sparse.
+                    # CutMix internal logic handles this via `if len(tf.shape(batch_labels)) == 1:`
+                    cutmixed_rgb_images, cutmixed_labels = cutmix(rgb_images, labels_mixed_or_sparse, alpha=cutmix_alpha, num_classes=num_classes)
+                    updated_inputs = inputs_dict.copy()
+                    updated_inputs['rgb_input'] = cutmixed_rgb_images
+                    return updated_inputs, cutmixed_labels
+            
+                train_dataset = train_dataset.map(apply_cutmix_to_dict, num_parallel_calls=AUTOTUNE)
+            else:
+                logger.info("CutMix is enabled in config but alpha is 0.0. No CutMix will be applied.")
+
+        # Prefetch for performance
+        if train_dataset:
+            train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
+            logger.info("Training dataset created and prefetched.")
+    
+        if val_dataset:
+            val_dataset = val_dataset.prefetch(buffer_size=AUTOTUNE)
+            logger.info("Validation dataset created and prefetched.")
+    
+        return train_dataset, val_dataset, num_classes, index_to_label
 
 # --- load_test_data and other functions will be refactored in subsequent steps --- 
