@@ -66,7 +66,7 @@ optimizer:
 
 # Loss Function Configuration 
 loss:
-  name: "sparse_categorical_crossentropy" 
+  name: "CategoricalCrossentropy" 
 
 # Metrics Configuration
 metrics: ["accuracy"] 
@@ -80,20 +80,20 @@ training:
   callbacks:
     model_checkpoint:
       enabled: true
-      monitor: "val_accuracy"
+      monitor: "val_categorical_accuracy"
       mode: "max"
       save_best_only: true
       save_weights_only: false
-      filename_template: "model_epoch-{epoch:02d}_val_acc-{val_accuracy:.2f}.h5"
+      filename_template: "model_epoch-{epoch:02d}_val_acc-{val_categorical_accuracy:.2f}.h5"
     early_stopping:
       enabled: true
-      monitor: "val_accuracy"
+      monitor: "val_categorical_accuracy"
       mode: "max"
       patience: 20 
       restore_best_weights: true
     reduce_lr_on_plateau:
       enabled: true 
-      monitor: "val_accuracy" 
+      monitor: "val_categorical_accuracy" 
       mode: "max" 
       factor: 0.2 
       patience: 7 

@@ -265,10 +265,41 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
     project_root = _get_project_root()
 
     try:
+        # Essential paths from config
+        paths_config = config['paths']
         data_cfg = config['data']
-        paths_cfg = config['paths']
         model_cfg = config['model']
-        architecture = model_cfg['architecture']
+
+        # Construct metadata_path and label_map_path using paths_config
+        # Ensure paths are absolute if they are relative to project root or a specific data_dir
+        base_data_dir = project_root / paths_config.get('data_dir', 'data/classification')
+
+        metadata_filename = paths_config.get('metadata_filename', 'metadata.json')
+        metadata_path = base_data_dir / metadata_filename
+
+        label_map_filename = paths_config.get('label_map_filename', 'label_map.json')
+        label_map_path = base_data_dir / label_map_filename
+
+        if not metadata_path.exists():
+            logger.error(f"Metadata file not found: {metadata_path}")
+            return None, None, None, 0, {}, {}
+        if not label_map_path.exists():
+            logger.error(f"Label map file not found: {label_map_path}")
+            return None, None, None, 0, {}, {}
+
+        with open(metadata_path, 'r') as f:
+            all_items = json.load(f)
+        with open(label_map_path, 'r') as f:
+            label_map_loaded = json.load(f)
+            # Invert the map and convert index to int: {class_name: index_int}
+            label_to_index = {name: int(idx) for idx, name in label_map_loaded.items()}
+            index_to_label = {int(idx): name for idx, name in label_map_loaded.items()}
+    
+        num_classes_from_map = len(label_to_index)
+        # Define the authoritative number of classes for the model and one-hot encoding
+        model_configured_num_classes = model_cfg.get('num_classes', num_classes_from_map)
+        logger.info(f"Model will be configured for {model_configured_num_classes} classes (derived from map: {num_classes_from_map}, config override: {model_cfg.get('num_classes')}).")
+
         image_size = tuple(data_cfg['image_size'])
         batch_size = data_cfg['batch_size']
         split_ratio = data_cfg.get('split_ratio', 0.2) # Default to 0.2 if not specified
@@ -280,36 +311,6 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
         point_cloud_root_dir = data_cfg.get('point_cloud_root_dir', '')
         pc_sampling_rate_dir = data_cfg.get('point_cloud_sampling_rate_dir', '')
         pc_suffix = data_cfg.get('point_cloud_suffix', '_sampled_1.ply')
-
-        # Construct metadata_path and label_map_path using paths_cfg
-        # Ensure paths are absolute if they are relative to project root or a specific data_dir
-        project_root = _get_project_root()
-        base_data_dir = project_root / paths_cfg.get('data_dir', 'data/classification')
-
-        metadata_filename = paths_cfg.get('metadata_filename', 'metadata.json')
-        metadata_path = base_data_dir / metadata_filename
-
-        label_map_filename = paths_cfg.get('label_map_filename', 'label_map.json')
-        label_map_path = base_data_dir / label_map_filename # Corrected to use base_data_dir
-
-        if not metadata_path.exists():
-            raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
-        if not label_map_path.exists():
-            raise FileNotFoundError(f"Label map file not found: {label_map_path}")
-
-        with open(metadata_path, 'r') as f:
-            all_items = json.load(f)
-        with open(label_map_path, 'r') as f:
-            label_map_loaded = json.load(f)
-            # Invert the map and convert index to int: {class_name: index_int}
-            label_to_index = {name: int(idx) for idx, name in label_map_loaded.items()}
-            index_to_label = {int(idx): name for idx, name in label_map_loaded.items()}
-    
-        num_classes_from_map = len(label_to_index)
-        configured_num_classes = config['model'].get('num_classes', num_classes_from_map)
-
-        logger.info(f"Found {len(all_items)} total image items in metadata.")
-        logger.info(f"Number of classes: {num_classes_from_map} from {label_map_path}.")
 
         # Prepare lists for all modalities
         all_rgb_paths = []
@@ -610,7 +611,7 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
             train_dataset = tf.data.Dataset.from_tensor_slices((train_path_tuples, [all_labels_numeric_tf[i] for i in train_indices]))
             train_dataset = train_dataset.shuffle(buffer_size=len(train_path_tuples), seed=42, reshuffle_each_iteration=True) # Shuffle before mapping
             augmentation_pipeline = _build_augmentation_pipeline(data_cfg)
-            preprocess_fn_rgb = _get_preprocess_fn(architecture)
+            preprocess_fn_rgb = _get_preprocess_fn(model_cfg['architecture'])
 
             depth_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('depth_map', {})
             pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
@@ -769,13 +770,27 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
             train_dataset = None
             logger.info("Training dataset is empty after split.")
 
+        # Factory function to create the one-hot encoding mapper
+        # This helps ensure num_classes is correctly captured for AutoGraph.
+        def one_hot_encode_eval_labels_factory(num_classes_to_use: int):
+            @tf.function # Explicitly mark for AutoGraph if needed, or let map handle it
+            def _map_fn(features, label):
+                return features, tf.one_hot(tf.cast(label, tf.int32), depth=num_classes_to_use)
+            return _map_fn
+
+        # Create the mapper function using the final num_classes value
+        # This num_classes is determined after potential debug filtering
+        # For one-hot encoding depth, always use model_configured_num_classes
+        one_hot_mapper_for_eval = one_hot_encode_eval_labels_factory(model_configured_num_classes)
+
         # For validation dataset
         if val_path_tuples:
             val_dataset = tf.data.Dataset.from_tensor_slices((val_path_tuples, val_labels))
             val_dataset = val_dataset.map(lambda x, y: load_and_preprocess(x, y, augment=False), num_parallel_calls=AUTOTUNE)
-            logger.info("Applying .cache() to the validation dataset after mapping.")
+            val_dataset = val_dataset.map(one_hot_mapper_for_eval, num_parallel_calls=AUTOTUNE)
+            logger.info("Applying .cache() to the validation dataset after mapping and one-hot encoding labels.")
             val_dataset = val_dataset.cache()
-            val_dataset = val_dataset.batch(batch_size, drop_remainder=False) # No drop_remainder for validation
+            val_dataset = val_dataset.batch(batch_size, drop_remainder=False)
         else:
             val_dataset = None
             logger.info("Validation dataset is empty after split.")
@@ -784,66 +799,81 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
         if test_path_tuples:
             test_dataset = tf.data.Dataset.from_tensor_slices((test_path_tuples, test_labels))
             test_dataset = test_dataset.map(lambda x, y: load_and_preprocess(x, y, augment=False), num_parallel_calls=AUTOTUNE)
-            logger.info("Applying .cache() to the test dataset after mapping.")
+            test_dataset = test_dataset.map(one_hot_mapper_for_eval, num_parallel_calls=AUTOTUNE)
+            logger.info("Applying .cache() to the test dataset after mapping and one-hot encoding labels.")
             test_dataset = test_dataset.cache()
             test_dataset = test_dataset.batch(batch_size, drop_remainder=False)
             test_dataset = test_dataset.prefetch(buffer_size=AUTOTUNE)
-            logger.info("Test dataset created and prefetched.")
         else:
             test_dataset = None
             logger.info("Test dataset is empty after split.")
 
-        # Apply MixUp if enabled (after batching)
-        # Note: MixUp and CutMix currently operate on a single image input.
-        # They will need to be adapted if they should affect depth/PC data or if model expects dict input.
-        # For now, they will apply to 'rgb_input' if the dataset yields dictionaries from load_and_preprocess.
-        # This part might need significant rework depending on how MixUp/CutMix should interact with multiple modalities.
+        # Apply MixUp and CutMix after batching
+        # These augmentations operate on batches and can change label distributions (e.g., to soft labels).
+        # The structure of train_dataset elements (tensor vs dict) depends on whether multi-modal is enabled.
+        
+        is_multimodal_enabled = data_cfg.get('modalities_config', {}).get('enabled', False)
+
         mixup_config = data_cfg.get('augmentation', {}).get('mixup', {})
-        if train_dataset and mixup_config.get('enabled', False):
+        if train_dataset and mixup_config.get('enabled', False) and mixup_config.get('alpha', 0.0) > 0:
             mixup_alpha = float(mixup_config.get('alpha', 0.2))
-            if mixup_alpha > 0.0:
-                logger.info(f"Applying MixUp augmentation to training data with alpha={mixup_alpha}.")
-                if not label_to_index: 
-                    raise ValueError("Label map is required for MixUp to determine num_classes.")
+            logger.info(f"Applying MixUp augmentation with alpha={mixup_alpha} and num_classes={model_configured_num_classes}.")
             
-                # Adapting MixUp for dictionary inputs
-                def apply_mixup_to_dict(inputs_dict, labels_sparse):
-                    rgb_images = inputs_dict['rgb_input']
-                    mixed_rgb_images, mixed_labels_one_hot = mixup(rgb_images, labels_sparse, alpha=mixup_alpha, num_classes=num_classes_from_map)
-                    # inputs_dict['rgb_input'] = mixed_rgb_images # This would modify the dict in place if not careful
-                    # Create a new dict for output to avoid issues with tensor immutability / graph mode
-                    updated_inputs = inputs_dict.copy() # Shallow copy is usually fine for this structure
-                    updated_inputs['rgb_input'] = mixed_rgb_images
-                    return updated_inputs, mixed_labels_one_hot
-            
-                train_dataset = train_dataset.map(apply_mixup_to_dict, num_parallel_calls=AUTOTUNE)
-            else:
-                logger.info("MixUp is enabled in config but alpha is 0.0. No MixUp will be applied.")
+            def apply_mixup_map(features_input, labels_input):
+                rgb_to_process = features_input['rgb_input'] # load_and_preprocess always returns a dict
+                mixed_rgb, mixed_labels = mixup(rgb_to_process, labels_input, mixup_alpha, model_configured_num_classes)
+                if is_multimodal_enabled:
+                    # Update the dict for multi-modal case
+                    updated_features = features_input.copy() # Make a copy to modify
+                    updated_features['rgb_input'] = mixed_rgb
+                    return updated_features, mixed_labels
+                else:
+                    # Return only the mixed RGB tensor for single-modal case
+                    return mixed_rgb, mixed_labels
+            train_dataset = train_dataset.map(apply_mixup_map, num_parallel_calls=AUTOTUNE)
+        elif mixup_config.get('enabled', False):
+            logger.info("MixUp is enabled in config but alpha is 0.0 or not specified correctly. No MixUp will be applied.")
 
-        # Apply CutMix if enabled (after batching, and after MixUp if MixUp was applied)
         cutmix_config = data_cfg.get('augmentation', {}).get('cutmix', {})
-        if train_dataset and cutmix_config.get('enabled', False):
+        if train_dataset and cutmix_config.get('enabled', False) and cutmix_config.get('alpha', 0.0) > 0:
             cutmix_alpha = float(cutmix_config.get('alpha', 1.0))
-            if cutmix_alpha > 0.0:
-                logger.info(f"Applying CutMix augmentation to training data with alpha={cutmix_alpha}.")
-                if not label_to_index:
-                    raise ValueError("Label map is required for CutMix to determine num_classes.")
+            logger.info(f"Applying CutMix augmentation with alpha={cutmix_alpha} and num_classes={model_configured_num_classes}.")
 
-                # Adapting CutMix for dictionary inputs
-                def apply_cutmix_to_dict(inputs_dict, labels_mixed_or_sparse):
-                    rgb_images = inputs_dict['rgb_input']
-                    # If mixup was applied, labels_mixed_or_sparse are one-hot. Otherwise, they are sparse.
-                    # CutMix internal logic handles this via `if len(tf.shape(batch_labels)) == 1:`
-                    cutmixed_rgb_images, cutmixed_labels = cutmix(rgb_images, labels_mixed_or_sparse, alpha=cutmix_alpha, num_classes=num_classes_from_map)
-                    updated_inputs = inputs_dict.copy()
-                    updated_inputs['rgb_input'] = cutmixed_rgb_images
-                    return updated_inputs, cutmixed_labels
-            
-                train_dataset = train_dataset.map(apply_cutmix_to_dict, num_parallel_calls=AUTOTUNE)
-            else:
-                logger.info("CutMix is enabled in config but alpha is 0.0. No CutMix will be applied.")
+            def apply_cutmix_map(features_input, labels_input):
+                if is_multimodal_enabled:
+                    # features_input is a dict from MixUp (or load_and_preprocess if MixUp was skipped)
+                    rgb_to_process = features_input['rgb_input']
+                else:
+                    # features_input is an RGB tensor from MixUp (or features_input['rgb_input'] from load_and_preprocess if MixUp was skipped)
+                    # This path assumes if MixUp was skipped and single-modal, the structure might still be a dict initially.
+                    # However, the MixUp stage for single-modal returns a tensor if applied.
+                    if isinstance(features_input, dict):
+                        rgb_to_process = features_input['rgb_input'] # Handle case where MixUp was skipped
+                    else:
+                        rgb_to_process = features_input # Is a tensor if MixUp (single-modal) was applied
+                
+                cutmixed_rgb, cutmixed_labels = cutmix(rgb_to_process, labels_input, cutmix_alpha, model_configured_num_classes)
+                
+                if is_multimodal_enabled:
+                    # Update the dict for multi-modal case
+                    # features_input here is already a copy if it came from the multi-modal MixUp path
+                    # If MixUp was skipped, make a copy.
+                    if not isinstance(features_input, dict):
+                         # This case should ideally not be hit if logic is consistent
+                         # but as a safeguard if prev stage was single-modal mixup returning tensor.
+                         updated_features = {'rgb_input': cutmixed_rgb} # Potential loss of other modalities if not careful
+                         logger.warning("CutMix in multi-modal path received tensor, potential loss of other modalities.")
+                    else:
+                        updated_features = features_input.copy() 
+                    updated_features['rgb_input'] = cutmixed_rgb
+                    return updated_features, cutmixed_labels
+                else:
+                    # Return only the cutmixed RGB tensor for single-modal case
+                    return cutmixed_rgb, cutmixed_labels
+            train_dataset = train_dataset.map(apply_cutmix_map, num_parallel_calls=AUTOTUNE)
+        elif cutmix_config.get('enabled', False):
+            logger.info("CutMix is enabled in config but alpha is 0.0 or not specified correctly. No CutMix will be applied.")
 
-        # Prefetch for performance
         if train_dataset:
             train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
             logger.info("Training dataset created and prefetched.")
@@ -852,14 +882,14 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
             val_dataset = val_dataset.prefetch(buffer_size=AUTOTUNE)
             logger.info("Validation dataset created and prefetched.")
     
-        class_weights_dict = compute_class_weights(all_labels_numeric, num_classes_from_map)
+        class_weights_dict = compute_class_weights(all_labels_numeric, model_configured_num_classes)
         if class_weights_dict:
-            logger.info(f"Computed class weights for {len(class_weights_dict)} classes.")
+            logger.info(f"Computed class weights for {len(class_weights_dict)} classes based on {model_configured_num_classes} configured classes.")
         else:
-            logger.info("Class weights not computed (e.g. no samples or uniform distribution after filtering).")
+            logger.info("Class weights not computed (e.g., empty labels or uniform distribution implied).")
 
         logger.info("Data loading and preprocessing complete.")
-        return train_dataset, val_dataset, test_dataset, num_classes_from_map, index_to_label, class_weights_dict
+        return train_dataset, val_dataset, test_dataset, model_configured_num_classes, index_to_label, class_weights_dict
 
     except FileNotFoundError as e:
         logger.error(f"Configuration or data file not found: {e}")

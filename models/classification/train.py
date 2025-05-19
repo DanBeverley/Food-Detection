@@ -1,3 +1,5 @@
+print("<<<<< EXECUTING LATEST train.py - TOP OF FILE >>>>>", flush=True)
+
 import yaml
 import argparse
 import logging
@@ -119,12 +121,20 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     fine_tune_layers_rgb = model_cfg.get('fine_tune_layers', 10)
     weights = 'imagenet' if use_pretrained else None
 
+    # Determine if multi-modal input is configured
+    modalities_cfg = data_cfg.get('modalities_config', {})
+    is_multimodal_enabled = modalities_cfg.get('enabled', False)
+    logger.info(f"Multi-modal input enabled: {is_multimodal_enabled}")
+
     active_input_layers_list = []
     all_branch_features = []
 
+    # --- RGB Branch (always present) ---
     rgb_input_shape = (*image_size, 3)
     rgb_input_tensor = layers.Input(shape=rgb_input_shape, name='rgb_input')
-    active_input_layers_list.append(rgb_input_tensor)
+    # Add to list only if multi-modal, otherwise it's the sole input.
+    if is_multimodal_enabled:
+        active_input_layers_list.append(rgb_input_tensor)
     logger.info(f"RGB Input: shape={rgb_input_shape}")
 
     logger.info(f"Building RGB branch with architecture: {architecture}")
@@ -194,117 +204,247 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     
     all_branch_features.append(pooled_rgb_features)
 
-    if data_cfg.get('use_depth_map', False):
-        depth_input_shape = (*image_size, 1)
+    # --- Depth Branch (conditional on multi-modal AND specific depth config) ---
+    use_depth = modalities_cfg.get('depth', {}).get('enabled', False) if is_multimodal_enabled else False
+    if use_depth:
+        depth_input_shape_config = modalities_cfg.get('depth', {}).get('input_shape', [*image_size, 1])
+        depth_input_shape = tuple(depth_input_shape_config) # Ensure it's a tuple
         depth_input_tensor = layers.Input(shape=depth_input_shape, name='depth_input')
         active_input_layers_list.append(depth_input_tensor)
         logger.info(f"Depth Input: shape={depth_input_shape}, adding Depth processing branch.")
 
-        depth_x = layers.Conv2D(32, (3, 3), padding='same', activation='relu', name='depth_conv1')(depth_input_tensor)
-        depth_x = layers.BatchNormalization(name='depth_bn1')(depth_x)
-        depth_x = layers.MaxPooling2D((2, 2), name='depth_pool1')(depth_x)
+        depth_arch_cfg = modalities_cfg.get('depth', {}).get('architecture', {})
+        depth_conv_layers = depth_arch_cfg.get('conv_layers', [
+            {'filters': 32, 'kernel_size': 3, 'pool': True, 'batch_norm': True},
+            {'filters': 64, 'kernel_size': 3, 'pool': True, 'batch_norm': True}
+        ])
+        depth_pooling_type = depth_arch_cfg.get('pooling', 'GlobalAveragePooling2D')
 
-        depth_x = layers.Conv2D(64, (3, 3), padding='same', activation='relu', name='depth_conv2')(depth_x)
-        depth_x = layers.BatchNormalization(name='depth_bn2')(depth_x)
-        depth_x = layers.MaxPooling2D((2, 2), name='depth_pool2')(depth_x)
+        depth_x = depth_input_tensor
+        # Pre-process depth: potentially scale to [0,1] or repeat channels if necessary for pretrained models expecting 3 channels
+        # For a custom CNN, ensure it's appropriate. Example: If depth_map is not [0,1], normalize it.
+        # Example: depth_x = layers.Rescaling(1./255)(depth_input_tensor) if values are 0-255
+        # If a pretrained model adapted for depth were used, it might expect 3 channels:
+        # if depth_arch_cfg.get('repeat_channels_for_pretrained', False):
+        #     logger.info("Repeating depth channel 3 times for potentially pretrained model input.")
+        #     depth_x = layers.Concatenate(axis=-1)([depth_x, depth_x, depth_x])
 
-        depth_x = layers.Conv2D(128, (3, 3), padding='same', activation='relu', name='depth_conv3')(depth_x)
-        depth_x = layers.BatchNormalization(name='depth_bn3')(depth_x)
-        depth_x = layers.MaxPooling2D((2, 2), name='depth_pool3')(depth_x)
+        for i, layer_params in enumerate(depth_conv_layers):
+            depth_x = layers.Conv2D(layer_params['filters'], 
+                                    kernel_size=layer_params.get('kernel_size', 3), 
+                                    padding='same', 
+                                    activation='relu', name=f'depth_conv{i+1}')(depth_x)
+            if layer_params.get('batch_norm', False):
+                depth_x = layers.BatchNormalization(name=f'depth_bn{i+1}')(depth_x)
+            if layer_params.get('pool', False):
+                depth_x = layers.MaxPooling2D((2, 2), name=f'depth_pool{i+1}')(depth_x)
         
-        processed_depth_features = layers.GlobalAveragePooling2D(name='depth_gap')(depth_x)
-        all_branch_features.append(processed_depth_features)
-        logger.info(f"Depth branch added with output shape: {processed_depth_features.shape}")
-
-    if data_cfg.get('use_point_cloud', False):
-        pc_config = data_cfg.get('point_cloud', {})
-        num_points = pc_config.get('num_points', 4096)
-        pc_input_shape = (num_points, 3)
-        pc_input_tensor = layers.Input(shape=pc_input_shape, name='pc_input')
-        active_input_layers_list.append(pc_input_tensor)
-        logger.info(f"Point Cloud Input: shape={pc_input_shape}, adding Point Cloud processing branch.")
-
-        pc_x = layers.Conv1D(64, 1, activation='relu', name='pc_conv1d_1')(pc_input_tensor)
-        pc_x = layers.BatchNormalization(name='pc_bn_1')(pc_x)
-        pc_x = layers.Conv1D(128, 1, activation='relu', name='pc_conv1d_2')(pc_x)
-        pc_x = layers.BatchNormalization(name='pc_bn_2')(pc_x)
-        pc_x = layers.Conv1D(256, 1, activation='relu', name='pc_conv1d_3')(pc_x)
-        pc_x = layers.BatchNormalization(name='pc_bn_3')(pc_x)
-        pc_x = layers.Conv1D(512, 1, activation='relu', name='pc_conv1d_4')(pc_x)
-        pc_x = layers.BatchNormalization(name='pc_bn_4')(pc_x)
-        processed_pc_features = layers.GlobalMaxPooling1D(name='pc_gmp')(pc_x)
-        all_branch_features.append(processed_pc_features)
-        logger.info(f"Point Cloud branch added with output shape: {processed_pc_features.shape}")
-
-    if len(all_branch_features) > 1:
-        logger.info(f"Fusing {len(all_branch_features)} feature branches: {[f.name for f in all_branch_features]}")
-        merged_features = layers.Concatenate(name='feature_fusion')(all_branch_features)
-    elif all_branch_features:
-        merged_features = all_branch_features[0]
-    else:
-        raise ValueError("No feature branches were built. Check model and data configuration.")
-    
-    logger.info(f"Merged feature tensor shape: {merged_features.shape}")
-    x = merged_features
-
-    head_config = model_cfg.get('classification_head', {})
-    dense_layers_units = head_config.get('dense_layers', [128])
-    dropout_rate = head_config.get('dropout', 0.5)
-    activation = head_config.get('activation', 'relu')
-    final_activation = head_config.get('final_activation', 'softmax')
-    kernel_l2_factor = head_config.get('kernel_l2_factor', 0.0)
-
-    kernel_regularizer = None
-    if kernel_l2_factor > 0:
-        kernel_regularizer = tf.keras.regularizers.l2(kernel_l2_factor)
-        logger.info(f"Applying L2 kernel regularization with factor: {kernel_l2_factor} to Dense layers in head.")
-
-    for i, units in enumerate(dense_layers_units):
-        x = layers.Dense(units, activation=activation, kernel_regularizer=kernel_regularizer, name=f"head_dense_{i}_{units}")(x)
-        if dropout_rate > 0:
-            x = layers.Dropout(dropout_rate, name=f"head_dropout_{i}_{units}")(x)
-
-    outputs = layers.Dense(num_classes, activation=final_activation, name='output_predictions')(x)
-
-    model = models.Model(inputs=active_input_layers_list, outputs=outputs, name=f"{architecture}_multi_modal_classification")
-    logger.info(f"Successfully built multi-modal model: {model.name} with {len(active_input_layers_list)} inputs.")
-
-    optimizer_name = optimizer_cfg.get('name', 'Adam').lower()
-
-    if optimizer_name == 'adam':
-        optimizer = optimizers.Adam(learning_rate=learning_rate_to_use)
-    elif optimizer_name == 'sgd':
-        momentum = optimizer_cfg.get('momentum', 0.9)
-        optimizer = optimizers.SGD(learning_rate=learning_rate_to_use, momentum=momentum)
-    else:
-        raise ValueError(f"Unsupported optimizer: {optimizer_name}")
-
-    loss_fn_name = loss_cfg.get('name', 'sparse_categorical_crossentropy').lower()
-
-    if loss_fn_name == 'sparse_categorical_crossentropy':
-        loss_fn = losses.SparseCategoricalCrossentropy(from_logits=(final_activation != 'softmax'))
-    elif loss_fn_name == 'categorical_crossentropy':
-        loss_fn = losses.CategoricalCrossentropy(from_logits=(final_activation != 'softmax'))
-    else:
-        raise ValueError(f"Unsupported loss function: {loss_fn_name}")
-
-    metrics_list = []
-    for m_name in metrics_cfg:
-        m_name_lower = m_name.lower()
-        if m_name_lower == 'accuracy':
-            metrics_list.append('accuracy')
-        elif m_name_lower == 'sparse_categorical_accuracy':
-            metrics_list.append(metrics.SparseCategoricalAccuracy())
-        elif m_name_lower == 'sparse_top_k_categorical_accuracy':
-            k = loss_cfg.get('top_k', 5)
-            metrics_list.append(metrics.SparseTopKCategoricalAccuracy(k=k, name=f'top_{k}_accuracy'))
+        if hasattr(layers, depth_pooling_type):
+            pooled_depth_features = getattr(layers, depth_pooling_type)(name='depth_pool')(depth_x)
         else:
-            logger.warning(f"Unsupported metric '{m_name}' specified in config. Skipping.")
+            logger.warning(f"Depth pooling layer '{depth_pooling_type}' not found. Defaulting to GlobalAveragePooling2D.")
+            pooled_depth_features = layers.GlobalAveragePooling2D(name='depth_gap_fallback')(depth_x)
 
-    logger.info(f"Compiling model with optimizer: {optimizer_name}, learning_rate: {learning_rate_to_use}, loss: {loss_fn_name}, metrics: {[m.name if hasattr(m, 'name') else m for m in metrics_list]}")
-    model.compile(optimizer=optimizer, loss=loss_fn, metrics=metrics_list)
-    model.summary(print_fn=logger.info)
+        all_branch_features.append(pooled_depth_features)
+        logger.info(f"Depth branch added with {len(depth_conv_layers)} conv blocks and {depth_pooling_type}.")
+    elif is_multimodal_enabled and modalities_cfg.get('depth', {}).get('enabled', False):
+        logger.info("Depth modality is configured but 'use_depth_map' (old flag) or specific 'depth.enabled' is effectively false. Depth branch NOT added.")
+
+    # --- Point Cloud Branch (conditional on multi-modal AND specific PC config) ---
+    use_pc = modalities_cfg.get('point_cloud', {}).get('enabled', False) if is_multimodal_enabled else False
+    if use_pc:
+        pc_cfg = modalities_cfg.get('point_cloud', {})
+        num_points = pc_cfg.get('num_points', 1024)
+        pc_input_shape = (num_points, 3) # (Num points, 3 coords)
+        pc_input_tensor = layers.Input(shape=pc_input_shape, name='point_cloud_input')
+        active_input_layers_list.append(pc_input_tensor)
+        logger.info(f"Point Cloud Input: shape={pc_input_shape}, num_points={num_points}. Adding Point Cloud processing branch.")
+
+        pc_arch_cfg = pc_cfg.get('architecture', {})
+        pc_conv1d_layers = pc_arch_cfg.get('conv1d_layers', [
+            {'filters': 64, 'kernel_size': 1, 'batch_norm': True},
+            {'filters': 128, 'kernel_size': 1, 'batch_norm': True},
+            {'filters': pc_arch_cfg.get('bottleneck_size', 256), 'kernel_size': 1, 'batch_norm': False} # Match PointNet-like global feature size
+        ])
+        pc_pooling_type = pc_arch_cfg.get('pooling', 'GlobalMaxPooling1D') # PointNet uses MaxPooling
+
+        pc_x = pc_input_tensor
+        for i, layer_params in enumerate(pc_conv1d_layers):
+            pc_x = layers.Conv1D(layer_params['filters'], 
+                                kernel_size=layer_params.get('kernel_size', 1), 
+                                activation='relu', name=f'pc_conv1d_{i+1}')(pc_x)
+            if layer_params.get('batch_norm', True):
+                pc_x = layers.BatchNormalization(name=f'pc_bn_{i+1}')(pc_x)
+
+        if hasattr(layers, pc_pooling_type):
+            pooled_pc_features = getattr(layers, pc_pooling_type)(name='pc_pool')(pc_x)
+        else:
+            logger.warning(f"Point cloud pooling layer '{pc_pooling_type}' not found. Defaulting to GlobalMaxPooling1D.")
+            pooled_pc_features = layers.GlobalMaxPooling1D(name='pc_gmp_fallback')(pc_x)
+
+        all_branch_features.append(pooled_pc_features)
+        logger.info(f"Point Cloud branch added with {len(pc_conv1d_layers)} conv1d blocks and {pc_pooling_type}.")
+    elif is_multimodal_enabled and modalities_cfg.get('point_cloud', {}).get('enabled', False):
+        logger.info("Point Cloud modality is configured but 'use_point_cloud' (old flag) or specific 'point_cloud.enabled' is effectively false. Point Cloud branch NOT added.")
+
+    # --- Fusion and Classification Head ---
+    if is_multimodal_enabled and len(all_branch_features) > 1:
+        logger.info(f"Fusing {len(all_branch_features)} feature branches.")
+        fused_features = layers.Concatenate(name='feature_fusion')(all_branch_features)
+    elif len(all_branch_features) == 1:
+        fused_features = all_branch_features[0] # Single branch, no concatenation needed
+    else:
+        # This case should not be reached if RGB branch is always added.
+        logger.error("No feature branches were created. Cannot build model head.")
+        raise ValueError("Model construction failed: No feature branches were created.")
+
+    # Classification Head configuration from model_cfg
+    head_config = model_cfg.get('classification_head', {})
+    dropout_rate = head_config.get('dropout_rate', head_config.get('dropout', 0.2)) # Use 'dropout' if 'dropout_rate' not present, then default
+    dense_layers_config = head_config.get('dense_layers', [{'units': 128}]) # Default to a single layer dict if not present
+    default_head_activation = head_config.get('activation', 'relu') # Default activation for the head
+
+    x = fused_features
+    if dropout_rate > 0:
+        x = layers.Dropout(dropout_rate, name='head_dropout')(x)
+    
+    for i, layer_conf_item in enumerate(dense_layers_config):
+        units = None
+        activation = default_head_activation
+
+        if isinstance(layer_conf_item, dict):
+            units = layer_conf_item.get('units')
+            activation = layer_conf_item.get('activation', default_head_activation)
+        elif isinstance(layer_conf_item, int):
+            units = layer_conf_item
+            # Activation remains default_head_activation
+        else:
+            logger.warning(f"Invalid item in dense_layers configuration: {layer_conf_item}. Skipping.")
+            continue
+
+        if units:
+            x = layers.Dense(units, activation=activation, name=f'head_dense_{i+1}')(x)
+            # Optional: Add Batch Norm or further Dropout here if desired for dense layers
+            # This part would need more config if we want per-dense-layer dropout configurable
+            # e.g., if layer_conf_item is a dict and has 'dropout': layer_conf_item.get('dropout', 0.0)
+        else:
+            logger.warning(f"No units specified for dense layer {i+1} in classification_head (item: {layer_conf_item}). Skipping layer.")
+
+    output_activation = loss_cfg.get('output_activation', head_config.get('final_activation', 'softmax')) # Use final_activation from head if specified
+    if num_classes == 1 and output_activation == 'softmax':
+        # For binary classification (num_classes=1), sigmoid is typical with BinaryCrossentropy
+        # If loss is CategoricalCrossentropy with num_classes=1, it's unusual but possible (one-hot encoded binary)
+        # If truly num_classes=1 means a single output neuron for regression-like or custom tasks, softmax is wrong.
+        logger.warning("num_classes is 1 and output_activation is 'softmax'. Consider 'sigmoid' for binary classification.")
+    elif num_classes > 1 and output_activation == 'sigmoid':
+        logger.warning(f"num_classes is {num_classes} and output_activation is 'sigmoid'. Consider 'softmax' for multi-class classification.")
+
+    outputs = layers.Dense(num_classes, activation=output_activation, name='output_layer')(x)
+
+    # Determine model inputs
+    if is_multimodal_enabled:
+        model_inputs = active_input_layers_list
+        if not model_inputs: # Should have at least RGB if multimodal was intended
+             logger.error("Multimodal enabled, but no input layers were configured in active_input_layers_list. Defaulting to RGB only.")
+             model_inputs = rgb_input_tensor # Fallback, though this state indicates config issue
+    else:
+        model_inputs = rgb_input_tensor # Single input: RGB only
+
+    model = models.Model(inputs=model_inputs, outputs=outputs)
+
+    # Optimizer setup
+    optimizer_name = optimizer_cfg.get('name', 'Adam')
+    clipnorm = optimizer_cfg.get('clipnorm', None)
+    clipvalue = optimizer_cfg.get('clipvalue', None)
+
+    if clipnorm is not None and clipvalue is not None:
+        logger.warning("Both clipnorm and clipvalue are specified for the optimizer. It's usually one or the other. Clipnorm will be preferred if supported, otherwise behavior depends on optimizer.")
+
+    optimizer_instance = _create_optimizer(optimizer_name, learning_rate_to_use, clipnorm, clipvalue)
+    
+    # Loss function setup
+    loss_function_name = loss_cfg.get('name', 'CategoricalCrossentropy')
+    loss_params = loss_cfg.get('params', {})
+    if 'from_logits' not in loss_params and output_activation != 'linear' and loss_function_name not in ['SparseCategoricalCrossentropy']:
+        # For most losses like CategoricalCrossentropy, BinaryCrossentropy, if output layer has activation, from_logits should be False.
+        # SparseCategoricalCrossentropy handles logits internally based on its setup.
+        # For custom losses, user needs to be aware.
+        loss_params['from_logits'] = False 
+        logger.info(f"Setting from_logits=False for loss {loss_function_name} as output layer has activation '{output_activation}'.")
+    elif 'from_logits' not in loss_params and output_activation == 'linear':
+        loss_params['from_logits'] = True
+        logger.info(f"Setting from_logits=True for loss {loss_function_name} as output layer has 'linear' activation.")
+
+    selected_loss = _get_loss_function(loss_function_name, loss_params, num_classes, config)
+    
+    # Metrics setup
+    compiled_metrics = _get_metrics(metrics_cfg, num_classes, loss_cfg.get('multilabel', False), config)
+
+    model.compile(optimizer=optimizer_instance, loss=selected_loss, metrics=compiled_metrics)
+    
+    logger.info(f"Model compiled with optimizer: {optimizer_name}, loss: {loss_function_name}, metrics: {[m.name if hasattr(m, 'name') else str(m) for m in compiled_metrics]}.")
+    
+    # Optionally print model summary
+    if model_cfg.get('print_summary', True):
+        model.summary(print_fn=logger.info)
+        
     return model
+
+
+def _create_optimizer(optimizer_name: str, learning_rate: float, clipnorm: Optional[float] = None, clipvalue: Optional[float] = None) -> optimizers.Optimizer:
+    if optimizer_name.lower() == 'adam':
+        optimizer = optimizers.Adam(learning_rate=learning_rate)
+    elif optimizer_name.lower() == 'adamw':
+        weight_decay = 0.004 # Default from many papers
+        optimizer = optimizers.AdamW(learning_rate=learning_rate, weight_decay=weight_decay)
+    elif optimizer_name.lower() == 'sgd':
+        momentum = 0.9 # Common default for SGD
+        optimizer = optimizers.SGD(learning_rate=learning_rate, momentum=momentum)
+    else:
+        logger.warning(f"Unsupported optimizer: {optimizer_name}. Defaulting to AdamW.")
+        optimizer = optimizers.AdamW(learning_rate=learning_rate)
+
+    if clipnorm is not None:
+        optimizer = optimizers.ClipNormOptimizer(optimizer, clipnorm=clipnorm)
+    elif clipvalue is not None:
+        optimizer = optimizers.ClipValueOptimizer(optimizer, clipvalue=clipvalue)
+
+    return optimizer
+
+
+def _get_loss_function(loss_function_name: str, loss_params: Dict, num_classes: int, config: Dict) -> losses.Loss:
+    if loss_function_name.lower() == 'categoricalcrossentropy' or loss_function_name.lower() == 'categorical_crossentropy':
+        loss_instance = losses.CategoricalCrossentropy(
+            label_smoothing=loss_params.get('label_smoothing', 0.0),
+            from_logits=loss_params.get('from_logits', False) # Usually False if softmax is last layer
+        )
+    elif loss_function_name.lower() == 'sparsecategoricalcrossentropy' or loss_function_name.lower() == 'sparse_categorical_crossentropy':
+        # This branch should ideally not be hit if MixUp/CutMix are used, but handle for completeness
+        loss_instance = losses.SparseCategoricalCrossentropy(
+            from_logits=loss_params.get('from_logits', False)
+        )
+    else:
+        logger.error(f"Unsupported loss function: {loss_function_name}. Defaulting to CategoricalCrossentropy.")
+        loss_instance = losses.CategoricalCrossentropy(label_smoothing=loss_params.get('label_smoothing', 0.0))
+
+    return loss_instance
+
+
+def _get_metrics(metrics_cfg: List[str], num_classes: int, multilabel: bool, config: Dict) -> List[metrics.Metric]:
+    compiled_metrics = []
+    for metric_name in metrics_cfg:
+        if metric_name.lower() == 'accuracy':
+            # If using CategoricalCrossentropy, CategoricalAccuracy is more appropriate.
+            # 'accuracy' can sometimes alias to SparseCategoricalAccuracy depending on context.
+            compiled_metrics.append(metrics.CategoricalAccuracy(name='categorical_accuracy'))
+            logger.info("Using CategoricalAccuracy metric (aliased from 'accuracy').")
+        elif hasattr(metrics, metric_name):
+            compiled_metrics.append(getattr(metrics, metric_name)()) # Instantiate if it's a class name
+        else:
+            compiled_metrics.append(metric_name) # Assume it's a string Keras understands or a custom metric object
+
+    return compiled_metrics
+
 
 def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset, config: Dict, index_to_label_map: Dict, strategy: tf.distribute.Strategy) -> None:
     training_cfg = config.get('training', {})
@@ -437,6 +577,7 @@ def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset
         raise RuntimeError("Model training failed.") from e
 
 def main(config_path: str):
+    print("--- train.py main() started ---", flush=True) # ADDED FOR DEBUGGING
     logger.info(f"Using configuration file: {config_path}")
     try:
         with open(config_path, 'r') as f:
