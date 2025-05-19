@@ -3,6 +3,7 @@ data:
   image_size: [224, 224] 
   batch_size: 16 
   split_ratio: 0.2
+  debug_max_total_samples: 100 # Set to an integer (e.g., 100) to enable subset sampling for quick testing
 
   use_depth_map: true
   depth_map_dir_name: "depth" 
@@ -73,6 +74,7 @@ metrics: ["accuracy"]
 # Training Configuration
 training:
   epochs: 100 
+  debug_epochs: 3 # Number of epochs to run when debug_max_total_samples is active
   use_mixed_precision: true
   use_tpu: false 
   callbacks:

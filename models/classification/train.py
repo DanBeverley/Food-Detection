@@ -309,8 +309,23 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
 def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset, config: Dict, index_to_label_map: Dict, strategy: tf.distribute.Strategy) -> None:
     training_cfg = config.get('training', {})
     paths_cfg = config.get('paths', {})
+    data_cfg = config.get('data', {}) # Get data_cfg for debug check
+    project_root = _get_project_root()
+
+    # Check for debug/subset mode
+    is_debug_run = data_cfg.get('debug_max_total_samples', None) is not None
+    debug_epochs = training_cfg.get('debug_epochs', 3) # Allow configuring debug epochs, default to 3
 
     epochs = training_cfg.get('epochs', 50)
+    steps_per_epoch = training_cfg.get('steps_per_epoch', None)
+    validation_steps = training_cfg.get('validation_steps', None)
+
+    if is_debug_run:
+        logger.info(f"*** Debug run detected (debug_max_total_samples is set). Overriding training parameters. ***")
+        epochs = debug_epochs
+        steps_per_epoch = None # Let TF iterate through the small debug dataset
+        validation_steps = None  # Let TF iterate through the small debug dataset
+        logger.info(f"Debug run: epochs set to {epochs}, steps_per_epoch and validation_steps set to None.")
 
     model_dir = paths_cfg.get('model_save_dir', 'trained_models/classification')
     log_dir_rel = paths_cfg.get('log_dir', 'logs/classification')
@@ -402,7 +417,9 @@ def train_model(model: models.Model, train_dataset: tf.data.Dataset, val_dataset
             epochs=epochs,
             validation_data=val_dataset,
             callbacks=callbacks_list,
-            verbose=2
+            verbose=2,
+            steps_per_epoch=steps_per_epoch,
+            validation_steps=validation_steps
         )
         logger.info("Model training completed.")
 
@@ -425,13 +442,13 @@ def main(config_path: str):
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
     except FileNotFoundError:
-        logger.error(f"Configuration file not found at {config_path}")
+        logger.error(f"Configuration file not found: {config_path}")
         return
     except yaml.YAMLError as e:
-        logger.error(f"Error parsing YAML configuration file {config_path}: {e}")
+        logger.error(f"Error parsing YAML configuration file: {e}")
         return
     except Exception as e:
-        logger.error(f"An unexpected error occurred while loading config {config_path}: {e}")
+        logger.error(f"An unexpected error occurred while loading config: {e}")
         return
 
     strategy = initialize_strategy()
@@ -455,52 +472,32 @@ def main(config_path: str):
     logger.info(f"Expecting metadata to be read by load_classification_data using relative path from config: {paths_cfg.get('data_dir', 'data/classification')}/{paths_cfg.get('metadata_filename', 'metadata.json')}")
     logger.info(f"Expecting label map to be read by load_classification_data using relative path from config: {label_map_dir_rel}/{label_map_filename}")
 
-    train_dataset, val_dataset, num_classes, index_to_label_map = load_classification_data(config)
+    loaded_data = load_classification_data(config)
+    if loaded_data is None or not all(x is not None for x in loaded_data[:5]): # Check first 5 crucial elements
+        logger.error("Failed to load data. Exiting training.")
+        return
+    
+    train_dataset, val_dataset, test_dataset, num_classes, index_to_label_map, class_weights_dict = loaded_data
 
-    if not train_dataset or not val_dataset:
-        logger.error("Failed to load training or validation data. Exiting.")
+    if train_dataset is None or val_dataset is None:
+        logger.error("Data loading returned None for train or validation dataset. Aborting.")
         return
 
-    logger.info(f"Number of classes determined from data: {num_classes}")
-    logger.info(f"Index to label map: {index_to_label_map}")
-
-    lr_schedule_cfg = config.get('training', {}).get('lr_scheduler', {})
-    optimizer_cfg = config.get('optimizer', {})
-    base_learning_rate = optimizer_cfg.get('learning_rate', 0.001)
-    learning_rate_to_use = base_learning_rate
-
-    if lr_schedule_cfg.get('enabled', False):
-        schedule_name = lr_schedule_cfg.get('name', '').lower()
-        if schedule_name == 'cosine_decay':
-            logger.info(f"Using Cosine Decay LR Scheduler (Note: Keras optimizers often take schedule instances directly).")
-        else:
-            logger.warning(f"Unsupported LR scheduler: {schedule_name}. Using static LR.")
-    
-    per_replica_batch_size = config.get('data', {}).get('batch_size', 32)
-    global_batch_size = per_replica_batch_size * strategy.num_replicas_in_sync
-    logger.info(f"Per-replica batch size: {per_replica_batch_size}")
-    logger.info(f"Global batch size (per-replica * num_replicas): {global_batch_size}")
-    logger.info(f"Number of replicas for training: {strategy.num_replicas_in_sync}")
+    logger.info(f"Successfully loaded data: {num_classes} classes.")
+    if test_dataset:
+        logger.info("Test dataset also loaded.")
+    if class_weights_dict:
+        logger.info(f"Class weights computed: {len(class_weights_dict)} entries.")
 
     with strategy.scope():
-        logger.info("Building model within strategy scope...")
-        learning_rate_to_use = optimizer_cfg.get('learning_rate', 0.001)
-        
-        model = build_model(
-            num_classes=len(index_to_label_map),
-            config=config,
-            learning_rate_to_use=learning_rate_to_use
-        )
+        model = build_model(num_classes=num_classes, config=config, learning_rate_to_use=config.get('optimizer', {}).get('learning_rate'))
         if model is None:
-            logger.error("Model building failed. Exiting training.")
+            logger.error("Failed to build model. Exiting training.")
             return
-        logger.info("Model built successfully within strategy scope.")
-
-    if model is None:
-        logger.error("Model is None before setting up callbacks. Exiting.")
-        return
 
     train_model(model, train_dataset, val_dataset, config, index_to_label_map, strategy)
+
+    # After training, export to TFLite if configured
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train a classification model using a YAML configuration file.")

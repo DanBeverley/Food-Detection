@@ -11,6 +11,7 @@ from tqdm import tqdm # Import tqdm
 import trimesh # For point cloud processing
 import traceback # For detailed error traceback
 import random # Import for random sampling
+from collections import Counter # Ensure Counter is imported
 
 # Dynamic import for preprocess_input
 _PREPROCESS_FN_CACHE = {}
@@ -20,6 +21,40 @@ logger = logging.getLogger(__name__)
 
 def _get_project_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parent.parent.parent
+
+def compute_class_weights(y_true: List[int], num_classes: int) -> Optional[Dict[int, float]]:
+    """
+    Computes class weights for imbalanced datasets.
+    Args:
+        y_true: List of true labels (integers).
+        num_classes: Total number of unique classes.
+    Returns:
+        A dictionary mapping class indices to their calculated weights, or None if input is empty.
+    """
+    if not y_true:
+        logger.warning("Cannot compute class weights: y_true is empty.")
+        return None
+
+    counts = Counter(y_true)
+    total_samples = len(y_true)
+    class_weights = {}
+
+    for class_idx in range(num_classes):
+        if counts[class_idx] > 0:
+            weight = total_samples / (num_classes * counts[class_idx])
+            class_weights[class_idx] = weight
+        else:
+            # If a class is not present in y_true, its weight is not added.
+            # Keras handles missing keys in class_weight dict by defaulting to a weight of 1.
+            # Alternatively, one could assign a default weight (e.g., 1.0 or 0.0)
+            # logger.debug(f"Class {class_idx} not found in y_true, weight not computed.")
+            pass 
+            
+    if not class_weights: # Should not happen if y_true is not empty and num_classes > 0
+        logger.warning("Class weights dictionary is empty after computation. Check input y_true and num_classes.")
+        return None
+        
+    return class_weights
 
 def _get_preprocess_fn(architecture: str):
     """Dynamically imports and returns the correct preprocess_input function."""
@@ -218,14 +253,14 @@ def cutmix(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_c
 
     return cutmix_images, cutmix_labels
 
-def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, Dict[int, str]]:
+def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, Dict[int, str], Optional[Dict[int, float]]]:
     """
     Load and prepare classification data using a metadata.json file.
     Refactored to read from metadata_path, use label_map_path from paths config.
     Args:
         config: Dictionary from classification/config.yaml.
     Returns:
-        Tuple of (train_dataset, val_dataset, test_dataset, num_classes, index_to_label_map).
+        Tuple of (train_dataset, val_dataset, test_dataset, num_classes, index_to_label_map, class_weights_dict).
     """
     project_root = _get_project_root()
 
@@ -381,161 +416,198 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
 
         if not all_rgb_paths or not all_labels_numeric:
             logger.error("No valid data items found after processing metadata. Aborting.")
-            return None, None, None, 0, {}
+            return None, None, None, 0, {}, {}
 
         # --- (Optional) Subset Sampling for Debugging/Testing ---
         debug_max_total_samples = data_cfg.get('debug_max_total_samples', None)
         if debug_max_total_samples and isinstance(debug_max_total_samples, int) and debug_max_total_samples > 0:
             if debug_max_total_samples < len(all_rgb_paths):
                 logger.info(f"Debug mode: Sampling {debug_max_total_samples} images from the total {len(all_rgb_paths)} images for quick testing.")
-                # Ensure consistent sampling if a global seed is set elsewhere, or seed here if needed
-                # random.seed(data_cfg.get('random_seed', 42)) # Optionally seed for reproducibility of subset
-                
-                # Create pairs of (path, label_index) for sampling to keep them aligned
                 paired_data = list(zip(all_rgb_paths, all_labels_numeric, all_depth_paths, all_pc_paths))
-                sampled_pairs = random.sample(paired_data, debug_max_total_samples)
+                # Ensure sample size is not larger than population
+                actual_sample_size = min(debug_max_total_samples, len(paired_data))
+                if actual_sample_size < debug_max_total_samples:
+                    logger.warning(f"Requested debug_max_total_samples {debug_max_total_samples} but only {len(paired_data)} samples available. Using {actual_sample_size}.")
                 
-                # Unzip the sampled pairs
-                all_rgb_paths, all_labels_numeric, all_depth_paths, all_pc_paths = zip(*sampled_pairs)
-                
-                # Convert tuples back to lists
-                all_rgb_paths = list(all_rgb_paths)
-                all_labels_numeric = list(all_labels_numeric)
-                all_depth_paths = list(all_depth_paths) # Keep even if empty based on use_depth_map
-                all_pc_paths = list(all_pc_paths)     # Keep even if empty based on use_point_cloud
+                if actual_sample_size > 0:
+                    sampled_pairs = random.sample(paired_data, actual_sample_size)
+                    all_rgb_paths, all_labels_numeric, all_depth_paths, all_pc_paths = zip(*sampled_pairs)
+                    all_rgb_paths = list(all_rgb_paths)
+                    all_labels_numeric = list(all_labels_numeric)
+                    all_depth_paths = list(all_depth_paths)
+                    all_pc_paths = list(all_pc_paths)
+                    logger.info(f"Sampled down to {len(all_rgb_paths)} images for debug run.")
 
-                logger.info(f"Sampled down to {len(all_rgb_paths)} images for debug run.")
+                    # --- Stratification Fix for Small Subsets ---
+                    if len(all_labels_numeric) > 0: # Proceed only if there are labels to count
+                        label_counts = Counter(all_labels_numeric)
+                        min_samples_per_class_for_split = 2 # For StratifiedShuffleSplit or train_test_split with stratification
+                        
+                        classes_to_remove = {label for label, count in label_counts.items() if count < min_samples_per_class_for_split}
+                        
+                        if classes_to_remove:
+                            logger.warning(
+                                f"Debug mode: To ensure stratification is possible, removing classes with < {min_samples_per_class_for_split} samples from the debug subset."
+                            )
+                            logger.warning(f"Classes to remove: {classes_to_remove}")
+                            
+                            # Create new lists excluding the underrepresented classes
+                            filtered_rgb_paths = []
+                            filtered_labels_numeric = []
+                            filtered_depth_paths = []
+                            filtered_pc_paths = []
+                            
+                            for i in range(len(all_labels_numeric)):
+                                if all_labels_numeric[i] not in classes_to_remove:
+                                    filtered_rgb_paths.append(all_rgb_paths[i])
+                                    filtered_labels_numeric.append(all_labels_numeric[i])
+                                    filtered_depth_paths.append(all_depth_paths[i])
+                                    filtered_pc_paths.append(all_pc_paths[i])
+                            
+                            if len(filtered_labels_numeric) < len(all_labels_numeric):
+                                logger.info(f"Removed {len(all_labels_numeric) - len(filtered_labels_numeric)} samples belonging to underrepresented classes.")
+                                all_rgb_paths = filtered_rgb_paths
+                                all_labels_numeric = filtered_labels_numeric
+                                all_depth_paths = filtered_depth_paths
+                                all_pc_paths = filtered_pc_paths
+                                logger.info(f"Final debug subset size after filtering for stratification: {len(all_rgb_paths)} samples.")
+                            else:
+                                logger.info("No classes needed removal for stratification.")
+                        else:
+                            logger.info("Debug subset has sufficient samples per class for stratification.")
+                    else:
+                        logger.warning("Debug subset has no labels after sampling. Stratification checks skipped.")
+                else:
+                    logger.warning(f"Debug mode: No samples available after attempting to sample {debug_max_total_samples}. Skipping subset processing.")
             else:
                 logger.info(f"debug_max_total_samples ({debug_max_total_samples}) is >= total images ({len(all_rgb_paths)}). Using all images.")
-        # --- End Subset Sampling ---
+        # --- End Subset Sampling & Stratification Fix ---
 
-        # Initialize lists for paths for each split
-        train_rgb_paths, val_rgb_paths, test_rgb_paths = [], [], []
-        train_labels, val_labels, test_labels = [], [], []
-        train_depth_paths, val_depth_paths, test_depth_paths = [], [], []
-        train_pc_paths, val_pc_paths, test_pc_paths = [], [], []
+        if not all_rgb_paths or not all_labels_numeric:
+            logger.error("No data remains after potential debug sampling and filtering. Aborting data loading.")
+            return None, None, None, 0, {}, {}
 
-        if len(all_rgb_paths) > 1: # Need at least 2 samples to split
-            temp_labels_for_stratify = all_labels_numeric if isinstance(all_labels_numeric, list) else list(all_labels_numeric)
-            # Stratify only if there are at least 2 samples for each class present in the stratify array
-            # Or more simply, if there's more than one unique class in the labels to stratify by.
-            can_stratify_initial = len(set(temp_labels_for_stratify)) > 1
+        # Determine if this is a debug run for split logic
+        is_debug_run = data_cfg.get('debug_max_total_samples', None) is not None
 
-            train_rgb_paths, temp_rgb_paths, train_labels, temp_labels = train_test_split(
-                all_rgb_paths, temp_labels_for_stratify, 
-                test_size=split_ratio, 
-                random_state=42, 
-                stratify=temp_labels_for_stratify if can_stratify_initial else None
-            )
-            if use_depth_map:
-                train_depth_paths, temp_depth_paths, _, _ = train_test_split(
-                    all_depth_paths, temp_labels_for_stratify, test_size=split_ratio, random_state=42, stratify=temp_labels_for_stratify if can_stratify_initial else None)
-            if use_point_cloud:
-                train_pc_paths, temp_pc_paths, _, _ = train_test_split(
-                    all_pc_paths, temp_labels_for_stratify, test_size=split_ratio, random_state=42, stratify=temp_labels_for_stratify if can_stratify_initial else None)
-
-            temp_labels_list = list(temp_labels) if not isinstance(temp_labels, list) else temp_labels
-            can_stratify_temp = len(set(temp_labels_list)) > 1
-
-            if len(temp_rgb_paths) > 1:
-                val_rgb_paths, test_rgb_paths, val_labels, test_labels = train_test_split(
-                    temp_rgb_paths, temp_labels_list, 
-                    test_size=0.5, 
-                    random_state=42,
-                    stratify=temp_labels_list if can_stratify_temp else None
-                )
-                if use_depth_map:
-                    val_depth_paths, test_depth_paths, _, _ = train_test_split(
-                        temp_depth_paths, temp_labels_list, test_size=0.5, random_state=42, stratify=temp_labels_list if can_stratify_temp else None)
-                if use_point_cloud:
-                    val_pc_paths, test_pc_paths, _, _ = train_test_split(
-                        temp_pc_paths, temp_labels_list, test_size=0.5, random_state=42, stratify=temp_labels_list if can_stratify_temp else None)
-            else:
-                val_rgb_paths, test_rgb_paths = temp_rgb_paths, []
-                val_labels, test_labels = temp_labels_list, []
-                if use_depth_map: val_depth_paths, test_depth_paths = temp_depth_paths, []
-                if use_point_cloud: val_pc_paths, test_pc_paths = temp_pc_paths, []
-                logger.warning("Temp set has less than 2 samples. Cannot split into validation and test. Assigning all to validation.")
-        else:
-            train_rgb_paths, val_rgb_paths, test_rgb_paths = all_rgb_paths, [], []
-            train_labels, val_labels, test_labels = all_labels_numeric, [], []
-            if use_depth_map: train_depth_paths, val_depth_paths, test_depth_paths = all_depth_paths, [], []
-            if use_point_cloud: train_pc_paths, val_pc_paths, test_pc_paths = all_pc_paths, [], []
-            logger.warning("Less than 2 samples in total. Cannot perform train/val/test split. Assigning all to training set.")
-
-        logger.info(f"Dataset split: Train: {len(train_rgb_paths)}, Validation: {len(val_rgb_paths)}, Test: {len(test_rgb_paths)} samples.")
-
-        # Prepare path tuples for tf.data.Dataset
-        def create_path_tuples(rgb_paths_list, depth_paths_list, pc_paths_list):
-            output_list = []
-            # Iterate based on the primary list of RGB paths
-            for i in range(len(rgb_paths_list)):
-                rgb_p = rgb_paths_list[i]
-                
-                depth_p = ""
-                # Check if depth map is used, if the list is long enough, and if the specific path is not empty
-                if use_depth_map and i < len(depth_paths_list) and depth_paths_list[i]:
-                    depth_p = depth_paths_list[i]
-                
-                pc_p = ""
-                # Check if point cloud is used, if the list is long enough, and if the specific path is not empty
-                if use_point_cloud and i < len(pc_paths_list) and pc_paths_list[i]:
-                    pc_p = pc_paths_list[i]
-                    
-                output_list.append((rgb_p, depth_p, pc_p)) # Append a TUPLE of paths
-            return output_list
-
-        train_path_tuples = create_path_tuples(train_rgb_paths, train_depth_paths, train_pc_paths)
-        val_path_tuples = create_path_tuples(val_rgb_paths, val_depth_paths, val_pc_paths)
-        test_path_tuples = create_path_tuples(test_rgb_paths, test_depth_paths, test_pc_paths) 
-
-        # Prepare data for tf.data.Dataset
-        # Ensure all path lists are of the same length, padded with empty strings if necessary
-        # This should already be handled by appending empty strings above.
+        # Convert to TensorFlow constants for splitting
+        all_rgb_paths_tf = tf.constant(all_rgb_paths)
 
         path_tuples = list(zip(all_rgb_paths, all_depth_paths, all_pc_paths))
         all_labels_numeric_tf = tf.constant(all_labels_numeric, dtype=tf.int32)
 
-        logger.info(f"Total items loaded: {len(all_rgb_paths)}")
-        logger.info(f"Number of unique classes found: {num_classes_from_map}")
-        logger.info(f"Class to index mapping: {label_to_index}")
-        logger.info(f"Using random_seed: {42} for splits.")
-
-        # Stratified split based on labels
-        # Ensure all_labels_numeric is suitable for stratify argument (e.g., list or array-like)
-        # Assuming batch_labels are sparse (indices) based on sparse_categorical_crossentropy typical usage.
+        # Initial split: Train vs. Temp (Validation + Test)
+        # Stratify by all_labels_numeric if possible
+        num_unique_classes_total = len(set(all_labels_numeric))
         
-        indices = list(range(len(path_tuples)))
-        if split_ratio > 0 and split_ratio < 1:
-            train_indices, val_indices = train_test_split(
-                indices, 
-                test_size=split_ratio, 
-                stratify=all_labels_numeric, # Use the numeric labels for stratification
-                random_state=42
+        # Calculate actual split sizes for the first split
+        first_split_temp_size_abs = int(len(path_tuples) * split_ratio)
+        # Ensure temp_size is at least 1 if len(path_tuples) * split_ratio is very small but non-zero, and total samples > 1
+        if len(path_tuples) > 1 and first_split_temp_size_abs == 0 and (len(path_tuples) * split_ratio) > 0:
+            first_split_temp_size_abs = 1 
+        first_split_train_size_abs = len(path_tuples) - first_split_temp_size_abs
+
+        stratify_for_first_split = all_labels_numeric
+        if is_debug_run and (first_split_temp_size_abs < num_unique_classes_total or first_split_train_size_abs < num_unique_classes_total):
+            logger.warning(
+                f"Debug mode: Disabling stratification for train/temp split. TEMP_SIZE ({first_split_temp_size_abs}) or TRAIN_SIZE ({first_split_train_size_abs}) "
+                f"is smaller than N_UNIQUE_CLASSES ({num_unique_classes_total})."
             )
-            logger.info(f"Split data: {len(train_indices)} training, {len(val_indices)} validation samples.")
-        elif split_ratio == 0: # Use all data for training, no validation set
-            train_indices = indices
-            val_indices = []
-            logger.info(f"Using all {len(train_indices)} samples for training. No validation split.")
-        elif split_ratio == 1: # Use all data for validation (uncommon, but handle)
-            train_indices = []
-            val_indices = indices
-            logger.info(f"Using all {len(val_indices)} samples for validation. No training split.")
+            stratify_for_first_split = None
+        elif first_split_temp_size_abs == 0 or first_split_train_size_abs == 0: # Handles cases where one split would be empty
+             logger.warning(
+                f"Warning: A split part (train or temp) would be empty (temp_size={first_split_temp_size_abs}, train_size={first_split_train_size_abs}). "
+                f"Disabling stratification for train/temp split."
+            )
+             stratify_for_first_split = None
+
+        if len(path_tuples) < 2: # Cannot split if less than 2 samples
+            logger.warning(f"Total samples ({len(path_tuples)}) less than 2. Assigning all to train, val/test will be empty.")
+            train_indices = np.arange(len(path_tuples))
+            temp_indices = []
         else:
-            logger.error(f"Invalid split_ratio: {split_ratio}. Must be between 0 and 1.")
-            return None, None, None, 0, {}
+            try:
+                train_indices, temp_indices = train_test_split(
+                    np.arange(len(path_tuples)),
+                    test_size=split_ratio, 
+                    random_state=data_cfg.get('random_seed', 42),
+                    stratify=stratify_for_first_split
+                )
+            except ValueError as e:
+                logger.error(f"Error during first train_test_split (train/temp): {e}. Defaulting to non-stratified split.")
+                train_indices, temp_indices = train_test_split(
+                    np.arange(len(path_tuples)),
+                    test_size=split_ratio, 
+                    random_state=data_cfg.get('random_seed', 42),
+                    stratify=None
+                )
+
+        # Second split: Validation vs. Test from Temp set
+        if len(temp_indices) > 1:
+            temp_labels_for_stratify = [all_labels_numeric[i] for i in temp_indices]
+            num_unique_classes_in_temp = len(set(temp_labels_for_stratify))
+
+            # Calculate actual split sizes for the second split (0.5 for test_size)
+            second_split_test_size_abs = int(len(temp_indices) * 0.5)
+            if len(temp_indices) > 1 and second_split_test_size_abs == 0 : # Ensure test_size is at least 1 if temp_indices has e.g. 1 element and 0.5*1=0
+                 second_split_test_size_abs = 1 if len(temp_indices) > 1 else 0 # if len is 1, test size should be 0, val gets 1.
+            second_split_val_size_abs = len(temp_indices) - second_split_test_size_abs
+            
+            # Correction for len(temp_indices) == 1 where test_size 0.5 would make second_split_test_size_abs = 0
+            # We want val to get the sample if only 1 sample in temp.
+            if len(temp_indices) == 1:
+                second_split_val_size_abs = 1
+                second_split_test_size_abs = 0
+
+            stratify_for_second_split = temp_labels_for_stratify
+            if is_debug_run and (second_split_test_size_abs < num_unique_classes_in_temp or second_split_val_size_abs < num_unique_classes_in_temp):
+                logger.warning(
+                    f"Debug mode: Disabling stratification for val/test split. TEST_SIZE ({second_split_test_size_abs}) or VAL_SIZE ({second_split_val_size_abs}) "
+                    f"is smaller than N_UNIQUE_CLASSES_IN_TEMP ({num_unique_classes_in_temp})."
+                )
+                stratify_for_second_split = None
+            elif second_split_test_size_abs == 0 or second_split_val_size_abs == 0: # Handles cases where one split would be empty and other has data
+                if not (second_split_test_size_abs == 0 and second_split_val_size_abs == 0): # Avoid warning if temp_indices is empty
+                    logger.warning(
+                        f"Warning: A split part (val or test) would be empty (val_size={second_split_val_size_abs}, test_size={second_split_test_size_abs}). "
+                        f"Disabling stratification for val/test split."
+                    )
+                stratify_for_second_split = None
+            
+            try:
+                val_indices, test_indices = train_test_split(
+                    temp_indices,
+                    test_size=0.5, # Splitting the temp set into 50% validation, 50% test
+                    random_state=data_cfg.get('random_seed', 42),
+                    stratify=stratify_for_second_split
+                )
+            except ValueError as e:
+                logger.error(f"Error during second train_test_split (val/test): {e}. Defaulting to non-stratified split.")
+                val_indices, test_indices = train_test_split(
+                    temp_indices,
+                    test_size=0.5, 
+                    random_state=data_cfg.get('random_seed', 42),
+                    stratify=None
+                )
+        elif len(temp_indices) == 1:
+            logger.warning("Only one sample in temp set. Assigning to validation set, test set will be empty.")
+            val_indices = temp_indices
+            test_indices = []
+        else: # len(temp_indices) == 0
+            val_indices, test_indices = [], []
 
         train_path_tuples = [path_tuples[i] for i in train_indices]
-        train_labels = [all_labels_numeric_tf[i] for i in train_indices]
         
         val_path_tuples = [path_tuples[i] for i in val_indices]
         val_labels = [all_labels_numeric_tf[i] for i in val_indices]
 
+        test_path_tuples = [path_tuples[i] for i in test_indices]
+        test_labels = [all_labels_numeric_tf[i] for i in test_indices]
+
         # Create tf.data.Dataset objects
         # For training dataset
         if train_path_tuples:
-            train_dataset = tf.data.Dataset.from_tensor_slices((train_path_tuples, train_labels))
+            train_dataset = tf.data.Dataset.from_tensor_slices((train_path_tuples, [all_labels_numeric_tf[i] for i in train_indices]))
             train_dataset = train_dataset.shuffle(buffer_size=len(train_path_tuples), seed=42, reshuffle_each_iteration=True) # Shuffle before mapping
             augmentation_pipeline = _build_augmentation_pipeline(data_cfg)
             preprocess_fn_rgb = _get_preprocess_fn(architecture)
@@ -593,7 +665,7 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
                         points_normalized = np.clip(points_normalized, -1.0, 1.0) 
                     elif current_normalization_method == 'centered_only': 
                         points_normalized = points_centered
-                    else: 
+                    else: # Default or 'none'
                         points_normalized = points 
             
                     return points_normalized.astype(np.float32)
@@ -780,26 +852,28 @@ def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], O
             val_dataset = val_dataset.prefetch(buffer_size=AUTOTUNE)
             logger.info("Validation dataset created and prefetched.")
     
-        return train_dataset, val_dataset, test_dataset, num_classes_from_map, index_to_label
+        class_weights_dict = compute_class_weights(all_labels_numeric, num_classes_from_map)
+        if class_weights_dict:
+            logger.info(f"Computed class weights for {len(class_weights_dict)} classes.")
+        else:
+            logger.info("Class weights not computed (e.g. no samples or uniform distribution after filtering).")
+
+        logger.info("Data loading and preprocessing complete.")
+        return train_dataset, val_dataset, test_dataset, num_classes_from_map, index_to_label, class_weights_dict
+
+    except FileNotFoundError as e:
+        logger.error(f"Configuration or data file not found: {e}")
+        traceback.print_exc()
+        return None, None, None, 0, {}, {}
+    except KeyError as e:
+        logger.error(f"Missing expected key in configuration: {e}")
+        traceback.print_exc()
+        return None, None, None, 0, {}, {}
+    except ValueError as e:
+        logger.error(f"ValueError during data loading/splitting: {e}")
+        traceback.print_exc()
+        return None, None, None, 0, {}, {}
     except Exception as e:
         logger.error(f"Failed to load classification data: {e}")
         traceback.print_exc() 
-        return None, None, None, 0, {} 
-
-    debug_max_total_samples = data_cfg.get('debug_max_total_samples', None)
-    if debug_max_total_samples and isinstance(debug_max_total_samples, int) and debug_max_total_samples > 0:
-        if debug_max_total_samples < len(all_rgb_paths):
-            logger.info(f"Debug mode: Sampling {debug_max_total_samples} images from the total {len(all_rgb_paths)} images for quick testing.")
-            # Ensure consistent sampling if a global seed is set elsewhere, or seed here if needed
-            # random.seed(data_cfg.get('random_seed', 42)) # Optionally seed for reproducibility of subset
-            
-            # Create pairs of (path, label_index) for sampling to keep them aligned
-            paired_data = list(zip(all_rgb_paths, all_labels_numeric))
-            sampled_pairs = random.sample(paired_data, debug_max_total_samples)
-            
-            all_rgb_paths, all_labels_numeric = zip(*sampled_pairs)
-            all_rgb_paths = list(all_rgb_paths)
-            all_labels_numeric = list(all_labels_numeric)
-            logger.info(f"Sampled down to {len(all_rgb_paths)} images for debug run.")
-        else:
-            logger.info(f"debug_max_total_samples ({debug_max_total_samples}) is >= total images ({len(all_rgb_paths)}). Using all images.")
+        return None, None, None, 0, {}, {}
