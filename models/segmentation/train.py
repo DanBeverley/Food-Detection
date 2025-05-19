@@ -29,23 +29,116 @@ def load_config(config_path: str) -> dict:
     logger.info(f"Configuration loaded from {config_path}")
     return config
 
+def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_batches_to_test: int = 2):
+    logger.info(f"--- Starting Data Loading Test for {num_batches_to_test} batches ---")
+    if train_dataset is None:
+        logger.error("Training dataset is None. Skipping data loading test.")
+        return
 
-def unet_model(output_channels: int, image_size: tuple, model_config: dict) -> tf.keras.Model:
-    """Builds a U-Net model.
+    use_depth = data_config.get('use_depth_map', False)
+    use_pc = data_config.get('use_point_cloud', False)
+
+    for i, batch_data in enumerate(train_dataset.take(num_batches_to_test)):
+        logger.info(f"--- Batch {i+1} ---")
+        inputs_dict, mask_tensor = batch_data
+
+        if not isinstance(inputs_dict, dict):
+            logger.error(f"Expected inputs_dict to be a dict, but got {type(inputs_dict)}. Batch structure might be incorrect.")
+            continue
+
+        # RGB Input
+        if 'rgb_input' in inputs_dict:
+            rgb = inputs_dict['rgb_input']
+            logger.info(f"  rgb_input: Shape={rgb.shape}, Dtype={rgb.dtype}, Min={tf.reduce_min(rgb).numpy()}, Max={tf.reduce_max(rgb).numpy()}")
+        else:
+            logger.warning("  rgb_input not found in batch.")
+
+        # Depth Input (if enabled)
+        if use_depth:
+            if 'depth_input' in inputs_dict:
+                depth = inputs_dict['depth_input']
+                logger.info(f"  depth_input: Shape={depth.shape}, Dtype={depth.dtype}, Min={tf.reduce_min(depth).numpy()}, Max={tf.reduce_max(depth).numpy()}")
+            else:
+                logger.warning("  depth_input is expected (use_depth_map=True) but not found in batch.")
+        
+        # Point Cloud Input (if enabled)
+        if use_pc:
+            if 'pc_input' in inputs_dict:
+                pc = inputs_dict['pc_input']
+                logger.info(f"  pc_input: Shape={pc.shape}, Dtype={pc.dtype}, Min={tf.reduce_min(pc).numpy()}, Max={tf.reduce_max(pc).numpy()}")
+            else:
+                logger.warning("  pc_input is expected (use_point_cloud=True) but not found in batch.")
+
+        # Mask Tensor
+        logger.info(f"  mask_tensor: Shape={mask_tensor.shape}, Dtype={mask_tensor.dtype}, Min={tf.reduce_min(mask_tensor).numpy()}, Max={tf.reduce_max(mask_tensor).numpy()}")
+        unique_values, _ = tf.unique(tf.reshape(mask_tensor, [-1]))
+        logger.info(f"  mask_tensor: Unique values={unique_values.numpy()}")
+        
+    logger.info("--- Data Loading Test Finished ---")
+
+
+def unet_model(output_channels: int, image_size: tuple, model_config: dict, data_config: dict) -> tf.keras.Model:
+    """Builds a U-Net model for potentially multi-modal input (RGB, Depth, Point Cloud).
     Args:
         output_channels: Number of output channels (e.g., 1 for binary segmentation).
         image_size: Tuple (height, width) for the input image.
-        model_config: Dictionary containing model-specific configurations (e.g., dropout, kernel_initializer).
+        model_config: Dictionary containing model-specific configurations.
+        data_config: Dictionary containing data-specific configurations (for input modalities).
     Returns:
         A Keras U-Net model.
     """
-    inputs = tf.keras.layers.Input(shape=[image_size[0], image_size[1], 3])
+    
+    input_layers_dict = {}
+    encoder_inputs_list = []
+
+    # RGB Input
+    rgb_input = tf.keras.layers.Input(shape=[image_size[0], image_size[1], 3], name='rgb_input')
+    input_layers_dict['rgb_input'] = rgb_input
+    current_encoder_features = rgb_input
+    encoder_inputs_list.append(rgb_input) # Keep track of actual Keras input layers
+
+    # Depth Input (if enabled)
+    if data_config.get('use_depth_map', False):
+        depth_input = tf.keras.layers.Input(shape=[image_size[0], image_size[1], 1], name='depth_input')
+        input_layers_dict['depth_input'] = depth_input
+        # Concatenate depth features with RGB features for the encoder input
+        current_encoder_features = tf.keras.layers.concatenate([current_encoder_features, depth_input])
+        encoder_inputs_list.append(depth_input)
+        logger.info("Depth input enabled and concatenated with RGB for U-Net encoder.")
+    
+    # Point Cloud Input (placeholder for now, will be processed separately)
+    if data_config.get('use_point_cloud', False):
+        pc_cfg = data_config.get('point_cloud', {})
+        num_points = pc_cfg.get('num_points', 4096) # Get from data_config
+        pc_input = tf.keras.layers.Input(shape=[num_points, 3], name='pc_input')
+        input_layers_dict['pc_input'] = pc_input
+        encoder_inputs_list.append(pc_input)
+        logger.info(f"Point cloud input enabled with shape: ({num_points}, 3). Will require separate processing branch.")
+
+    # Ensure Keras model gets a dictionary of named Input layers
+    actual_model_inputs = input_layers_dict
+
     dropout_rate = model_config.get('dropout', 0.5)
     kernel_initializer = model_config.get('kernel_initializer', 'he_normal')
 
-    # Downsampling path
+    # == Point Cloud Processing Branch (if enabled) ==
+    pc_features_for_fusion = None
+    if data_config.get('use_point_cloud', False) and 'pc_input' in input_layers_dict:
+        pc_input_tensor = input_layers_dict['pc_input']
+        # Mini-PointNet style encoder
+        pc_conv1 = tf.keras.layers.Conv1D(64, kernel_size=1, padding='same', activation='relu', kernel_initializer=kernel_initializer)(pc_input_tensor)
+        pc_bn1 = tf.keras.layers.BatchNormalization()(pc_conv1)
+        pc_conv2 = tf.keras.layers.Conv1D(128, kernel_size=1, padding='same', activation='relu', kernel_initializer=kernel_initializer)(pc_bn1)
+        pc_bn2 = tf.keras.layers.BatchNormalization()(pc_conv2)
+        pc_conv3 = tf.keras.layers.Conv1D(256, kernel_size=1, padding='same', activation='relu', kernel_initializer=kernel_initializer)(pc_bn2)
+        pc_bn3 = tf.keras.layers.BatchNormalization()(pc_conv3)
+        pc_global_features = tf.keras.layers.GlobalMaxPooling1D()(pc_bn3) # Shape: (batch_size, 256)
+        pc_features_for_fusion = pc_global_features
+        logger.info(f"Point cloud branch processed. Global features shape: {pc_features_for_fusion.shape}")
+
+    # == U-Net Encoder (Downsampling path) - takes 'current_encoder_features' (RGB or RGB+Depth) ==
     # Block 1
-    conv1 = tf.keras.layers.Conv2D(64, 3, activation='relu', padding='same', kernel_initializer=kernel_initializer)(inputs)
+    conv1 = tf.keras.layers.Conv2D(64, 3, activation='relu', padding='same', kernel_initializer=kernel_initializer)(current_encoder_features)
     conv1 = tf.keras.layers.Conv2D(64, 3, activation='relu', padding='same', kernel_initializer=kernel_initializer)(conv1)
     pool1 = tf.keras.layers.MaxPooling2D(pool_size=(2, 2))(conv1)
 
@@ -65,9 +158,26 @@ def unet_model(output_channels: int, image_size: tuple, model_config: dict) -> t
     drop4 = tf.keras.layers.Dropout(dropout_rate)(conv4)
     # pool4 = tf.keras.layers.MaxPooling2D(pool_size=(2, 2))(drop4) # Optional deeper bottleneck if needed
 
-    # Upsampling path
-    # Up Block 1
-    up5 = tf.keras.layers.Conv2DTranspose(256, (2,2), strides=(2,2), padding='same')(drop4)
+    # == Fusion of U-Net Bottleneck with Point Cloud Features (if enabled) ==
+    fused_bottleneck = drop4
+    if pc_features_for_fusion is not None:
+        # Get spatial dimensions of the U-Net bottleneck
+        bottleneck_shape = tf.shape(drop4)
+        target_height = bottleneck_shape[1]
+        target_width = bottleneck_shape[2]
+
+        # Expand dims and tile point cloud features
+        pc_feat_expanded = tf.keras.layers.Reshape((1, 1, pc_features_for_fusion.shape[-1]))(pc_features_for_fusion)
+        # pc_feat_tiled = tf.keras.layers.UpSampling2D(size=(target_height, target_width), interpolation='nearest')(pc_feat_expanded) # This would be too large
+        # Correct tiling using Lambda layer
+        pc_feat_tiled = tf.keras.layers.Lambda(lambda x: tf.tile(x[0], [1, tf.shape(x[1])[1], tf.shape(x[1])[2], 1]), name='tile_pc_features')([pc_feat_expanded, drop4])
+
+        fused_bottleneck = tf.keras.layers.concatenate([drop4, pc_feat_tiled], axis=-1)
+        logger.info(f"U-Net bottleneck fused with tiled point cloud features. New bottleneck_shape: {fused_bottleneck.shape}")
+
+    # == U-Net Decoder (Upsampling path) ==
+    # Up Block 1 - takes 'fused_bottleneck'
+    up5 = tf.keras.layers.Conv2DTranspose(256, (2,2), strides=(2,2), padding='same')(fused_bottleneck) # Use fused_bottleneck
     merge5 = tf.keras.layers.concatenate([conv3, up5], axis=3)
     conv5 = tf.keras.layers.Conv2D(256, 3, activation='relu', padding='same', kernel_initializer=kernel_initializer)(merge5)
     conv5 = tf.keras.layers.Conv2D(256, 3, activation='relu', padding='same', kernel_initializer=kernel_initializer)(conv5)
@@ -89,44 +199,43 @@ def unet_model(output_channels: int, image_size: tuple, model_config: dict) -> t
     final_activation = model_config.get('activation', 'sigmoid') 
     outputs = tf.keras.layers.Conv2D(output_channels, 1, activation=final_activation)(conv7)
 
-    model = tf.keras.Model(inputs=inputs, outputs=outputs)
+    model = tf.keras.Model(inputs=actual_model_inputs, outputs=outputs)
     logger.info(f"U-Net model built with final activation: {final_activation}.")
     return model
 
 def main():
     project_root = _get_project_root()
-    # config_file_path = project_root / 'config_pipeline.yaml'
-    config_file_path = Path(SEGMENTATION_CONFIG_PATH) # Use the specific config path
+    config_file_path = Path(SEGMENTATION_CONFIG_PATH) 
     config = load_config(config_file_path)
-
-    # seg_config = config.get('segmentation_training_data')
-    # if not seg_config:
-    #     logger.error("Segmentation training configuration ('segmentation_training_data') not found in config_pipeline.yaml")
-    #     return
-    # Directly use 'config' as it's loaded from the specific segmentation config.yaml
 
     logger.info("Starting segmentation model training...")
 
-    # Load data using the updated data loader, passing the entire config
-    # train_dataset, val_dataset = load_segmentation_data(seg_config)
     train_dataset, val_dataset, test_dataset = load_segmentation_data(config) # load_segmentation_data returns three datasets
 
     if train_dataset is None:
         logger.error("Failed to load training dataset. Exiting.")
         return
 
+    # --- Data Loading Test ---
+    data_cfg_for_test = config.get('data', {})
+    _test_data_loading(train_dataset, data_cfg_for_test, num_batches_to_test=2) 
+    # --- End Data Loading Test ---
+
     data_cfg = config.get('data', {})
     model_cfg = config.get('model', {})
     training_cfg = config.get('training', {})
-    optimizer_cfg = training_cfg.get('optimizer', {})
-    loss_cfg = training_cfg.get('loss', {})
+    optimizer_cfg = config.get('optimizer', {}) # Corrected: Get from root config
+    loss_cfg = config.get('loss', {})           # Corrected: Get from root config
     metrics_cfg = training_cfg.get('metrics', ['accuracy'])
     paths_cfg = config.get('paths', {})
 
     # Define model
-    output_channels = model_cfg.get('output_channels', 1) # For binary segmentation (foreground/background)
+    output_channels = model_cfg.get('num_classes', 1) # Use num_classes from model_cfg, affects output layer
     image_h, image_w = data_cfg.get('image_size', [256, 256])
-    model = unet_model(output_channels=output_channels, image_size=(image_h, image_w), model_config=model_cfg)
+    model = unet_model(output_channels=output_channels, 
+                       image_size=(image_h, image_w), 
+                       model_config=model_cfg, 
+                       data_config=data_cfg) # Pass data_config
 
     # Compile model
     learning_rate = optimizer_cfg.get('learning_rate', 1e-4)

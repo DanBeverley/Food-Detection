@@ -1,16 +1,17 @@
 import os
 import yaml 
 import tensorflow as tf
-import tensorflow_addons as tfa
 import numpy as np
 import logging
-from typing import Tuple, Dict, Optional, List, Any
+from typing import Tuple, Dict, Optional, List, Any, Callable
 from sklearn.model_selection import train_test_split
 import pathlib
 import json
 import traceback 
 import sys
-import math # For PI
+import math 
+import trimesh 
+from tensorflow.keras import layers # Import Keras layers
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -40,7 +41,9 @@ def _get_segmentation_preprocess_fn(architecture: Optional[str]):
             from tensorflow.keras.applications.efficientnet import preprocess_input as pi
             preprocess_input_fn = pi
         elif architecture.startswith("ResNet"):
-            base_module = __import__(f"tensorflow.keras.applications.{architecture.lower()}", fromlist=['preprocess_input'])
+            # Corrected import for ResNet variants
+            module_name = f"tensorflow.keras.applications.{architecture.lower().split('v')[0]}" # e.g., resnet, resnet50
+            base_module = __import__(module_name, fromlist=['preprocess_input'])
             preprocess_input_fn = base_module.preprocess_input
         elif architecture.startswith("MobileNetV2"):
             from tensorflow.keras.applications.mobilenet_v2 import preprocess_input as pi
@@ -58,504 +61,545 @@ def _get_segmentation_preprocess_fn(architecture: Optional[str]):
     _SEG_PREPROCESS_FN_CACHE[architecture] = preprocess_input_fn
     return preprocess_input_fn
 
+# Removed old apply_augmentations function as it's no longer used.
 
-@tf.function
-def apply_augmentations(
-    image: tf.Tensor, 
-    mask: tf.Tensor, 
-    is_enabled: tf.Tensor, 
-    perform_h_flip: tf.Tensor, 
-    brightness_delta_tf: tf.Tensor
-) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Applies augmentations consistently to image and mask using tensor arguments."""
-    # If not enabled, return original images. tf.cond is used for graph-compatibility.
-    def _do_nothing():
-        return image, mask
+def _load_and_preprocess_point_cloud_py_seg(pc_path_bytes: bytes, num_points_target: int, normalization_method_str: str) -> np.ndarray:
+    """Loads a point cloud, samples/pads to num_points_target, and normalizes.
+    Args:
+        pc_path_bytes: Path to the point cloud file, as bytes.
+        num_points_target: Target number of points.
+        normalization_method_str: String specifying normalization ('unit_sphere', 'unit_cube', 'centered_only', or 'none').
+    Returns:
+        A NumPy array of shape (num_points_target, 3) dtype=np.float32.
+    """
+    try:
+        pc_path = pc_path_bytes.decode('utf-8')
+        if not pc_path or not os.path.exists(pc_path):
+            # logger.debug(f"Point cloud path is empty or does not exist: {pc_path}. Returning zeros.") # Reduce verbosity
+            return np.zeros((num_points_target, 3), dtype=np.float32)
 
-    def _augment():
-        aug_image, aug_mask = image, mask # Start with original
-        # Horizontal Flip
-        # tf.cond for conditional execution in graph mode
-        def _flip(): 
-            return tf.image.flip_left_right(aug_image), tf.image.flip_left_right(aug_mask)
-        def _no_flip(): 
-            return aug_image, aug_mask
+        mesh_or_points = trimesh.load(pc_path, process=False) 
+
+        if isinstance(mesh_or_points, trimesh.Trimesh):
+            points = mesh_or_points.vertices
+        elif isinstance(mesh_or_points, trimesh.points.PointCloud):
+            points = mesh_or_points.vertices
+        else:
+            # logger.warning(f"Loaded object from {pc_path} is not a Trimesh or PointCloud. Type: {type(mesh_or_points)}. Returning zeros.")
+            return np.zeros((num_points_target, 3), dtype=np.float32)
+
+        if points.shape[0] == 0:
+            # logger.debug(f"No points found in {pc_path}. Returning zeros.")
+            return np.zeros((num_points_target, 3), dtype=np.float32)
+
+        points = points.astype(np.float32)
+
+        current_num_points = points.shape[0]
+        if current_num_points > num_points_target:
+            indices = np.random.choice(current_num_points, num_points_target, replace=False)
+            points = points[indices]
+        elif current_num_points < num_points_target:
+            if current_num_points == 0: # Should be caught above, but defensive
+                return np.zeros((num_points_target, 3), dtype=np.float32)
+            padding_indices = np.random.choice(current_num_points, num_points_target - current_num_points, replace=True)
+            points = np.vstack((points, points[padding_indices]))
         
-        aug_image, aug_mask = tf.cond(
-            tf.logical_and(perform_h_flip, tf.random.uniform(()) > 0.5),
-            true_fn=_flip, 
-            false_fn=_no_flip
-        )
+        if normalization_method_str != 'none':
+            points_mean = np.mean(points, axis=0)
+            points_centered = points - points_mean
+
+            if normalization_method_str == 'unit_sphere':
+                max_dist = np.max(np.linalg.norm(points_centered, axis=1))
+                points_normalized = points_centered / (max_dist + 1e-6) # Add epsilon
+            elif normalization_method_str == 'unit_cube':
+                max_abs_coord = np.max(np.abs(points_centered))
+                points_normalized = points_centered / (max_abs_coord + 1e-6) # Add epsilon
+            elif normalization_method_str == 'centered_only':
+                points_normalized = points_centered
+            else: 
+                points_normalized = points_centered # Fallback
+            points = points_normalized
         
-        # Brightness Adjustment
-        def _adjust_brightness(): 
-            bright_image = tf.image.random_brightness(aug_image, max_delta=brightness_delta_tf)
-            return tf.clip_by_value(bright_image, 0.0, 255.0), aug_mask # Mask is not changed by brightness
-        def _no_brightness_adjustment():
-            return aug_image, aug_mask
-            
-        aug_image, aug_mask = tf.cond(
-            brightness_delta_tf > 0.0, # This condition should be on a tensor
-            true_fn=_adjust_brightness, 
-            false_fn=_no_brightness_adjustment
+        return points.astype(np.float32)
+
+    except Exception as e:
+        path_str = pc_path_bytes.decode('utf-8', errors='ignore') 
+        logger.error(f"Error processing point cloud {path_str}: {e}")
+        return np.zeros((num_points_target, 3), dtype=np.float32)
+
+
+def _build_geometric_augmentation_layer(aug_config_dict: Dict, target_height: int, target_width: int) -> tf.keras.Sequential:
+    """Builds a Keras Sequential model for geometric augmentations."""
+    geometric_augs = tf.keras.Sequential(name="geometric_augmentations")
+    
+    if aug_config_dict.get("horizontal_flip", False):
+        geometric_augs.add(layers.RandomFlip("horizontal"))
+    
+    rotation_factor = aug_config_dict.get("rotation_range", 0) / 360.0 # Convert degrees to factor of 2*pi
+    if rotation_factor > 0:
+        geometric_augs.add(layers.RandomRotation(factor=rotation_factor))
+
+    height_factor = aug_config_dict.get("height_shift_range", 0.0)
+    width_factor = aug_config_dict.get("width_shift_range", 0.0)
+    if height_factor > 0.0 or width_factor > 0.0:
+        geometric_augs.add(layers.RandomTranslation(height_factor=height_factor, width_factor=width_factor, fill_mode='reflect'))
+
+    zoom_range = aug_config_dict.get("zoom_range", 0.0)
+    if zoom_range > 0.0:
+        # Keras RandomZoom takes (min_zoom, max_zoom) relative to 1.0
+        # e.g. zoom_range=0.1 means zoom between [0.9, 1.1]
+        geometric_augs.add(layers.RandomZoom(height_factor=(-zoom_range, zoom_range), width_factor=(-zoom_range, zoom_range), fill_mode='reflect'))
+
+    return geometric_augs
+
+def _apply_segmentation_augmentations_impl(
+    inputs_dict: Dict[str, tf.Tensor], 
+    mask_tensor: tf.Tensor, 
+    aug_config_dict: Dict
+) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
+    """Applies configured augmentations. Geometric augmentations are applied consistently to RGB, Depth (if enabled), and Mask."""
+    
+    augmented_inputs = inputs_dict.copy()
+    rgb_image = augmented_inputs['rgb_input']
+    current_mask = mask_tensor
+
+    target_height = tf.shape(rgb_image)[0]
+    target_width = tf.shape(rgb_image)[1]
+
+    # --- Build Geometric Augmentation Layer ---
+    geometric_aug_layer = _build_geometric_augmentation_layer(aug_config_dict, target_height, target_width)
+
+    # --- Apply Geometric Augmentations Consistently ---
+    # Concatenate tensors that need consistent geometric transformation
+    tensors_to_transform_geom = [rgb_image]
+    num_rgb_channels = rgb_image.shape[-1]
+    
+    depth_included_in_geom = False
+    if aug_config_dict.get('apply_geometric_to_depth', False) and 'depth_input' in augmented_inputs:
+        tensors_to_transform_geom.append(augmented_inputs['depth_input'])
+        depth_included_in_geom = True
+
+    tensors_to_transform_geom.append(current_mask) # Mask always gets geometric augmentations
+    
+    if len(geometric_aug_layer.layers) > 0:
+        concatenated_for_geom_aug = layers.concatenate(tensors_to_transform_geom, axis=-1)
+        augmented_concatenated_geom = geometric_aug_layer(concatenated_for_geom_aug, training=True) # training=True to enable random ops
+        
+        # Split back
+        split_indices = [num_rgb_channels]
+        current_offset = num_rgb_channels
+        if depth_included_in_geom:
+            split_indices.append(augmented_inputs['depth_input'].shape[-1])
+            current_offset += augmented_inputs['depth_input'].shape[-1]
+        # The rest is the mask
+
+        # tf.split needs sizes, not indices
+        sizes_for_split = []
+        start_idx = 0
+        for ch_count in split_indices:
+            sizes_for_split.append(ch_count)
+            start_idx += ch_count
+        sizes_for_split.append(augmented_concatenated_geom.shape[-1] - start_idx) # Remaining channels for mask
+        
+        split_tensors_geom = tf.split(augmented_concatenated_geom, num_or_size_splits=sizes_for_split, axis=-1)
+        
+        augmented_inputs['rgb_input'] = split_tensors_geom[0]
+        idx_offset = 1
+        if depth_included_in_geom:
+            augmented_inputs['depth_input'] = split_tensors_geom[idx_offset]
+            idx_offset += 1
+        current_mask = split_tensors_geom[idx_offset]
+
+    # --- Color Augmentations (Applied only to RGB image) ---
+    rgb_image_after_geom = augmented_inputs['rgb_input']
+    
+    # Brightness
+    brightness_delta = aug_config_dict.get("brightness_range", 0.0) # e.g., 0.1 for +/- 10% of 255
+    if brightness_delta > 0.0:
+        rgb_image_after_geom = tf.image.random_brightness(rgb_image_after_geom, max_delta=brightness_delta * 255.0)
+        rgb_image_after_geom = tf.clip_by_value(rgb_image_after_geom, 0.0, 255.0)
+
+    # Contrast
+    contrast_factor_lower = aug_config_dict.get("contrast_range_lower", 1.0)
+    contrast_factor_upper = aug_config_dict.get("contrast_range_upper", 1.0)
+    if contrast_factor_lower < contrast_factor_upper : # Check if contrast is enabled
+         rgb_image_after_geom = tf.image.random_contrast(rgb_image_after_geom, lower=contrast_factor_lower, upper=contrast_factor_upper)
+         rgb_image_after_geom = tf.clip_by_value(rgb_image_after_geom, 0.0, 255.0)
+
+    # Saturation
+    saturation_factor_lower = aug_config_dict.get("saturation_range_lower", 1.0)
+    saturation_factor_upper = aug_config_dict.get("saturation_range_upper", 1.0)
+    if saturation_factor_lower < saturation_factor_upper:
+        rgb_image_after_geom = tf.image.random_saturation(rgb_image_after_geom, lower=saturation_factor_lower, upper=saturation_factor_upper)
+        rgb_image_after_geom = tf.clip_by_value(rgb_image_after_geom, 0.0, 255.0)
+
+    # Hue
+    hue_delta = aug_config_dict.get("hue_delta", 0.0) # e.g., 0.05 for +/- 5% of 2*pi
+    if hue_delta > 0.0:
+        rgb_image_after_geom = tf.image.random_hue(rgb_image_after_geom, max_delta=hue_delta)
+        rgb_image_after_geom = tf.clip_by_value(rgb_image_after_geom, 0.0, 255.0)
+
+    augmented_inputs['rgb_input'] = rgb_image_after_geom
+
+    # Point cloud augmentations (e.g., jitter, random rotation around Z) can be added here if needed
+    # For now, pc_input passes through if it exists in augmented_inputs
+
+    return augmented_inputs, current_mask
+
+
+# Orchestrates conditional augmentation and model-specific preprocessing for segmentation
+def _augment_preprocess_segmentation_conditionally(
+    inputs_for_aug: Dict[str, tf.Tensor], 
+    mask_normalized: tf.Tensor, 
+    should_augment: tf.Tensor, 
+    aug_config: Dict,
+    model_preprocess_fn: Optional[Callable] # e.g., ResNet's preprocess_input
+) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
+    """Conditionally applies augmentations and always applies model preprocessing to RGB."""
+    
+    def augment_first_then_preprocess_rgb() -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
+        augmented_inputs, augmented_mask = _apply_segmentation_augmentations_impl(
+            inputs_for_aug, mask_normalized, aug_config
         )
-        return aug_image, aug_mask
+        if model_preprocess_fn is not None and 'rgb_input' in augmented_inputs:
+            augmented_inputs['rgb_input'] = model_preprocess_fn(augmented_inputs['rgb_input'])
+        return augmented_inputs, augmented_mask
 
-    return tf.cond(is_enabled, true_fn=_augment, false_fn=_do_nothing)
+    def preprocess_rgb_only() -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
+        processed_inputs = inputs_for_aug.copy()
+        if model_preprocess_fn is not None and 'rgb_input' in processed_inputs:
+            processed_inputs['rgb_input'] = model_preprocess_fn(processed_inputs['rgb_input'])
+        return processed_inputs, mask_normalized # Mask is already normalized, inputs only RGB preprocessed
 
+    return tf.cond(
+        should_augment,
+        true_fn=augment_first_then_preprocess_rgb,
+        false_fn=preprocess_rgb_only
+    )
 
 def load_and_preprocess_segmentation(
-    image_path_tensor: tf.Tensor, 
-    mask_path_tensor: tf.Tensor, 
+    input_paths_tuple: Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor], # rgb_path, depth_path, pc_path, mask_path
+    target_size_py: tuple, # NEW: Python tuple (H, W)
     target_size_tensor: tf.Tensor, 
     num_classes_tensor: tf.Tensor, 
-    augment_tensor: tf.Tensor, 
-    captured_preprocess_input_fn: Any, 
-    captured_aug_config_dict: Optional[Dict]
-) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Loads, decodes, resizes, and preprocesses an image and its mask using TensorFlow ops."""
+    augment_tensor: tf.Tensor, # This is the 'should_augment' boolean tensor
+    captured_preprocess_input_fn: Optional[Callable], # This is 'model_preprocess_fn'
+    captured_aug_config_dict: Optional[Dict], # This is 'aug_config'
+    use_depth_map_tensor: tf.Tensor,
+    depth_prep_cfg_dict: Dict, 
+    use_point_cloud_tensor: tf.Tensor,
+    pc_prep_cfg_dict: Dict 
+) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
+    image_path_tensor, depth_path_tensor, pc_path_tensor, mask_path_tensor = input_paths_tuple
+
     try:
+        # --- RGB Image Processing ---
         image_string = tf.io.read_file(image_path_tensor)
         image_decoded = tf.image.decode_image(image_string, channels=3, expand_animations=False)
         image_decoded.set_shape([None, None, 3])
         image_resized = tf.image.resize(image_decoded, target_size_tensor)
-        image_for_aug = tf.cast(image_resized, tf.uint8) 
+        image_float_for_aug = tf.cast(image_resized, tf.float32) # Start with float for consistency
 
+        # --- Mask Processing ---
         mask_string = tf.io.read_file(mask_path_tensor)
         mask_decoded = tf.image.decode_image(mask_string, channels=1, expand_animations=False)
         mask_decoded.set_shape([None, None, 1])
         mask_resized = tf.image.resize(mask_decoded, target_size_tensor, method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
         mask_uint8 = tf.cast(mask_resized, tf.uint8)
         
-        # Mask normalization logic (remains the same)
         target_max_mask_value = num_classes_tensor - 1 
         current_max_mask_val = tf.reduce_max(mask_uint8)
         
         def normalize_mask_branch(m):
-            # tf.print("    Normalizing mask from 0-255 to 0-1.", output_stream=sys.stderr) # Keep commented
             return tf.cast(m, tf.float32) / 255.0
-
         def passthrough_mask_branch(m):
             return tf.cast(m, tf.float32)
 
         mask_float32_normalized = tf.cond(tf.cast(current_max_mask_val, tf.int32) > target_max_mask_value,
                                           lambda: normalize_mask_branch(mask_uint8),
                                           lambda: passthrough_mask_branch(mask_uint8))
-
-        # --- Augmentation block with tf.cond ---
-        aug_config_dict_tf_constants = {}
-        if captured_aug_config_dict is not None: # Python if, ok as it configures constants before graph ops
-            for key, value in captured_aug_config_dict.items():
-                if isinstance(value, bool):
-                    aug_config_dict_tf_constants[key] = tf.constant(value, dtype=tf.bool)
-                elif isinstance(value, (int, float)):
-                    aug_config_dict_tf_constants[key] = tf.constant(value, dtype=tf.float32 if isinstance(value, float) else tf.int32)
         
-        # Lambdas for tf.cond
-        def apply_augmentations_fn(img_to_aug, msk_to_aug):
-            # tf.print("Applying augmentations...", output_stream=sys.stderr)
-            # This aug_step_prob_tf is a general probability for sub-augmentations if they use it.
-            # Individual augmentations within _augment_segmentation_tf_cond should also use tf.cond.
-            aug_step_prob_tf = tf.constant(0.5, dtype=tf.float32) 
-            return _augment_segmentation_tf_cond(img_to_aug, msk_to_aug, aug_config_dict_tf_constants, aug_step_prob_tf)
+        inputs_for_aug = {'rgb_input': image_float_for_aug} 
+        
+        # --- Depth Map Processing ---
+        def load_and_process_depth_fn():
+            depth_string = tf.io.read_file(depth_path_tensor)
+            try:
+                depth_image_decoded = tf.image.decode_png(depth_string, channels=1, dtype=tf.uint8) # Assuming 8-bit depth for now
+            except tf.errors.InvalidArgumentError:
+                depth_image_decoded = tf.image.decode_jpeg(depth_string, channels=1)
+            depth_image_resized = tf.image.resize(depth_image_decoded, target_size_tensor, method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
+            depth_image_float = tf.cast(depth_image_resized, tf.float32)
+            norm_method = depth_prep_cfg_dict.get('normalization', 'min_max_local')
+            if norm_method == 'min_max_local':
+                min_val, max_val = tf.reduce_min(depth_image_float), tf.reduce_max(depth_image_float)
+                denominator = max_val - min_val
+                depth_normalized = tf.cond(denominator < 1e-6, lambda: tf.zeros_like(depth_image_float), lambda: (depth_image_float - min_val) / denominator)
+            elif norm_method == 'fixed_range':
+                fixed_min = float(depth_prep_cfg_dict.get('fixed_min_val', 0.0))
+                fixed_max = float(depth_prep_cfg_dict.get('fixed_max_val', 255.0))
+                denominator = fixed_max - fixed_min
+                if denominator < 1e-6: denominator = 1.0 
+                depth_normalized = (depth_image_float - fixed_min) / denominator
+                depth_normalized = tf.clip_by_value(depth_normalized, 0.0, 1.0)
+            else: 
+                depth_normalized = depth_image_float / 255.0 
+            depth_normalized.set_shape([target_size_py[0], target_size_py[1], 1]) 
+            return depth_normalized
 
-        def no_augmentations_fn(img_no_aug, msk_no_aug):
-            # tf.print("Skipping augmentations...", output_stream=sys.stderr)
-            return img_no_aug, msk_no_aug # Return them as is
+        def zeros_for_depth_fn():
+            # return tf.zeros(tf.concat([target_size_tensor, tf.constant([1], dtype=target_size_tensor.dtype)], axis=0), dtype=tf.float32)
+            return tf.zeros([target_size_py[0], target_size_py[1], 1], dtype=tf.float32) # Use python shape here
+        
+        depth_input_tensor_val = tf.cond(tf.logical_and(use_depth_map_tensor, tf.strings.length(depth_path_tensor) > 0),
+                                    load_and_process_depth_fn,
+                                    zeros_for_depth_fn)
+        inputs_for_aug['depth_input'] = depth_input_tensor_val
 
-        # Conditionally apply the entire augmentation sequence using tf.cond
-        # Input to augmentation functions should be image_for_aug (uint8) and mask_float32_normalized (float32)
-        # _augment_segmentation_tf_cond needs to handle these dtypes appropriately.
-        # Let's assume _augment_segmentation_tf_cond expects uint8 image and float32 mask.
-        image_after_aug, mask_after_aug = tf.cond(
-            augment_tensor, # This is the tf.bool Tensor
-            lambda: apply_augmentations_fn(image_for_aug, mask_float32_normalized),
-            lambda: no_augmentations_fn(image_for_aug, mask_float32_normalized)
+        # --- Point Cloud Processing ---
+        def load_and_process_pc_fn():
+            num_points = int(pc_prep_cfg_dict.get('num_points', 4096))
+            norm_method_str = pc_prep_cfg_dict.get('normalization', 'unit_sphere')
+            pc_data = tf.py_function(_load_and_preprocess_point_cloud_py_seg, 
+                                     inp=[pc_path_tensor, num_points, norm_method_str], 
+                                     Tout=tf.float32)
+            pc_data.set_shape([num_points, 3]) 
+            return pc_data
+
+        def zeros_for_pc_fn():
+            num_points = int(pc_prep_cfg_dict.get('num_points', 4096))
+            return tf.zeros([num_points, 3], dtype=tf.float32)
+
+        pc_input_tensor_val = tf.cond(tf.logical_and(use_point_cloud_tensor, tf.strings.length(pc_path_tensor) > 0),
+                                 load_and_process_pc_fn,
+                                 zeros_for_pc_fn)
+        inputs_for_aug['pc_input'] = pc_input_tensor_val
+        
+        final_processed_inputs, final_mask = _augment_preprocess_segmentation_conditionally(
+            inputs_for_aug,
+            mask_float32_normalized,
+            augment_tensor, 
+            captured_aug_config_dict if captured_aug_config_dict is not None else {},
+            captured_preprocess_input_fn
         )
-        # --- End Augmentation block ---
-
-        # Final preprocessing for the image (e.g. normalization specific to backbone)
-        # Image after augmentation might be uint8 or float32 depending on _augment_segmentation_tf_cond
-        # Ensure it's float32 before passing to preprocess_input_fn, which usually expects float.
-        image_preprocessed = captured_preprocess_input_fn(tf.cast(image_after_aug, tf.float32))
         
-        # Mask should already be float32 from normalization/augmentation. Cast just in case.
-        mask_final = tf.cast(mask_after_aug, tf.float32)
+        return final_processed_inputs, final_mask
 
-        # tf.print("Shapes after load_and_preprocess: img=", tf.shape(image_preprocessed), "msk=", tf.shape(mask_final), output_stream=sys.stderr)
-        return image_preprocessed, mask_final
     except Exception as e:
-        # tf.print(f"Error in load_and_preprocess_segmentation: {e}", output_stream=sys.stderr)
-        # traceback.print_exc(file=sys.stderr) # This won't work well in graph mode
-        # Fallback to zeros if an error occurs that is not caught by TF ops themselves
-        tf.print("Error processing image (fallback):", image_path_tensor, "or mask:", mask_path_tensor, "Error:", str(e), output_stream=sys.stderr)
-        dummy_image_shape = list(target_size_tensor.numpy()) + [3]
-        dummy_mask_shape = list(target_size_tensor.numpy()) + [1]
-        dummy_image = tf.zeros(dummy_image_shape, dtype=tf.float32)
-        dummy_mask = tf.zeros(dummy_mask_shape, dtype=tf.float32)
-        return dummy_image, dummy_mask
-
-# --- Augmentation Helper Functions (ensure they use tf.cond internally for conditional logic) ---
-
-def _random_flip_left_right(image: tf.Tensor, mask: tf.Tensor, prob_tf: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Conditionally flips image and mask horizontally with probability prob_tf."""
-    def flip_fn():
-        return tf.image.flip_left_right(image), tf.image.flip_left_right(mask)
-    def no_flip_fn():
-        return image, mask
-    should_apply = tf.random.uniform(shape=[], dtype=tf.float32) < prob_tf
-    return tf.cond(should_apply, flip_fn, no_flip_fn)
-
-@tf.function(reduce_retracing=True)
-def _adjust_brightness(image: tf.Tensor, mask: tf.Tensor, brightness_delta_tf: tf.Tensor, prob_tf: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Conditionally applies brightness adjustment with probability prob_tf.
-    Ensures that the output image dtype matches the input image dtype.
-    """
-    def apply_aug_fn() -> Tuple[tf.Tensor, tf.Tensor]:
-        original_dtype = image.dtype
+        tf.print("Error in load_and_preprocess_segmentation (fallback): paths=", 
+                 image_path_tensor, depth_path_tensor, pc_path_tensor, mask_path_tensor, 
+                 "Error:", tf.strings.as_string(e), output_stream=sys.stderr)
         
-        # Convert image to float32 in range [0, 1] for tf.image.adjust_brightness
-        # if it's not already in that format.
-        if original_dtype != tf.float32:
-            img_float = tf.image.convert_image_dtype(image, dtype=tf.float32)
-        else:
-            img_float = image # Assume it's already in [0,1] if float32
+        dummy_image_shape = [target_size_py[0], target_size_py[1], 3]
+        dummy_depth_shape = [target_size_py[0], target_size_py[1], 1]
+        dummy_mask_shape  = [target_size_py[0], target_size_py[1], 1]
+        dummy_pc_num_points = int(pc_prep_cfg_dict.get('num_points', 4096) if pc_prep_cfg_dict else 4096)
+        dummy_pc_shape = [dummy_pc_num_points, 3]
 
-        adjusted_img_float = tf.image.adjust_brightness(img_float, delta=brightness_delta_tf)
-        # Clip to ensure values remain in [0, 1] after adjustment, which is important
-        # before converting back to uint8 or other integer types.
-        adjusted_img_float_clipped = tf.clip_by_value(adjusted_img_float, 0.0, 1.0)
+        dummy_inputs_dict = {
+            'rgb_input': tf.zeros(dummy_image_shape, dtype=tf.float32),
+            'depth_input': tf.zeros(dummy_depth_shape, dtype=tf.float32),
+            'pc_input': tf.zeros(dummy_pc_shape, dtype=tf.float32),
+        }
+        dummy_mask_tensor = tf.zeros(dummy_mask_shape, dtype=tf.float32)
+        return dummy_inputs_dict, dummy_mask_tensor
 
-        # Convert back to original dtype. saturate=True handles clipping for integer types.
-        final_image = tf.image.convert_image_dtype(adjusted_img_float_clipped, dtype=original_dtype, saturate=True)
-        
-        return final_image, mask # Mask is not changed by brightness
 
-    def no_aug_fn() -> Tuple[tf.Tensor, tf.Tensor]:
-        return image, mask
-
-    should_apply = tf.random.uniform(shape=[], dtype=tf.float32) < prob_tf
-    return tf.cond(should_apply, apply_aug_fn, no_aug_fn)
-
-@tf.function(reduce_retracing=True)
-def _rotate_image_and_mask(image: tf.Tensor, mask: tf.Tensor, max_angle_deg_tf: tf.Tensor, prob_tf: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Conditionally rotates image and mask using tfa.image.rotate."""
-    def apply_rotation_fn():
-        max_angle_rad = max_angle_deg_tf * (math.pi / 180.0)
-        angle = tf.random.uniform(shape=[], minval=-max_angle_rad, maxval=max_angle_rad) # angle is already in radians here
-        img_dtype = image.dtype
-        msk_dtype = mask.dtype
-        image_float = tf.cast(image, tf.float32)
-        mask_float = tf.cast(mask, tf.float32)
-
-        # The 'angle' variable IS ALREADY IN RADIANS.
-        # Use tfa.image.rotate for direct rotation with a scalar angle.
-        rotated_image_float = tfa.image.rotate(images=image_float, angles=angle, interpolation='BILINEAR', fill_mode='REFLECT')
-        # For masks, NEAREST interpolation and CONSTANT fill (with 0) is usually preferred.
-        # tfa.image.rotate also supports fill_mode, which defaults to 'CONSTANT' and fill_value 0.0
-        rotated_mask_float = tfa.image.rotate(images=mask_float, angles=angle, interpolation='NEAREST', fill_mode='CONSTANT') 
-        rotated_image_out = tf.cast(rotated_image_float, img_dtype)
-        rotated_mask_out = tf.cast(rotated_mask_float, msk_dtype)
-        
-        return rotated_image_out, rotated_mask_out
-
-    def no_rotation_fn():
-        return image, mask
-    should_apply = tf.random.uniform(shape=[], dtype=tf.float32) < prob_tf
-    return tf.cond(should_apply, apply_rotation_fn, no_rotation_fn)
-
-@tf.function(reduce_retracing=True)
-def _shift_image_and_mask(image: tf.Tensor, mask: tf.Tensor, width_shift_fraction_tf: tf.Tensor, height_shift_fraction_tf: tf.Tensor, prob_tf: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Conditionally applies random width and height shifts to image and mask."""
-    def apply_shift_fn():
-        img_dtype = image.dtype
-        msk_dtype = mask.dtype
-        image_float = tf.cast(image, tf.float32)
-        mask_float = tf.cast(mask, tf.float32)
-        
-        image_height = tf.cast(tf.shape(image_float)[0], tf.float32)
-        image_width = tf.cast(tf.shape(image_float)[1], tf.float32)
-
-        # Max shift in pixels
-        max_dx = width_shift_fraction_tf * image_width
-        max_dy = height_shift_fraction_tf * image_height
-        
-        # Random shift values
-        dx = tf.random.uniform(shape=[], minval=-max_dx, maxval=max_dx)
-        dy = tf.random.uniform(shape=[], minval=-max_dy, maxval=max_dy)
-        
-        # Transformation matrix for translation: [1, 0, dx, 0, 1, dy, 0, 0]
-        transform_matrix = tf.convert_to_tensor([1.0, 0.0, dx, 0.0, 1.0, dy, 0.0, 0.0], dtype=tf.float32)
-        
-        shifted_image_float = tfa.image.transform(image_float, transform_matrix, interpolation='BILINEAR', fill_mode='REFLECT')
-        shifted_mask_float = tfa.image.transform(mask_float, transform_matrix, interpolation='NEAREST', fill_mode='CONSTANT')
-        
-        shifted_image_out = tf.cast(shifted_image_float, img_dtype)
-        shifted_mask_out = tf.cast(shifted_mask_float, msk_dtype)
-        return shifted_image_out, shifted_mask_out
-
-    # Conditionally apply the shift
-    def no_shift_fn():
-        return image, mask
-    should_apply = tf.random.uniform(shape=[], dtype=tf.float32) < prob_tf
-    return tf.cond(should_apply, apply_shift_fn, no_shift_fn)
-
-def _zoom_image_and_mask(image: tf.Tensor, mask: tf.Tensor, zoom_range_fraction_tf: tf.Tensor, prob_tf: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Conditionally zooms image and mask using tf.image.resize and crop/pad."""
-    def apply_zoom_fn():
-        original_img_dtype = image.dtype
-        original_msk_dtype = mask.dtype
-
-        img_shape = tf.shape(image)
-        original_height = img_shape[0]
-        original_width = img_shape[1]
-
-        scale = tf.random.uniform(shape=[], minval=1.0 - zoom_range_fraction_tf, maxval=1.0 + zoom_range_fraction_tf)
-        
-        new_height = tf.cast(tf.cast(original_height, tf.float32) * scale, tf.int32)
-        new_width = tf.cast(tf.cast(original_width, tf.float32) * scale, tf.int32)
-
-        # tf.image.resize on uint8 inputs produces float32 [0,255]. On float32 inputs, it stays float32.
-        img_resized_for_zoom = tf.image.resize(image, [new_height, new_width], method=tf.image.ResizeMethod.BILINEAR)
-        # For masks, NEAREST_NEIGHBOR is typically used and preserves integer dtypes or float dtypes.
-        msk_resized_for_zoom = tf.image.resize(mask, [new_height, new_width], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
-
-        # tf.image.resize_with_crop_or_pad preserves the dtype of its input.
-        # So, img_zoomed_processed will have the same dtype as img_resized_for_zoom (likely float32).
-        img_zoomed_processed = tf.image.resize_with_crop_or_pad(img_resized_for_zoom, original_height, original_width)
-        msk_zoomed_processed = tf.image.resize_with_crop_or_pad(msk_resized_for_zoom, original_height, original_width)
-
-        # Cast image back to its original input dtype
-        if original_img_dtype == tf.uint8:
-            # img_zoomed_processed is float32 (expected range [0,255] if input was uint8)
-            final_image = tf.saturate_cast(img_zoomed_processed, tf.uint8)
-        elif original_img_dtype == tf.float32:
-            # If input image was already float32, the resize and crop_or_pad operations maintained its float32 type.
-            final_image = img_zoomed_processed
-        else:
-            # For any other dtypes, attempt a direct cast.
-            final_image = tf.cast(img_zoomed_processed, original_img_dtype)
-        
-        # Ensure mask is also consistently typed back to its original dtype if it changed.
-        if msk_zoomed_processed.dtype != original_msk_dtype:
-            msk_zoomed_processed = tf.cast(msk_zoomed_processed, original_msk_dtype)
-
-        return final_image, msk_zoomed_processed
-
-    def no_zoom_fn():
-        return image, mask
-    should_apply = tf.random.uniform(shape=[], dtype=tf.float32) < prob_tf
-    return tf.cond(should_apply, apply_zoom_fn, no_zoom_fn)
-
-def _augment_segmentation_tf_cond(
-    image: tf.Tensor, 
-    mask: tf.Tensor, 
-    aug_config_dict_tf_constants: Dict[str, tf.Tensor], 
-    default_aug_prob_tf: tf.Tensor
-) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Applies a sequence of augmentations conditionally based on config and probability."""
-    img_aug, msk_aug = image, mask # Start with original image and mask
-
-    # Horizontal Flip
-    if 'horizontal_flip' in aug_config_dict_tf_constants and aug_config_dict_tf_constants['horizontal_flip']:
-        img_aug, msk_aug = _random_flip_left_right(img_aug, msk_aug, default_aug_prob_tf)
-
-    # Brightness Adjustment - Assuming key in config is 'brightness_max_delta'
-    # The aug_config_dict_tf_constants should be created with 'brightness_delta' if that's the key from earlier.
-    # For now, let's assume the key is 'brightness_max_delta' and it's float.
-    if 'brightness_max_delta' in aug_config_dict_tf_constants:
-        brightness_delta_val = aug_config_dict_tf_constants['brightness_max_delta']
-        # Only apply if delta is positive
-        if tf.cast(brightness_delta_val, tf.float32) > 0.0:
-             img_aug, msk_aug = _adjust_brightness(img_aug, msk_aug, brightness_delta_val, default_aug_prob_tf)
-    
-    # Rotation
-    if 'rotation_range' in aug_config_dict_tf_constants:
-        rotation_angle_deg = aug_config_dict_tf_constants['rotation_range'] # Expected to be int or float degrees
-        if tf.cast(rotation_angle_deg, tf.float32) > 0.0: # Apply only if range is positive
-            img_aug, msk_aug = _rotate_image_and_mask(img_aug, msk_aug, tf.cast(rotation_angle_deg, tf.float32), default_aug_prob_tf)
-
-    # Width/Height Shift
-    # Check if either shift range is present and positive
-    wsr_val = aug_config_dict_tf_constants.get('width_shift_range', tf.constant(0.0, dtype=tf.float32))
-    hsr_val = aug_config_dict_tf_constants.get('height_shift_range', tf.constant(0.0, dtype=tf.float32))
-    if tf.cast(wsr_val, tf.float32) > 0.0 or tf.cast(hsr_val, tf.float32) > 0.0:
-        img_aug, msk_aug = _shift_image_and_mask(img_aug, msk_aug, tf.cast(wsr_val, tf.float32), tf.cast(hsr_val, tf.float32), default_aug_prob_tf)
-
-    # Zoom
-    if 'zoom_range' in aug_config_dict_tf_constants:
-        zoom_factor_range = aug_config_dict_tf_constants['zoom_range'] # Expected to be float (e.g., 0.1 for [0.9, 1.1])
-        if tf.cast(zoom_factor_range, tf.float32) > 0.0: # Apply only if range is positive
-            img_aug, msk_aug = _zoom_image_and_mask(img_aug, msk_aug, tf.cast(zoom_factor_range, tf.float32), default_aug_prob_tf)
-
-    return img_aug, msk_aug
-
-# --- Dataset Creation Function ---
-def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset]]:
-    """
-    Loads segmentation data (image-mask pairs) using metadata.json.
-    Implements instance-aware train/val/test splitting.
-    Args:
-        config: Dictionary from models/segmentation/config.yaml.
-    Returns:
-        Tuple of (train_dataset, val_dataset, test_dataset).
-    """
-    project_root = _get_project_root()
+def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset], int]:
     try:
         data_cfg = config['data']
-        model_cfg = config['model']
-        metadata_path_str = data_cfg['metadata_path']
-        image_size = tuple(data_cfg['image_size'])
+        paths_cfg = config['paths']
+        model_cfg = config['model'] # Used for backbone specific preprocessing
+        aug_cfg = data_cfg.get('augmentation', {})
+
+        target_size_py = tuple(data_cfg.get('image_size', (256, 256))) 
+        target_size_tensor = tf.constant(target_size_py, dtype=tf.int32)   
         batch_size = data_cfg['batch_size']
-        val_split_ratio = data_cfg.get('validation_split_ratio', 0.0)
-        test_split_ratio = data_cfg.get('test_split_ratio', 0.0)
+        num_classes = data_cfg['num_classes']
+        num_classes_tensor = tf.constant(num_classes, dtype=tf.int32)
+        split_ratios = data_cfg['split_ratios']
         random_seed = data_cfg.get('random_seed', 42)
-        num_classes_data = data_cfg.get('num_classes', 2) 
-        num_classes_model = model_cfg.get('num_classes', 2) 
-        if num_classes_data != num_classes_model:
-            logger.warning(f"num_classes mismatch: data.num_classes={num_classes_data}, model.num_classes={num_classes_model}. Using model.num_classes={num_classes_model}.")
-        num_classes = num_classes_model
-        backbone = model_cfg.get('backbone', 'None')
-        aug_settings = data_cfg.get('augmentation', {'enabled': False})
+
+        use_depth = data_cfg.get('use_depth_map', False)
+        depth_map_dir_name = data_cfg.get('depth_map_dir_name', 'depth')
+        depth_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('depth_map', {})
+
+        use_pc = data_cfg.get('use_point_cloud', False)
+        pc_root_dir = data_cfg.get('point_cloud_root_dir', '')
+        pc_sampling_rate_dir = data_cfg.get('point_cloud_sampling_rate_dir', '')
+        pc_suffix = data_cfg.get('point_cloud_suffix', '')
+        pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
+
+        project_root = _get_project_root()
+        metadata_dir = project_root / paths_cfg['metadata_dir']
+        metadata_file = metadata_dir / paths_cfg['metadata_filename']
+
+        if not metadata_file.exists():
+            logger.error(f"Metadata file not found: {metadata_file}")
+            return None, None, None, 0
+
+        with open(metadata_file, 'r') as f:
+            metadata = json.load(f)
+
+        # Check for 'items' key existence in metadata
+        if 'items' not in metadata or not metadata['items']:
+            logger.error(f"'items' key not found or empty in metadata: {metadata_file}")
+            return None, None, None, 0
+
+        # Prepare file paths and labels
+        all_rgb_paths, all_depth_paths, all_pc_paths, all_mask_paths, all_labels = [], [], [], [], []
+        for item_id, item_data in metadata['items'].items():
+            if not isinstance(item_data, dict):
+                logger.warning(f"Skipping item_id {item_id} due to unexpected data format: {item_data}")
+                continue
+            
+            # Construct full RGB path relative to metadata file's directory
+            rgb_rel_path = item_data.get('rgb_image_path')
+            if not rgb_rel_path:
+                logger.warning(f"Skipping item_id {item_id} due to missing 'rgb_image_path'.")
+                continue
+            full_rgb_path = str(metadata_dir / rgb_rel_path)
+
+            # Construct full mask path relative to metadata file's directory
+            mask_rel_path = item_data.get('mask_path')
+            if not mask_rel_path:
+                logger.warning(f"Skipping item_id {item_id} due to missing 'mask_path'.")
+                continue
+            full_mask_path = str(metadata_dir / mask_rel_path)
+
+            if not os.path.exists(full_rgb_path):
+                logger.warning(f"RGB image file not found, skipping: {full_rgb_path}")
+                continue
+            if not os.path.exists(full_mask_path):
+                logger.warning(f"Mask file not found, skipping: {full_mask_path}")
+                continue
+
+            all_rgb_paths.append(full_rgb_path)
+            all_mask_paths.append(full_mask_path)
+
+            # Depth path (optional)
+            depth_path_str = ""
+            if use_depth:
+                # Assuming depth maps are in a subfolder relative to the RGB image's folder
+                rgb_parent_dir = pathlib.Path(full_rgb_path).parent
+                depth_img_name = pathlib.Path(full_rgb_path).name # Use same name as RGB
+                potential_depth_path = rgb_parent_dir / depth_map_dir_name / depth_img_name
+                if potential_depth_path.exists():
+                    depth_path_str = str(potential_depth_path)
+                else:
+                    # Try with common extensions if exact match fails
+                    for ext in ['.png', '.jpg', '.jpeg', '.tif']:
+                        potential_depth_path_ext = potential_depth_path.with_suffix(ext)
+                        if potential_depth_path_ext.exists():
+                            depth_path_str = str(potential_depth_path_ext)
+                            break
+                    if not depth_path_str:
+                         logger.debug(f"Depth map not found for {full_rgb_path} at {potential_depth_path} or with common extensions. Will use zeros.")
+            all_depth_paths.append(depth_path_str)
+
+            # Point cloud path (optional)
+            pc_path_str = ""
+            if use_pc and pc_root_dir and pc_sampling_rate_dir and pc_suffix:
+                # Example structure: pc_root_dir / food_category / image_id / sampling_rate_dir / image_id + suffix
+                # This needs to align with how point clouds are actually stored.
+                # Assuming image_id can be derived from rgb_rel_path (e.g., 'food_category/image_id.jpg')
+                try:
+                    rel_path_parts = pathlib.Path(rgb_rel_path).parts
+                    if len(rel_path_parts) >= 2:
+                        food_category_pc = rel_path_parts[-2] # e.g., 'salad_10'
+                        image_id_pc = pathlib.Path(rgb_rel_path).stem # e.g., 'rgb_1100'
+                        
+                        potential_pc_path = pathlib.Path(pc_root_dir) / food_category_pc / image_id_pc / pc_sampling_rate_dir / (image_id_pc + pc_suffix)
+                        
+                        if potential_pc_path.exists():
+                            pc_path_str = str(potential_pc_path)
+                        else:
+                            logger.debug(f"Point cloud not found for {full_rgb_path} at {potential_pc_path}. Will use zeros.")
+                    else:
+                        logger.debug(f"Could not determine food_category/image_id for PC from {rgb_rel_path}. Will use zeros.")
+                except Exception as e_pc_path:
+                    logger.warning(f"Error constructing PC path for {full_rgb_path}: {e_pc_path}. Will use zeros.")
+            all_pc_paths.append(pc_path_str)
+
+            # Store a dummy label (0) for each sample, as segmentation typically learns pixel-wise classes from masks.
+            all_labels.append(0) 
+
+        if not all_rgb_paths:
+            logger.error("No valid data items found after checking paths.")
+            return None, None, None, 0
+
+        logger.info(f"Loaded {len(all_rgb_paths)} items for segmentation.")
+
+        # Create path tuples for tf.data.Dataset
+        # (rgb_path, depth_path, pc_path, mask_path)
+        path_tuples = list(zip(all_rgb_paths, all_depth_paths, all_pc_paths, all_mask_paths))
+        labels_tf = tf.constant(all_labels, dtype=tf.int32) # Dummy labels for splitting
+
+        indices = list(range(len(path_tuples)))
+        train_indices, val_test_indices = train_test_split(indices, train_size=split_ratios['train'], random_state=random_seed, stratify=labels_tf if len(set(all_labels)) > 1 else None)
+        
+        # Calculate the proportion of val set within the val_test_indices subset
+        val_prop_in_remainder = split_ratios['val'] / (split_ratios['val'] + split_ratios['test'])
+        val_indices, test_indices = train_test_split(val_test_indices, train_size=val_prop_in_remainder, random_state=random_seed, stratify=labels_tf[val_test_indices] if len(set(all_labels)) > 1 else None)
+
+        train_paths = [path_tuples[i] for i in train_indices]
+        val_paths = [path_tuples[i] for i in val_indices]
+        test_paths = [path_tuples[i] for i in test_indices]
+
+        logger.info(f"Dataset split: Train {len(train_paths)}, Val {len(val_paths)}, Test {len(test_paths)}")
+
+        # Capture configurations for the mapping function (to avoid issues with non-tensor args in tf.data.Dataset.map)
+        # These are Python dicts/values, not Tensors yet.
+        captured_aug_config = aug_cfg.copy() # aug_cfg comes from the main config dict
+        model_arch = model_cfg.get('backbone', 'UNet') # from model config
+        captured_preprocess_input_fn_seg = _get_segmentation_preprocess_fn(model_arch)
+
+        # Convert boolean flags to tensors for tf.cond inside map_fn
+        use_depth_map_tensor = tf.constant(use_depth, dtype=tf.bool)
+        use_point_cloud_tensor = tf.constant(use_pc, dtype=tf.bool)
+        
+        # Note: depth_prep_cfg and pc_prep_cfg are already Python dicts, suitable for passing directly
+
+        # Partial function for mapping
+        def _map_fn(paths_tuple, label_dummy, augment_flag): # label_dummy is not used by load_and_preprocess_segmentation
+            return load_and_preprocess_segmentation(
+                paths_tuple, 
+                target_size_py, 
+                target_size_tensor, 
+                num_classes_tensor, 
+                augment_flag, # This will be tf.constant(True) or tf.constant(False)
+                captured_preprocess_input_fn_seg, 
+                captured_aug_config,
+                use_depth_map_tensor,
+                depth_prep_cfg, 
+                use_point_cloud_tensor,
+                pc_prep_cfg
+            )
+
+        # Create datasets
+        train_dataset = tf.data.Dataset.from_tensor_slices((train_paths, [0]*len(train_paths))) # Dummy labels for slice structure
+        train_dataset = train_dataset.shuffle(buffer_size=len(train_paths), seed=random_seed, reshuffle_each_iteration=True)
+        train_dataset = train_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(True)), num_parallel_calls=tf.data.AUTOTUNE)
+        train_dataset = train_dataset.batch(batch_size)
+        train_dataset = train_dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
+
+        val_dataset = tf.data.Dataset.from_tensor_slices((val_paths, [0]*len(val_paths)))
+        val_dataset = val_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(False)), num_parallel_calls=tf.data.AUTOTUNE)
+        val_dataset = val_dataset.batch(batch_size)
+        val_dataset = val_dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
+
+        test_dataset = None
+        if test_paths:
+            test_dataset = tf.data.Dataset.from_tensor_slices((test_paths, [0]*len(test_paths)))
+            test_dataset = test_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(False)), num_parallel_calls=tf.data.AUTOTUNE)
+            test_dataset = test_dataset.batch(batch_size)
+            test_dataset = test_dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
+
+        return train_dataset, val_dataset, test_dataset, num_classes
+
     except KeyError as e:
-        raise ValueError(f"Configuration error in segmentation config: missing key {e}")
-
-    metadata_file = project_root / metadata_path_str
-    if not metadata_file.is_file():
-        raise FileNotFoundError(f"Segmentation metadata JSON file not found: {metadata_file}")
-
-    if not (0 <= val_split_ratio < 1 and 0 <= test_split_ratio < 1 and (val_split_ratio + test_split_ratio) < 1):
-        raise ValueError("Invalid split ratios. Must be [0, 1) and val_split + test_split < 1.")
-
-    logger.info(f"Loading segmentation data from metadata: {metadata_file}")
-    with open(metadata_file, 'r') as f:
-        metadata_list = json.load(f)
-    
-    all_pairs_data = []
-    for item in metadata_list:
-        img_path = item.get('image_path')
-        mask_path = item.get('mask_path')
-        class_name = item.get('class_name', 'unknown_class') 
-        instance_name = item.get('instance_name', 'unknown_instance') 
-
-        if not (img_path and mask_path):
-            logger.warning(f"Skipping metadata item with missing image or mask path: {item}")
-            continue
-        if not (pathlib.Path(img_path).is_file() and pathlib.Path(mask_path).is_file()):
-            logger.warning(f"Skipping pair due to missing file: img='{img_path}', mask='{mask_path}'")
-            continue
-        all_pairs_data.append({
-            'image_path': str(img_path),
-            'mask_path': str(mask_path),
-            'instance_id': f"{class_name}_{instance_name}"
-        })
-
-    if not all_pairs_data:
-        raise ValueError(f"No valid image-mask pairs loaded from metadata: {metadata_file}. Check paths and file existence.")
-    logger.info(f"Found {len(all_pairs_data)} total valid image-mask pairs from metadata.")
-
-    AUTOTUNE = tf.data.AUTOTUNE
-
-    def create_dataset(items_list: List[Dict], augment_flag: bool) -> Optional[tf.data.Dataset]:
-        if not items_list:
-            return None
-
-        image_paths = [item['image_path'] for item in items_list]
-        mask_paths = [item['mask_path'] for item in items_list]
-
-        dataset = tf.data.Dataset.from_tensor_slices((image_paths, mask_paths))
-
-        # Convert Python types to TensorFlow constants for use in tf.function
-        target_size_tf = tf.constant(list(image_size), dtype=tf.int32)
-        num_classes_tf = tf.constant(num_classes, dtype=tf.int32)
-        augment_tf = tf.constant(augment_flag, dtype=tf.bool) # Pass Python bool directly
-        
-        # Capture Python variables that need to be passed to the tf.function
-        # The preprocess_fn and aug_config are determined before mapping starts
-        current_preprocess_fn = _get_segmentation_preprocess_fn(backbone)
-        current_aug_config = aug_settings if augment_flag else None
-
-        dataset = dataset.map(
-            lambda img_p, msk_p: load_and_preprocess_segmentation(
-                img_p, msk_p, 
-                target_size_tf, 
-                num_classes_tf, 
-                augment_tf, 
-                current_preprocess_fn, 
-                current_aug_config
-            ),
-            num_parallel_calls=AUTOTUNE
-        )
-        
-        if augment_flag:
-            logger.info("Applying .cache() to the training segmentation dataset after mapping. This will use more RAM.")
-        else:
-            logger.info("Applying .cache() to the validation/test segmentation dataset after mapping.")
-        dataset = dataset.cache() # Cache after mapping
-
-        if augment_flag: # Shuffle only training data
-            # Use a buffer size proportional to dataset size, or a large fixed number
-            buffer_sz = max(1000, len(items_list))
-            dataset = dataset.shuffle(buffer_size=buffer_sz, seed=random_seed)
-        
-        dataset = dataset.batch(batch_size)
-        dataset = dataset.prefetch(buffer_size=AUTOTUNE)
-        return dataset
-
-    train_items, val_items, test_items = [], [], []
-    if val_split_ratio == 0.0 and test_split_ratio == 0.0:
-        logger.info("No validation or test split. Using all data for training.")
-        train_items = all_pairs_data
-    else:
-        unique_instance_ids = sorted(list(set(d['instance_id'] for d in all_pairs_data)))
-        if len(unique_instance_ids) < 2:
-             logger.warning(f"Only {len(unique_instance_ids)} unique instance(s). Split might not be diverse. Consider dataset structure.")
-        
-        remaining_instances = unique_instance_ids
-        test_instance_ids = []
-        if test_split_ratio > 0 and len(unique_instance_ids) > 0:
-            if len(unique_instance_ids) == 1 and test_split_ratio > 0:
-                 logger.warning("Only 1 unique instance, cannot create a test set via instance split. Test set will be empty.")
-            else:
-                remaining_instances, test_instance_ids = train_test_split(
-                    unique_instance_ids, test_size=test_split_ratio, random_state=random_seed, shuffle=True)
-        
-        train_instance_ids = remaining_instances
-        val_instance_ids = []
-        if val_split_ratio > 0 and len(remaining_instances) > 0:
-            effective_val_ratio = val_split_ratio / (1.0 - test_split_ratio) 
-            if effective_val_ratio >= 1.0 and len(remaining_instances) > 1: 
-                effective_val_ratio = 0.5 if len(remaining_instances) > 1 else 0.0 
-            elif len(remaining_instances) == 1 and effective_val_ratio > 0:
-                 logger.warning("Only 1 unique instance remaining after test split, cannot create validation set. Val set will be empty.")
-                 effective_val_ratio = 0.0
-
-            if effective_val_ratio > 0 and effective_val_ratio < 1.0:
-                 train_instance_ids, val_instance_ids = train_test_split(
-                    remaining_instances, test_size=effective_val_ratio, random_state=random_seed, shuffle=True)
-            elif effective_val_ratio == 0.0:
-                 train_instance_ids = remaining_instances 
-            else: 
-                 logger.warning(f"Effective validation ratio {effective_val_ratio} is too high. Assigning remaining to train.")
-                 train_instance_ids = remaining_instances
-
-        for item in all_pairs_data:
-            if item['instance_id'] in train_instance_ids:
-                train_items.append(item)
-            elif item['instance_id'] in val_instance_ids:
-                val_items.append(item)
-            elif item['instance_id'] in test_instance_ids:
-                test_items.append(item)
-
-    logger.info(f"Data split: Train={len(train_items)}, Validation={len(val_items)}, Test={len(test_items)} items.")
-    if not train_items and (val_split_ratio > 0 or test_split_ratio > 0):
-        logger.warning("Training set is empty after instance-aware split. This can happen with small datasets or few instances.")
-    elif not train_items:
-         raise ValueError("Training set is empty. Check dataset and metadata.")
-
-    train_dataset = create_dataset(train_items, augment_flag=True)
-    val_dataset = create_dataset(val_items, augment_flag=False)
-    test_dataset = create_dataset(test_items, augment_flag=False)
-
-    logger.info("Segmentation datasets created.")
-    return train_dataset, val_dataset, test_dataset
+        logger.error(f"Configuration key error: {e}. Please check your segmentation config.yaml.")
+        return None, None, None, 0
+    except Exception as e:
+        logger.error(f"An unexpected error occurred in load_segmentation_data: {e}", exc_info=True)
+        return None, None, None, 0

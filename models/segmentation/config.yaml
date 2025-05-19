@@ -1,14 +1,28 @@
 data:
-  metadata_path: "data/segmentation/metadata.json"
   image_size: [256, 256] 
-  batch_size: 8 # Reduced from 16 to prevent OOM
-  validation_split_ratio: 0.2 # Updated from 0.0, adjust as needed
-  test_split_ratio: 0.1       # Updated from 0.0, adjust as needed
+  batch_size: 32
+  split_ratios:
+    train: 0.7
+    val: 0.15
+    test: 0.15
   num_classes: 2 # Number of segmentation classes (e.g., 1 for foreground + 1 for background, or N food classes + background)
-  # Add color mapping if masks are color-coded instead of integer-based
-  # color_map: 
-  #   background: [0, 0, 0]
-  #   food: [255, 255, 255]
+  random_seed: 42 
+
+  use_depth_map: true # Temporarily disabled for debugging
+  depth_map_dir_name: "depth"
+
+  use_point_cloud: true # Temporarily disabled for debugging
+  point_cloud_root_dir: "E:/_MetaFood3D_new_Point_cloud/Point_cloud"
+  point_cloud_sampling_rate_dir: "4096" 
+  point_cloud_suffix: "_sampled_1.ply" 
+
+
+  modalities_preprocessing:
+    depth_map:
+      normalization: "min_max_local" 
+    point_cloud:
+      num_points: 4096 
+      normalization: "unit_sphere" # Options: 'unit_sphere', 'unit_cube', 'centered_only', 'none'
 
   # Data Augmentation (applied consistently to image and mask)
   augmentation:
@@ -18,20 +32,20 @@ data:
     width_shift_range: 0.1
     height_shift_range: 0.1
     zoom_range: 0.1
+    apply_geometric_to_depth: true 
 
-# Model file paths (used by prediction/pipeline scripts)
 models:
   segmentation_tflite: "trained_models/segmentation/exported/segmentation_model.tflite"
-  # Add classification_tflite here when ready
+  
 
 # Model Configuration
 model:
   architecture: "UNet" # e.g., 'UNet', 'DeepLabV3+'
-  backbone: "EfficientNetB0" # Optional: Backbone for feature extraction (e.g., 'ResNet50', 'EfficientNetB0', 'None' for standard U-Net)
-  input_shape: [256, 256, 3] # Should match data.image_size + channels
-  num_classes: 2 # Must match data.num_classes
+  backbone: "EfficientNetB0" 
+  input_shape: [256, 256, 3]
+  num_classes: 2 
   activation: "sigmoid" # or "softmax" if num_classes > 2 and mutually exclusive classes
-  use_pretrained_backbone_weights: true # If using a backbone
+  use_pretrained_backbone_weights: true
 
 # Optimizer Configuration 
 optimizer:
@@ -52,7 +66,7 @@ training:
   epochs: 100
   use_mixed_precision: true
   use_tpu: false
-  metrics: ["mean_iou", "accuracy"] # Metrics to be used during training and evaluation
+  metrics: ["mean_iou", "accuracy"] 
 
   callbacks:
     model_checkpoint:
@@ -94,22 +108,22 @@ training:
 evaluation:
   # Optional: Specify model for evaluation, defaults to best checkpoint or final model
   # keras_model_filename: "unet_best_model.h5"
-  batch_size: 8 # Reduced from 16 to prevent OOM
+  batch_size: 32
 
 # Paths Configuration 
 paths:
   model_save_dir: "trained_models/segmentation/"
   log_dir: "logs/segmentation/"
   tflite_export_dir: "trained_models/segmentation/exported/"
-  # No label map needed for typical segmentation
+  metadata_dir: "data/segmentation"
+  metadata_filename: "metadata.json"
 
 # Export Configuration
 export:
-  # keras_model_filename: "unet_epoch-XX_val_iou-X.XXXX.h5" # Optional: Specify Keras model file. Defaults to best/final model.
   tflite_filename: "segmentation_model_default.tflite"
 
   quantization:
-    type: "none" # 'none', 'default', 'float16', 'int8'. Review for segmentation; int8 might need representative_dataset enabled.
+    type: "int8" # 'none', 'default', 'float16', 'int8'. Review for segmentation; int8 might need representative_dataset enabled.
     representative_dataset:
-      enabled: false # Set to true if int8 quantization is used and representative data is needed
+      enabled: true
       num_samples: 50
