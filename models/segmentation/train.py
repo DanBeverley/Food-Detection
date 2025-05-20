@@ -5,6 +5,7 @@ import logging
 import tensorflow as tf
 from pathlib import Path
 from datetime import datetime
+import traceback
 
 # Add _get_project_root function definition
 def _get_project_root() -> Path:
@@ -80,7 +81,51 @@ def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_ba
     logger.info("--- Data Loading Test Finished ---")
 
 
-def unet_model(output_channels: int, image_size: tuple, model_config: dict, data_config: dict) -> tf.keras.Model:
+def build_decoder_block(input_tensor, skip_feature_tensor, num_filters, kernel_size=(3,3), strides=(2,2), upsampling_type='conv_transpose', kernel_initializer='he_normal', block_name=''):
+    if upsampling_type == 'conv_transpose':
+        up = layers.Conv2DTranspose(num_filters, kernel_size, strides=strides, padding='same', name=f'{block_name}_transpose')(input_tensor)
+    elif upsampling_type == 'upsampling_bilinear':
+        up = layers.UpSampling2D(size=strides, interpolation='bilinear', name=f'{block_name}_upsample_bilinear')(input_tensor)
+        # Adjust channels after upsampling if needed, to match num_filters (target for this block's convs)
+        if up.shape[-1] != num_filters:
+             up = layers.Conv2D(num_filters, (1,1), padding='same', activation='relu', name=f'{block_name}_upsample_channel_adjust')(up)
+    else:
+        raise ValueError(f"Unsupported upsampling_type: {upsampling_type}")
+
+    logger.info(f"DEBUG [{block_name}]: up shape after upsampling: {up.shape}")
+    logger.info(f"DEBUG [{block_name}]: skip_feature_tensor shape: {skip_feature_tensor.shape}")
+
+    processed_skip_tensor = skip_feature_tensor
+    if up.shape[1] != skip_feature_tensor.shape[1] or up.shape[2] != skip_feature_tensor.shape[2]:
+        logger.info(f"DEBUG [{block_name}]: Spatial mismatch. Resizing skip_feature_tensor from HxW {skip_feature_tensor.shape[1:3]} to match up HxW {up.shape[1:3]}.")
+        processed_skip_tensor = layers.Resizing(
+            height=up.shape[1],
+            width=up.shape[2],
+            interpolation='bilinear', # Bilinear is often preferred for feature maps
+            name=f'{block_name}_skip_resize'
+        )(skip_feature_tensor)
+        logger.info(f"DEBUG [{block_name}]: processed_skip_tensor shape after Resizing: {processed_skip_tensor.shape}")
+    
+    # Concatenate the upsampled features with the (potentially resized) skip features
+    # The original code also had a channel projection for skip features if channels didn't match 'up'.
+    # This might be necessary if 'num_filters' for 'up' differs from 'processed_skip_tensor' channels.
+    # For now, let's assume direct concatenation is intended after spatial alignment.
+    # If channel mismatch occurs at concat, we might need to re-add skip projection or adjust num_filters.
+    try:
+        merge = layers.concatenate([up, processed_skip_tensor], axis=3, name=f'{block_name}_concat')
+    except ValueError as e:
+        logger.error(f"ERROR [{block_name}] concatenating shapes: up={up.shape}, processed_skip_tensor={processed_skip_tensor.shape} with axis=3. Error: {e}")
+        # If error is about channels, e.g. up has C1 channels, processed_skip_tensor has C2, then C1+C2 is the new channel count.
+        # The error might be if they are expected to be the same for some reason by a later layer, which is not typical for concat.
+        # More likely the spatial dimensions were still not fully resolved, or a None dimension issue.
+        raise e
+
+    conv = layers.Conv2D(num_filters, 3, activation='relu', padding='same', kernel_initializer=kernel_initializer, name=f'{block_name}_conv1')(merge)
+    conv = layers.Conv2D(num_filters, 3, activation='relu', padding='same', kernel_initializer=kernel_initializer, name=f'{block_name}_conv2')(conv)
+    return conv
+
+
+def unet_model(output_channels: int, image_size: tuple, model_config: dict, data_config: dict):
     """Builds a U-Net model with a dynamic backbone and potentially multi-modal input.
     Args:
         output_channels: Number of output channels (e.g., 1 for binary segmentation).
@@ -135,30 +180,32 @@ def unet_model(output_channels: int, image_size: tuple, model_config: dict, data
 
     skip_connection_layers = []
     encoder_output = None
+    fused_bottleneck = None # Will hold the features after image and PC fusion
 
+    # --- Image Backbone (Encoder) --- #
     if backbone_name and backbone_name.lower() != 'none' and backbone_name.lower() != 'unet_scratch':
         # Create the backbone
         if backbone_input_channels != 3:
-            logger.warning(f"Backbone '{backbone_name}' typically expects 3 input channels, but got {backbone_input_channels} (RGB+Depth)."
+            logger.info(f"Backbone '{backbone_name}' typically expects 3 input channels, but got {backbone_input_channels} (RGB+Depth)."
                            f" Adding a Conv2D layer to project to 3 channels before the backbone.")
             processed_for_backbone = layers.Conv2D(3, (1, 1), padding='same', activation='relu', name='project_to_3_channels')(current_backbone_input)
         else:
             processed_for_backbone = current_backbone_input
 
-        weights = model_config.get('backbone_weights', 'imagenet')
+        weights = None # Diagnostic: build without imagenet weights
         trainable_backbone = model_config.get('backbone_trainable', True)
 
-        if backbone_name == 'EfficientNetB0':
+        if backbone_name.lower() == 'efficientnetb0':
             base_model = EfficientNetB0(input_tensor=processed_for_backbone, include_top=False, weights=weights)
             # Skip connections from EfficientNetB0 (example layer names, may need adjustment)
-            skip_names = ['block2a_expand_activation', 'block3a_expand_activation', 'block4a_expand_activation', 'block6a_expand_activation'] # for B0
-            # Use 'top_activation' or similar for final encoder output before bottleneck
-            encoder_output_layer_name = 'top_activation' 
-        elif backbone_name == 'ResNet50V2':
+            skip_names = model_config.get('skip_connection_layer_names', ['block2a_expand_activation', 'block3a_expand_activation', 'block4a_expand_activation', 'block6a_expand_activation']) # for B0
+            # Use 'top_activation' or similar for final encoder output before bottleneck, or fetch from config
+            encoder_output_layer_name = model_config.get('encoder_output_layer_name', 'top_activation') 
+        elif backbone_name.lower() == 'resnet50v2':
             base_model = ResNet50V2(input_tensor=processed_for_backbone, include_top=False, weights=weights)
             # Skip connections for ResNet50V2
-            skip_names = ['conv1_conv', 'conv2_block3_out', 'conv3_block4_out', 'conv4_block6_out'] # Adjust based on inspection
-            encoder_output_layer_name = 'post_relu' # Or the output of the last conv block
+            skip_names = model_config.get('skip_connection_layer_names', ['conv1_conv', 'conv2_block3_out', 'conv3_block4_out', 'conv4_block6_out']) # Adjust based on inspection
+            encoder_output_layer_name = model_config.get('encoder_output_layer_name', 'post_relu') # Or the output of the last conv block
         # Add more backbones here as elif clauses
         else:
             raise ValueError(f"Unsupported backbone: {backbone_name}. Please add its configuration.")
@@ -166,12 +213,27 @@ def unet_model(output_channels: int, image_size: tuple, model_config: dict, data
         base_model.trainable = trainable_backbone
         encoder_output = base_model.get_layer(encoder_output_layer_name).output
         
-        for name in skip_names:
-            skip_connection_layers.append(base_model.get_layer(name).output)
-        skip_connection_layers.reverse() # Decoder uses them from deep to shallow
-        logger.info(f"Using {backbone_name} as encoder. Trainable: {trainable_backbone}. Skip layers: {skip_names}")
-    else:
-        logger.info("Building U-Net encoder from scratch (no pre-trained backbone or 'unet_scratch' specified).")
+        # Ensure encoder_output is set correctly from the backbone
+        if not base_model.get_layer(encoder_output_layer_name):
+            logger.error(f"Critical: Encoder output layer '{encoder_output_layer_name}' not found in backbone {backbone_name}. Available layers: {[l.name for l in base_model.layers]}")
+            raise ValueError(f"Encoder output layer '{encoder_output_layer_name}' not found in backbone {backbone_name}.")
+        logger.info(f"Image backbone '{backbone_name}' output (encoder_output) shape: {encoder_output.shape}")
+
+        # Collect actual skip layer OUTPUT TENSORS from the base_model, based on names in config
+        backbone_skip_outputs = {} # Maps NAME to TENSOR for actual backbone layers
+        _configured_skip_names = model_config.get('skip_connection_layer_names', [])
+        for name in _configured_skip_names:
+            if name == 'MODEL_INPUT': # 'MODEL_INPUT' is not from the backbone model itself
+                continue
+            try:
+                layer_output = base_model.get_layer(name).output
+                backbone_skip_outputs[name] = layer_output
+                logger.info(f"Successfully fetched skip layer tensor for '{name}' (shape: {layer_output.shape}) from backbone.")
+            except ValueError:
+                logger.warning(f"Skip connection layer '{name}' (specified in config) not found in backbone '{backbone_name}'. Will be problematic if used in decoder.")
+        logger.info(f"Collected {len(backbone_skip_outputs)} skip connection TENSORS from backbone.")
+
+    elif backbone_name and backbone_name.lower() == 'unet_scratch':
         # == U-Net Encoder (Downsampling path) - takes 'current_backbone_input' (RGB or RGB+Depth) ==
         # Block 1
         conv1 = layers.Conv2D(64, 3, activation='relu', padding='same', kernel_initializer=kernel_initializer)(current_backbone_input)
@@ -197,93 +259,89 @@ def unet_model(output_channels: int, image_size: tuple, model_config: dict, data
         encoder_output = layers.Dropout(dropout_rate)(conv4)
         # No skip from bottleneck itself for standard U-Net, last skip is conv3 (or conv4 if pool3 is used as bottleneck input for decoder)
         # skip_connection_layers.append(conv4) # This would be the bottleneck itself if used as a skip
-        skip_connection_layers.reverse() # From deep (conv3) to shallow (conv1)
+        # skip_connection_layers.reverse() # From deep (conv3) to shallow (conv1)
 
-    # == Point Cloud Processing Branch (if enabled) ==
-    pc_features_for_fusion = None
-    if data_config.get('use_point_cloud', False) and 'pc_input' in input_layers_dict:
-        pc_input_tensor = input_layers_dict['pc_input']
-        # Mini-PointNet style encoder
-        pc_conv1 = layers.Conv1D(64, kernel_size=1, padding='same', activation='relu', kernel_initializer=kernel_initializer)(pc_input_tensor)
-        pc_bn1 = layers.BatchNormalization()(pc_conv1)
-        pc_conv2 = layers.Conv1D(128, kernel_size=1, padding='same', activation='relu', kernel_initializer=kernel_initializer)(pc_bn1)
-        pc_bn2 = layers.BatchNormalization()(pc_conv2)
-        pc_conv3 = layers.Conv1D(256, kernel_size=1, padding='same', activation='relu', kernel_initializer=kernel_initializer)(pc_bn2)
-        pc_bn3 = layers.BatchNormalization()(pc_conv3)
-        pc_global_features = layers.GlobalMaxPooling1D()(pc_bn3) # Shape: (batch_size, 256)
-        pc_features_for_fusion = pc_global_features
-        logger.info(f"Point cloud branch processed. Global features shape: {pc_features_for_fusion.shape}")
+    else: # No backbone, implies a very simple direct path (not typical for U-Net)
+        logger.warning("No backbone specified, and not 'unet_scratch'. Using 'current_backbone_input' directly as encoder_output. This is unusual for a U-Net.")
+        encoder_output = current_backbone_input # This would be RGB or RGB+D
 
-    # == Fusion of U-Net Bottleneck (encoder_output) with Point Cloud Features (if enabled) ==
-    fused_bottleneck = encoder_output
-    if pc_features_for_fusion is not None:
-        bottleneck_shape = tf.shape(encoder_output) # Dynamic shape
-        target_height = bottleneck_shape[1]
-        target_width = bottleneck_shape[2]
-
-        pc_feat_expanded = layers.Reshape((1, 1, pc_features_for_fusion.shape[-1]))(pc_features_for_fusion)
-        pc_feat_tiled = layers.Lambda(lambda x: tf.tile(x[0], [1, tf.shape(x[1])[1], tf.shape(x[1])[2], 1]), name='tile_pc_features')([pc_feat_expanded, encoder_output])
-
-        fused_bottleneck = layers.concatenate([encoder_output, pc_feat_tiled], axis=-1)
-        logger.info(f"U-Net bottleneck fused with tiled point cloud features. New bottleneck shape: {fused_bottleneck.shape}")
-
-    # == U-Net Decoder (Upsampling path) ==
-    current_decoder_features = fused_bottleneck
-    # Number of upsampling blocks should match number of skip connections from encoder - 1 (if bottleneck is not a skip)
-    # Or, iterate through skip_connection_layers
-    # For scratch U-Net: conv3, conv2, conv1 as skips. Decoder stages: 3
-    # For backbone: len(skip_connection_layers) stages.
+    current_features = encoder_output # This is the bottleneck, e.g., 8x8
     
-    num_decoder_blocks = len(skip_connection_layers)
-    decoder_filters = [256, 128, 64, 32] # Example, adjust based on backbone or desired complexity
-    if backbone_name and backbone_name.lower() != 'none' and backbone_name.lower() != 'unet_scratch':
-        # For backbones, skip layers are already reversed (deepest first)
-        # Bottleneck is 'encoder_output'. Decoder starts from there.
-        pass # Filters might need to match skip connection channels
-    else: # Scratch U-Net
-        decoder_filters = [256, 128, 64] # For the 3 upsampling stages if bottleneck is 512
+    # --- Decoder --- #
+    # These names from config will drive the decoder loop
+    decoder_skip_names_from_config = model_config.get('skip_connection_layer_names', [])
+    decoder_filters_from_config = model_config.get('decoder_filters', [])
+    upsampling_type = model_config.get('upsampling_type', 'conv_transpose') # Default
 
-    for i in range(num_decoder_blocks):
-        skip_feat = skip_connection_layers[i]
-        num_filters = decoder_filters[i] if i < len(decoder_filters) else decoder_filters[-1]
+    num_decoder_blocks = min(len(decoder_skip_names_from_config), len(decoder_filters_from_config))
+    
+    logger.info(f"Starting decoder construction with {num_decoder_blocks} blocks.")
+    logger.info(f"  Decoder skip names (from config): {decoder_skip_names_from_config[:num_decoder_blocks]}")
+    logger.info(f"  Decoder filters (from config): {decoder_filters_from_config[:num_decoder_blocks]}")
 
-        up = layers.Conv2DTranspose(num_filters, (2,2), strides=(2,2), padding='same')(current_decoder_features)
-        # Ensure spatial dimensions of skip_feat and up are compatible for concatenation
-        # This might require cropping skip_feat if padding='valid' was used in encoder, or ensuring 'same' padding everywhere.
-        # Or, resize 'up' to match 'skip_feat' if dynamic shapes cause slight mismatches.
-        # up = layers.Resizing(tf.shape(skip_feat)[1], tf.shape(skip_feat)[2])(up) # Example if needed
+    for i, (skip_feat_name, num_out_filters) in enumerate(zip(
+            decoder_skip_names_from_config[:num_decoder_blocks],
+            decoder_filters_from_config[:num_decoder_blocks]
+        )):
         
-        # Check for channel mismatch before concatenation if skip_feat comes from a varied backbone
-        # Ensure 'up' has compatible number of channels or project skip_feat if necessary.
-        if up.shape[-1] != skip_feat.shape[-1]:
-             logger.warning(f"Channel mismatch for skip connection {i}. Up-sampled: {up.shape[-1]}, Skip: {skip_feat.shape[-1]}. Adjusting skip connection.")
-             # This simple projection might not be ideal. Better to ensure decoder filters match skip connection channels.
-             # Or, ensure skip layers from backbone are chosen such that their channel counts align with typical U-Net decoder stages.
-             projected_skip_feat = layers.Conv2D(up.shape[-1], (1,1), padding='same', activation='relu')(skip_feat)
-             merge = layers.concatenate([projected_skip_feat, up], axis=3)
+        skip_feature_tensor = None # This will hold the actual tensor for the skip connection
+        if skip_feat_name == 'MODEL_INPUT':
+            skip_feature_tensor = current_backbone_input # Use the original model input (e.g., 256x256)
+            logger.info(f"Using 'MODEL_INPUT' (shape: {skip_feature_tensor.shape}) as skip connection for decoder block {i+1}.")
+        elif skip_feat_name in backbone_skip_outputs:
+            skip_feature_tensor = backbone_skip_outputs[skip_feat_name]
+            # logger.info(f"Using backbone skip '{skip_feat_name}' (shape: {skip_feature_tensor.shape}) for decoder block {i+1}.")
         else:
-             merge = layers.concatenate([skip_feat, up], axis=3)
+            logger.warning(f"Skip connection name '{skip_feat_name}' (from config) not found in collected backbone outputs or is not 'MODEL_INPUT'. Stopping decoder construction.")
+            break # Critical: stop decoder if a required skip is missing
+            
+        logger.info(f"Decoder block {i+1}: current_features_in={current_features.shape}, skip_feature_to_use='{skip_feat_name}' (tensor_shape={skip_feature_tensor.shape}), num_out_filters={num_out_filters}")
+        
+        current_features = build_decoder_block(
+            input_tensor=current_features,
+            skip_feature_tensor=skip_feature_tensor,
+            num_filters=num_out_filters,
+            upsampling_type=upsampling_type,
+            kernel_initializer=kernel_initializer,
+            block_name=f'decoder_block_{i+1}'
+        )
+        logger.info(f"Output of decoder_block_{i+1}: {current_features.shape}")
 
-        conv = layers.Conv2D(num_filters, 3, activation='relu', padding='same', kernel_initializer=kernel_initializer)(merge)
-        conv = layers.Conv2D(num_filters, 3, activation='relu', padding='same', kernel_initializer=kernel_initializer)(conv)
-        current_decoder_features = conv
+    conv_final_stage = current_features 
+    logger.info(f"DEBUG: Shape of tensor BEFORE final output conv layer: {conv_final_stage.shape}")
 
-    # Output layer
-    final_activation = model_config.get('activation', 'sigmoid') 
-    outputs = layers.Conv2D(output_channels, 1, activation=final_activation)(current_decoder_features)
-
-    # Determine the final list of input tensors for the tf.keras.Model
-    # 'encoder_inputs_list' contains all Input layers (rgb, depth, pc)
-    model_inputs_final = []
-    if 'rgb_input' in input_layers_dict: model_inputs_final.append(input_layers_dict['rgb_input'])
-    if 'depth_input' in input_layers_dict: model_inputs_final.append(input_layers_dict['depth_input'])
-    if 'pc_input' in input_layers_dict: model_inputs_final.append(input_layers_dict['pc_input'])
+    # Final output layer
+    output_activation = model_config.get('output_activation', 'sigmoid' if output_channels == 1 else 'softmax')
+    outputs = layers.Conv2D(output_channels, (1, 1), padding="same", activation=output_activation, name='final_output_conv')(conv_final_stage)
+    logger.info(f"DEBUG: Shape of model OUTPUTS after final conv layer: {outputs.shape}")
     
-    if not model_inputs_final:
+    # Build the Keras model
+    model_inputs = [rgb_input]
+    if data_config.get('use_depth_map', False):
+        model_inputs.append(depth_input)
+    if data_config.get('use_point_cloud', False):
+        model_inputs.append(pc_input)
+    
+    if not model_inputs:
         raise ValueError("No Keras Input layers were collected for the model construction.")
     
-    model = tf.keras.Model(inputs=model_inputs_final, outputs=outputs)
-    logger.info(f"U-Net model built with final activation: {final_activation}.")
+    model = tf.keras.Model(inputs=model_inputs, outputs=outputs)
+    logger.critical(f"CRITICAL_FINAL_MODEL_OUTPUT_SHAPE_CONFIRMATION: {model.output_shape}")
+
+    # Save model summary to a file
+    summary_file_path = "model_summary.txt" # Will be saved in the CWD of train.py
+    try:
+        with open(summary_file_path, 'w') as f:
+            model.summary(print_fn=lambda x: f.write(x + '\n'))
+        logger.info(f"Model summary saved to {summary_file_path}")
+    except Exception as e:
+        logger.error(f"Could not save model summary to {summary_file_path}: {e}")
+
+    # Log model summary if verbosity is high enough
+    if logger.getEffectiveLevel() <= logging.DEBUG:
+        model.summary(print_fn=logger.info)
+
+    logger.info(f"U-Net model built with final activation: {output_activation}.")
     return model
 
 def main():
@@ -293,7 +351,7 @@ def main():
 
     logger.info("Starting segmentation model training...")
 
-    train_dataset, val_dataset, test_dataset = load_segmentation_data(config) # load_segmentation_data returns three datasets
+    train_dataset, val_dataset, test_dataset, num_train_samples = load_segmentation_data(config) # load_segmentation_data returns three datasets
 
     if train_dataset is None:
         logger.error("Failed to load training dataset. Exiting.")
@@ -304,8 +362,36 @@ def main():
     _test_data_loading(train_dataset, data_cfg_for_test, num_batches_to_test=2) 
     # --- End Data Loading Test ---
 
+    logger.info("--- Checking train_dataset structure just before model.compile ---")
+    # Take one batch to inspect its structure
+    for pre_compile_batch_data in train_dataset.take(1):
+        pre_compile_inputs, pre_compile_masks = pre_compile_batch_data
+        if isinstance(pre_compile_inputs, dict):
+            logger.info("Pre-compile inputs is a dictionary. Keys and shapes:")
+            for k, v_tensor in pre_compile_inputs.items():
+                if hasattr(v_tensor, 'shape'):
+                    logger.info(f"  inputs_dict['{k}']: shape={v_tensor.shape}, dtype={v_tensor.dtype}")
+                else:
+                    logger.info(f"  inputs_dict['{k}']: (not a tensor, type: {type(v_tensor)}) {v_tensor}")
+        elif hasattr(pre_compile_inputs, 'shape'): # If it's a single tensor
+            logger.info(f"Pre-compile inputs (single tensor): shape={pre_compile_inputs.shape}, dtype={pre_compile_inputs.dtype}")
+        else: # Other unexpected structure
+            logger.info(f"Pre-compile inputs (unexpected structure): {type(pre_compile_inputs)}")
+        
+        if hasattr(pre_compile_masks, 'shape'):
+            logger.info(f"Pre-compile masks: shape={pre_compile_masks.shape}, dtype={pre_compile_masks.dtype}")
+        else:
+            logger.info(f"Pre-compile masks (unexpected structure): {type(pre_compile_masks)}")
+    logger.info("--- End of pre-compile dataset check ---")
+
     data_cfg = config.get('data', {})
     model_cfg = config.get('model', {})
+
+    # Ensure weights_path is None if load_weights is False, to prevent Keras from implicitly trying to load.
+    if not model_cfg.get('load_weights', False): # Default to False if key is missing
+        logger.info("model_cfg['load_weights'] is False. Ensuring 'weights_path' is not used by setting it to None.")
+        model_cfg['weights_path'] = None
+
     training_cfg = config.get('training', {})
     optimizer_cfg = config.get('optimizer', {}) # Corrected: Get from root config
     loss_cfg = config.get('loss', {})           # Corrected: Get from root config
@@ -334,7 +420,7 @@ def main():
         raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
     loss_fn_name = loss_cfg.get('name', 'BinaryCrossentropy').lower()
-    if loss_fn_name == 'binarycrossentropy':
+    if loss_fn_name == 'binary_crossentropy': 
         # Determine from_logits based on whether the model's final layer has a sigmoid
         # This should align with the 'activation' specified in the model_cfg for the unet_model
         model_final_activation = model_cfg.get('activation', 'sigmoid') # Default to 'sigmoid' if not specified
@@ -352,7 +438,7 @@ def main():
         m_name_lower = m_name.lower()
         if m_name_lower == 'accuracy':
             metrics_list.append('accuracy')
-        elif m_name_lower == 'meaniou':
+        elif m_name_lower == 'mean_iou': # MODIFIED: Added underscore
             num_classes_metric = model_cfg.get('num_classes_for_metric', 2) # Typically 2 for binary (bg/fg)
             metrics_list.append(tf.keras.metrics.MeanIoU(num_classes=num_classes_metric, name='mean_iou'))
         # Add other metrics as needed
@@ -459,26 +545,34 @@ def main():
     logger.info(f"Final trained model saved to: {str(final_model_path_obj)}")
 
     # Evaluate on test set if available
-    if test_dataset:
-        logger.info("Evaluating model on test set...")
-        # Load the best model if ModelCheckpoint was used and saved best
-        best_model_path = None
-        if callbacks_config.get('model_checkpoint', {}).get('enabled', True) and callbacks_config['model_checkpoint'].get('save_best_only', True):
-            # Construct the path to the best model if a template was used; this might be tricky if exact filename changed
-            # For simplicity, we're assuming the final model after training (with restore_best_weights from EarlyStopping) is good
-            # Or, one could list files in model_dir_abs and pick the one with 'best' if naming convention is consistent.
-            # Here, we'll evaluate the 'model' object, which should have the best weights if EarlyStopping restored them.
-            pass # Using current 'model' which should have best weights if restore_best_weights=True
-
+    evaluate_on_test_set = config.get('evaluate_on_test_set', True)
+    if evaluate_on_test_set and test_dataset:
+        logger.info("Evaluating model on the test set after training...") # Indented and slightly changed comment
+        # The 'model' object should have the best weights if EarlyStopping with restore_best_weights=True was used.
         test_results = model.evaluate(test_dataset, verbose=1)
         logger.info("Test Set Evaluation Results:")
-        for metric_name, value in zip(model.metrics_names, test_results):
-            logger.info(f"  {metric_name}: {value:.4f}")
-    else:
-        logger.info("No test dataset provided for evaluation.")
+        if isinstance(test_results, list): # If model has multiple metrics
+            for metric_name, value in zip(model.metrics_names, test_results):
+                logger.info(f"  {metric_name}: {value}")
+        else: # Single loss value
+            logger.info(f"  loss: {test_results}")
+
+    if config.get('export_model_to_tflite', False):
+        # Export model to TFLite
+        logger.info("Exporting model to TFLite...")
+        converter = tf.lite.TFLiteConverter.from_keras_model(model)
+        tflite_model = converter.convert()
+        tflite_model_path = model_dir_abs / f'unet_segmentation_{timestamp}.tflite'
+        with open(tflite_model_path, 'wb') as f:
+            f.write(tflite_model)
+        logger.info(f"TFLite model saved to: {tflite_model_path}")
 
 if __name__ == '__main__':
     try:
         main()
     except Exception as e:
         logger.error(f"An error occurred in the segmentation training script: {e}", exc_info=True)
+        print("--- FULL TRACEBACK ---")
+        traceback.print_exc() 
+        print("--- END TRACEBACK ---")
+        sys.exit(1)
