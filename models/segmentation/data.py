@@ -155,7 +155,8 @@ def _build_geometric_augmentation_layer(aug_config_dict: Dict, target_height: in
 def _apply_segmentation_augmentations_impl(
     inputs_dict: Dict[str, tf.Tensor], 
     mask_tensor: tf.Tensor, 
-    aug_config_dict: Dict
+    aug_config_dict: Dict,
+    geometric_aug_layer: tf.keras.Sequential # ADDED: Pass pre-built layer
 ) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
     """Applies configured augmentations. Geometric augmentations are applied consistently to RGB, Depth (if enabled), and Mask."""
     
@@ -165,9 +166,6 @@ def _apply_segmentation_augmentations_impl(
 
     target_height = tf.shape(rgb_image)[0]
     target_width = tf.shape(rgb_image)[1]
-
-    # --- Build Geometric Augmentation Layer ---
-    geometric_aug_layer = _build_geometric_augmentation_layer(aug_config_dict, target_height, target_width)
 
     # --- Apply Geometric Augmentations Consistently ---
     # Concatenate tensors that need consistent geometric transformation
@@ -253,13 +251,14 @@ def _augment_preprocess_segmentation_conditionally(
     mask_normalized: tf.Tensor, 
     should_augment: tf.Tensor, 
     aug_config: Dict,
-    model_preprocess_fn: Optional[Callable] # e.g., ResNet's preprocess_input
+    model_preprocess_fn: Optional[Callable], # e.g., ResNet's preprocess_input
+    prebuilt_geometric_layer: tf.keras.Sequential # ADDED: Pass pre-built layer
 ) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
     """Conditionally applies augmentations and always applies model preprocessing to RGB."""
     
     def augment_first_then_preprocess_rgb() -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
         augmented_inputs, augmented_mask = _apply_segmentation_augmentations_impl(
-            inputs_for_aug, mask_normalized, aug_config
+            inputs_for_aug, mask_normalized, aug_config, prebuilt_geometric_layer # MODIFIED: Pass layer
         )
         if model_preprocess_fn is not None and 'rgb_input' in augmented_inputs:
             augmented_inputs['rgb_input'] = model_preprocess_fn(augmented_inputs['rgb_input'])
@@ -288,9 +287,14 @@ def load_and_preprocess_segmentation(
     use_depth_map_tensor: tf.Tensor,
     depth_prep_cfg_dict: Dict, 
     use_point_cloud_tensor: tf.Tensor,
-    pc_prep_cfg_dict: Dict 
+    pc_prep_cfg_dict: Dict,
+    prebuilt_geometric_layer: tf.keras.Sequential # ADDED: Pass pre-built layer
 ) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
-    image_path_tensor, depth_path_tensor, pc_path_tensor, mask_path_tensor = input_paths_tuple
+    # Unpack the tensor elements. In graph mode, input_paths_tuple is a 1D tensor.
+    image_path_tensor = input_paths_tuple[0]
+    depth_path_tensor = input_paths_tuple[1]
+    pc_path_tensor = input_paths_tuple[2]
+    mask_path_tensor = input_paths_tuple[3]
 
     try:
         # --- RGB Image Processing ---
@@ -376,20 +380,26 @@ def load_and_preprocess_segmentation(
         inputs_for_aug['pc_input'] = pc_input_tensor_val
         
         final_processed_inputs, final_mask = _augment_preprocess_segmentation_conditionally(
-            inputs_for_aug,
-            mask_float32_normalized,
+            inputs_for_aug, 
+            mask_float32_normalized, 
             augment_tensor, 
             captured_aug_config_dict if captured_aug_config_dict is not None else {},
-            captured_preprocess_input_fn
+            captured_preprocess_input_fn,
+            prebuilt_geometric_layer # MODIFIED: Pass layer
         )
         
         return final_processed_inputs, final_mask
 
-    except Exception as e:
+    except Exception as e: 
+        # Log the error with a simpler message. tf.strings.as_string(e) is problematic.
+        error_message = "Error processing segmentation sample. Check logs for details."
         tf.print("Error in load_and_preprocess_segmentation (fallback): paths=", 
                  image_path_tensor, depth_path_tensor, pc_path_tensor, mask_path_tensor, 
-                 "Error:", tf.strings.as_string(e), output_stream=sys.stderr)
+                 "ErrorMessage:", error_message, 
+                 output_stream=sys.stderr)
         
+        logger.error(f"Exception in TF graph load_and_preprocess_segmentation for {image_path_tensor}, {mask_path_tensor}: {e}", exc_info=True)
+        # Fallback: return zero tensors
         dummy_image_shape = [target_size_py[0], target_size_py[1], 3]
         dummy_depth_shape = [target_size_py[0], target_size_py[1], 1]
         dummy_mask_shape  = [target_size_py[0], target_size_py[1], 1]
@@ -441,29 +451,30 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         with open(metadata_file, 'r') as f:
             metadata = json.load(f)
 
-        # Check for 'items' key existence in metadata
-        if 'items' not in metadata or not metadata['items']:
-            logger.error(f"'items' key not found or empty in metadata: {metadata_file}")
+        # Directly use the loaded list if it's not empty
+        if not isinstance(metadata, list) or not metadata:
+            logger.error(f"Metadata file {metadata_file} does not contain a valid list of items or is empty.")
             return None, None, None, 0
 
         # Prepare file paths and labels
         all_rgb_paths, all_depth_paths, all_pc_paths, all_mask_paths, all_labels = [], [], [], [], []
-        for item_id, item_data in metadata['items'].items():
+        # Iterate directly over the list of items (dictionaries)
+        for item_data in metadata:
             if not isinstance(item_data, dict):
-                logger.warning(f"Skipping item_id {item_id} due to unexpected data format: {item_data}")
+                logger.warning(f"Skipping item due to unexpected data format: {item_data}")
                 continue
             
             # Construct full RGB path relative to metadata file's directory
-            rgb_rel_path = item_data.get('rgb_image_path')
+            rgb_rel_path = item_data.get('image_path') # Corrected key from 'rgb_image_path'
             if not rgb_rel_path:
-                logger.warning(f"Skipping item_id {item_id} due to missing 'rgb_image_path'.")
+                logger.warning(f"Skipping item due to missing 'image_path'.") # Corrected key in warning
                 continue
             full_rgb_path = str(metadata_dir / rgb_rel_path)
 
             # Construct full mask path relative to metadata file's directory
             mask_rel_path = item_data.get('mask_path')
             if not mask_rel_path:
-                logger.warning(f"Skipping item_id {item_id} due to missing 'mask_path'.")
+                logger.warning(f"Skipping item due to missing 'mask_path'.")
                 continue
             full_mask_path = str(metadata_dir / mask_rel_path)
 
@@ -554,6 +565,15 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         model_arch = model_cfg.get('backbone', 'UNet') # from model config
         captured_preprocess_input_fn_seg = _get_segmentation_preprocess_fn(model_arch)
 
+        # Build the geometric augmentation layer ONCE
+        # Use a default empty dict if aug_cfg is None, though it should be present from config
+        _aug_cfg_for_build = captured_aug_config if captured_aug_config is not None else {}
+        prebuilt_geometric_layer = _build_geometric_augmentation_layer(
+            _aug_cfg_for_build, 
+            target_size_py[0], 
+            target_size_py[1]
+        )
+
         # Convert boolean flags to tensors for tf.cond inside map_fn
         use_depth_map_tensor = tf.constant(use_depth, dtype=tf.bool)
         use_point_cloud_tensor = tf.constant(use_pc, dtype=tf.bool)
@@ -561,7 +581,7 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         # Note: depth_prep_cfg and pc_prep_cfg are already Python dicts, suitable for passing directly
 
         # Partial function for mapping
-        def _map_fn(paths_tuple, label_dummy, augment_flag): # label_dummy is not used by load_and_preprocess_segmentation
+        def _map_fn(paths_tuple, label_dummy, augment_flag, geometric_layer_instance): # MODIFIED: Add geometric_layer_instance
             return load_and_preprocess_segmentation(
                 paths_tuple, 
                 target_size_py, 
@@ -573,25 +593,26 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                 use_depth_map_tensor,
                 depth_prep_cfg, 
                 use_point_cloud_tensor,
-                pc_prep_cfg
+                pc_prep_cfg,
+                geometric_layer_instance # MODIFIED: Pass instance
             )
 
         # Create datasets
         train_dataset = tf.data.Dataset.from_tensor_slices((train_paths, [0]*len(train_paths))) # Dummy labels for slice structure
         train_dataset = train_dataset.shuffle(buffer_size=len(train_paths), seed=random_seed, reshuffle_each_iteration=True)
-        train_dataset = train_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(True)), num_parallel_calls=tf.data.AUTOTUNE)
+        train_dataset = train_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(True), prebuilt_geometric_layer), num_parallel_calls=tf.data.AUTOTUNE) # MODIFIED: Pass layer
         train_dataset = train_dataset.batch(batch_size)
         train_dataset = train_dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
 
         val_dataset = tf.data.Dataset.from_tensor_slices((val_paths, [0]*len(val_paths)))
-        val_dataset = val_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(False)), num_parallel_calls=tf.data.AUTOTUNE)
+        val_dataset = val_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(False), prebuilt_geometric_layer), num_parallel_calls=tf.data.AUTOTUNE) # MODIFIED: Pass layer
         val_dataset = val_dataset.batch(batch_size)
         val_dataset = val_dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
 
         test_dataset = None
         if test_paths:
             test_dataset = tf.data.Dataset.from_tensor_slices((test_paths, [0]*len(test_paths)))
-            test_dataset = test_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(False)), num_parallel_calls=tf.data.AUTOTUNE)
+            test_dataset = test_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(False), prebuilt_geometric_layer), num_parallel_calls=tf.data.AUTOTUNE) # MODIFIED: Pass layer
             test_dataset = test_dataset.batch(batch_size)
             test_dataset = test_dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
 
