@@ -1,3 +1,4 @@
+print("TRAIN.PY TOP LEVEL PRINT STATEMENT EXECUTING NOW") # CASCADE_DIAGNOSTIC_PRINT
 import os
 import sys
 import yaml
@@ -30,11 +31,9 @@ def load_config(config_path: str) -> dict:
     """Loads the YAML configuration file."""
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
-    logger.info(f"Configuration loaded from {config_path}")
     return config
 
 def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_batches_to_test: int = 2):
-    logger.info(f"--- Starting Data Loading Test for {num_batches_to_test} batches ---")
     if train_dataset is None:
         logger.error("Training dataset is None. Skipping data loading test.")
         return
@@ -43,7 +42,6 @@ def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_ba
     use_pc = data_config.get('use_point_cloud', False)
 
     for i, batch_data in enumerate(train_dataset.take(num_batches_to_test)):
-        logger.info(f"--- Batch {i+1} ---")
         inputs_dict, mask_tensor = batch_data
 
         if not isinstance(inputs_dict, dict):
@@ -78,9 +76,6 @@ def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_ba
         unique_values, _ = tf.unique(tf.reshape(mask_tensor, [-1]))
         logger.info(f"  mask_tensor: Unique values={unique_values.numpy()}")
         
-    logger.info("--- Data Loading Test Finished ---")
-
-
 def build_decoder_block(input_tensor, skip_feature_tensor, num_filters, kernel_size=(3,3), strides=(2,2), upsampling_type='conv_transpose', kernel_initializer='he_normal', block_name=''):
     if upsampling_type == 'conv_transpose':
         up = layers.Conv2DTranspose(num_filters, kernel_size, strides=strides, padding='same', name=f'{block_name}_transpose')(input_tensor)
@@ -92,19 +87,14 @@ def build_decoder_block(input_tensor, skip_feature_tensor, num_filters, kernel_s
     else:
         raise ValueError(f"Unsupported upsampling_type: {upsampling_type}")
 
-    logger.info(f"DEBUG [{block_name}]: up shape after upsampling: {up.shape}")
-    logger.info(f"DEBUG [{block_name}]: skip_feature_tensor shape: {skip_feature_tensor.shape}")
-
     processed_skip_tensor = skip_feature_tensor
     if up.shape[1] != skip_feature_tensor.shape[1] or up.shape[2] != skip_feature_tensor.shape[2]:
-        logger.info(f"DEBUG [{block_name}]: Spatial mismatch. Resizing skip_feature_tensor from HxW {skip_feature_tensor.shape[1:3]} to match up HxW {up.shape[1:3]}.")
         processed_skip_tensor = layers.Resizing(
             height=up.shape[1],
             width=up.shape[2],
             interpolation='bilinear', # Bilinear is often preferred for feature maps
             name=f'{block_name}_skip_resize'
         )(skip_feature_tensor)
-        logger.info(f"DEBUG [{block_name}]: processed_skip_tensor shape after Resizing: {processed_skip_tensor.shape}")
     
     # Concatenate the upsampled features with the (potentially resized) skip features
     # The original code also had a channel projection for skip features if channels didn't match 'up'.
@@ -405,6 +395,7 @@ def main():
                        image_size=(image_h, image_w), 
                        model_config=model_cfg, 
                        data_config=data_cfg) # Pass data_config
+    logger.info("U-Net model built successfully.")
 
     # Compile model
     learning_rate = optimizer_cfg.get('learning_rate', 1e-4)
@@ -515,25 +506,13 @@ def main():
         ))
         logger.info("ReduceLROnPlateau enabled.")
 
-    logger.info(f"Starting training for {epochs} epochs...")
-    logger.info(f"Training data examples: {train_dataset.unbatch().take(1) if hasattr(train_dataset, 'unbatch') else 'N/A'}") # Log one example
-    logger.info(f"Validation data examples: {val_dataset.unbatch().take(1) if val_dataset and hasattr(val_dataset, 'unbatch') else 'None'}")
-
-    fit_kwargs = {
-        'epochs': epochs,
-        'callbacks': callbacks_list,
-        'verbose': 1,
-    }
-
-    if val_dataset:
-        fit_kwargs['validation_data'] = val_dataset
-    else:
-        logger.info("No validation dataset provided or it's empty. Skipping validation during fit.")
-        # No need to explicitly pass validation_data=None if not present in kwargs
-
-    history = model.fit(
+    model.fit(
         train_dataset,
-        **fit_kwargs
+        epochs=training_cfg.get('epochs', 10),
+        validation_data=val_dataset,
+        callbacks=callbacks_list,
+        steps_per_epoch=training_cfg.get('debug_steps_per_epoch'),
+        validation_steps=training_cfg.get('debug_validation_steps')
     )
 
     logger.info("Training finished.")
@@ -571,8 +550,7 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as e:
-        logger.error(f"An error occurred in the segmentation training script: {e}", exc_info=True)
-        print("--- FULL TRACEBACK ---")
+        logger.error("Exception in main execution:", exc_info=True)
+        # Ensure the traceback is printed to stderr as well for visibility
         traceback.print_exc() 
-        print("--- END TRACEBACK ---")
-        sys.exit(1)
+        sys.exit(1) # Exit with a non-zero code to indicate failure
