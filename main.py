@@ -35,28 +35,47 @@ DEFAULT_SEGMENTATION_META_OUTPUT_DIR = "data/segmentation"
 
 def run_script(script_path, config_path=None, project_root='.', extra_args=None):
     """Helper function to run a Python script using subprocess."""
-    cmd = ['python', os.path.join(project_root, script_path)]
+    # Determine the full path to the script and its directory
+    full_script_path = os.path.join(project_root, script_path)
+    script_dir = os.path.dirname(full_script_path)
+
+    # Command to execute: python /path/to/script.py
+    # Using full_script_path ensures the correct script is called
+    cmd = ['python', full_script_path] 
+    
     if config_path:
-        cmd.extend(['--config', os.path.join(project_root, config_path)])
+        # Construct the absolute path to the config file.
+        # This is robust because the child process's CWD will change.
+        absolute_config_path = os.path.join(project_root, config_path)
+        cmd.extend(['--config', absolute_config_path])
+    
     if extra_args:
         cmd.extend(extra_args)
     
-    logger.info(f"Running command: {' '.join(cmd)}")
+    # Log the command and the CWD it will run from for better debugging
+    logger.info(f"Running command: {' '.join(cmd)} from CWD: {script_dir}")
     try:
-        process = subprocess.run(cmd, check=True, capture_output=True, text=True, cwd=project_root)
-        logger.info(f"Script {script_path} output:\n{process.stdout}")
-        if process.stderr:
-            logger.warning(f"Script {script_path} stderr:\n{process.stderr}")
-        logger.info(f"Successfully executed: {script_path}")
+        # Execute the subprocess with the script's own directory as the CWD
+        # Removed capture_output=True to allow direct streaming of stdout/stderr
+        process = subprocess.run(cmd, check=True, text=True, cwd=script_dir)
+        
+        # With capture_output=False (default), process.stdout and process.stderr will be None.
+        # The output will go directly to main.py's stdout/stderr.
+        # logger.info(f"Script {script_path} output:\n{process.stdout}") # This would be empty
+        # if process.stderr:
+        #    logger.warning(f"Script {script_path} stderr:\n{process.stderr}") # This would be empty
+        logger.info(f"Successfully executed: {script_path} (Return code: {process.returncode})")
         return True
     except subprocess.CalledProcessError as e:
-        logger.error(f"Error executing {script_path}:")
+        logger.error(f"Error executing {script_path} from CWD {script_dir}:")
         logger.error(f"Return code: {e.returncode}")
         logger.error(f"Stdout:\n{e.stdout}")
         logger.error(f"Stderr:\n{e.stderr}")
         return False
     except FileNotFoundError:
-        logger.error(f"Error: Script not found at {os.path.join(project_root, script_path)}. Ensure paths are correct.")
+        # This error typically means 'python' executable wasn't found in PATH,
+        # or the full_script_path itself is incorrect.
+        logger.error(f"Error: Script 'python' or '{full_script_path}' not found. Ensure Python is in PATH and script path is correct.")
         return False
 
 def prepare_data(args, project_root):
