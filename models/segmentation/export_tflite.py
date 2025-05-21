@@ -7,8 +7,7 @@ import tensorflow as tf
 from tensorflow import keras
 import numpy as np
 
-from data import load_segmentation_datasets, _get_project_root
-from train import dice_loss, dice_coefficient # Import custom objects
+from data import load_segmentation_data, _get_project_root # CORRECTED IMPORT
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -51,29 +50,72 @@ def export_model(config_path: str):
     paths_config = config.get('paths', {})
     model_save_dir_rel = paths_config.get('model_save_dir', 'trained_models/segmentation/')
     model_save_dir = os.path.join(project_root, model_save_dir_rel)
-    # Assume the final model saved by train.py is 'final_model.h5'
-    keras_model_path = os.path.join(model_save_dir, 'final_model.h5')
 
     export_config = config.get('export', {})
     tflite_filename = export_config.get('tflite_filename', 'segmentation_model.tflite')
-    tflite_export_dir_rel = paths_config.get('tflite_export_dir', os.path.join(model_save_dir_rel, 'tflite'))
+    tflite_export_dir_rel = paths_config.get('tflite_export_dir', os.path.join(model_save_dir_rel, 'exported'))
     tflite_export_dir = os.path.join(project_root, tflite_export_dir_rel)
     output_tflite_path = os.path.join(tflite_export_dir, tflite_filename)
 
+    # --- Dynamically find the Keras model file ---
+    keras_model_path = None
+    specified_model_filename = export_config.get('keras_model_filename')
+
+    if specified_model_filename:
+        potential_path = os.path.join(model_save_dir, specified_model_filename)
+        if os.path.exists(potential_path) and os.path.isfile(potential_path):
+            keras_model_path = potential_path
+            logger.info(f"Using Keras model specified in config: {specified_model_filename}")
+        else:
+            logger.warning(
+                f"Keras model specified in config ('{specified_model_filename}') not found at '{potential_path}'. \
+                Attempting to find latest model in '{model_save_dir}'."
+            )
+
+    if not keras_model_path:  # If not specified or specified file not found
+        if not os.path.isdir(model_save_dir):
+            logger.error(f"Model save directory not found: {model_save_dir}")
+            raise FileNotFoundError(f"Model save directory missing: {model_save_dir}")
+
+        h5_files = [
+            f for f in os.listdir(model_save_dir) 
+            if f.endswith('.h5') and os.path.isfile(os.path.join(model_save_dir, f))
+        ]
+
+        if not h5_files:
+            logger.error(f"No .h5 model files found in directory: {model_save_dir}")
+            raise FileNotFoundError(f"No .h5 Keras model files found in {model_save_dir}")
+
+        # Prefer files with "final" in their name (case-insensitive)
+        final_files = [f for f in h5_files if "final" in f.lower()]
+        
+        selected_file_list = final_files if final_files else h5_files
+        
+        # Get the most recently modified file from the selected list
+        try:
+            latest_model_file = max(
+                selected_file_list, 
+                key=lambda f: os.path.getmtime(os.path.join(model_save_dir, f))
+            )
+            keras_model_path = os.path.join(model_save_dir, latest_model_file)
+            if final_files and latest_model_file in final_files:
+                logger.info(f"Found 'final' model. Using latest: {latest_model_file} from {model_save_dir}")
+            else:
+                logger.info(f"No 'final' model found or specified one missing. Using latest .h5 model: {latest_model_file} from {model_save_dir}")
+        except ValueError: # Should not happen if h5_files is not empty
+             logger.error(f"Could not determine latest model file in {model_save_dir} from list: {selected_file_list}")
+             raise FileNotFoundError(f"Could not determine latest model file in {model_save_dir}")
+
     # Load Keras Model
+    # The check os.path.exists(keras_model_path) is still good as a final validation
     if not os.path.exists(keras_model_path):
         logger.error(f"Keras model file not found at: {keras_model_path}")
         raise FileNotFoundError(f"Model file missing: {keras_model_path}")
         
     logger.info(f"Loading Keras model from: {keras_model_path}")
-    # Define custom objects used during training (losses, metrics, potentially custom layers)
-    custom_objects = {
-        'dice_loss': dice_loss,
-        'dice_coefficient': dice_coefficient,
-    }
     try:
-        model = keras.models.load_model(keras_model_path, custom_objects=custom_objects)
-        logger.info("Keras model loaded successfully.")
+        model = keras.models.load_model(keras_model_path)
+        logger.info(f"Keras model loaded successfully from: {keras_model_path}")
         model.summary(print_fn=logger.info)
     except Exception as e:
         logger.error(f"Error loading Keras model: {e}", exc_info=True)
@@ -119,7 +161,12 @@ def export_model(config_path: str):
                      del repr_conf['data']['test_split']
                 repr_conf['data']['split_ratios'] = [1.0, 0.0, 0.0] # Load all as 'train'
 
-                train_ds, _, _ = load_segmentation_datasets(repr_conf) 
+                # CORRECTED USAGE:
+                # train_ds, _, _ = load_segmentation_datasets(repr_conf) 
+                # datasets_tuple returns: (train_dataset, val_dataset, test_dataset, steps_per_epoch, validation_steps, test_steps, num_classes)
+                datasets_tuple = load_segmentation_data(repr_conf) 
+                train_ds = datasets_tuple[0] # train_dataset is the first element
+
                 if train_ds is None:
                     raise ValueError("Failed to load dataset for representative data.")
                 
