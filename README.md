@@ -4,8 +4,9 @@ This project provides a comprehensive Python-based pipeline for detecting food i
 
 ## Key Features
 
-*   **Food Segmentation**: Identifies and masks food items using a U-Net-like model with an EfficientNet backbone (TFLite format).
-*   **Food Classification**: Classifies segmented food items using an EfficientNetV2 model (TFLite format).
+*   **End-to-End Pipeline Orchestration**: `main.py` serves as the central script to run various stages including data preparation, model training, TFLite model exportation, and inference for both classification and segmentation models.
+*   **Food Segmentation**: Identifies and masks food items using a U-Net-like model (architecture configurable, e.g., with an EfficientNet backbone). TFLite format supported for deployment.
+*   **Food Classification**: Classifies segmented food items (architecture configurable, e.g., MobileNetV3Small, EfficientNetV2). TFLite format supported for deployment.
 *   **Configurable Training Pipelines**: Includes scripts and YAML configurations for training both segmentation and classification models, supporting features like:
     *   Custom datasets (e.g., prepared from MetaFood3D).
     *   Data augmentation.
@@ -23,8 +24,16 @@ This project provides a comprehensive Python-based pipeline for detecting food i
     *   A local custom JSON database (`data/databases/custom_density_db.json`).
     *   USDA FoodData Central API (requires API key, with caching).
 *   **Mass & Calorie Calculation**: Estimates mass and total calories based on volume and nutritional data.
-*   **Modular and Configurable**: Key parameters, model paths, and settings are managed through YAML configuration files.
+*   **Modular and Configurable**: Key parameters, model paths, and settings are managed through YAML configuration files. Script execution from `main.py` is robust, ensuring correct working directories for sub-scripts.
 *   **Automated Testing**: Basic end-to-end pipeline tests using `unittest`.
+
+## Current Project Status (As of May 2025)
+
+*   The `main.py` script has been enhanced to orchestrate the full pre-inference pipeline.
+*   Individual data preparation scripts (`prepare_classification_dataset.py`, `prepare_segmentation_metadata.py`) are functional.
+*   Individual training scripts (`models/classification/train.py`, `models/segmentation/train.py`) have been successfully debugged for issues related to logging and execution when called from `main.py`.
+*   Segmentation model training shows logs and completes successfully when initiated via `main.py`.
+*   The next immediate step is to test the combined pipeline for: Classification Data Prep -> Classification Training -> Segmentation Data Prep -> Segmentation Training -> TFLite Export for both models, all orchestrated through `main.py`.
 
 ## Project Structure
 
@@ -35,7 +44,7 @@ Food-Detection/
 ├── README.md                 # This file
 ├── config_pipeline.yaml      # Configuration for the end-to-end inference pipeline
 ├── requirements.txt          # Python dependencies
-├── main.py                   # Entry point for running the inference pipeline
+├── main.py                   # Entry point for running the inference pipeline and other stages (data prep, training, export)
 ├── food_analyzer.py          # Core logic for the inference pipeline
 ├── train_all_colab.py        # Unified training script for Google Colab
 |
@@ -123,7 +132,16 @@ Food-Detection/
 
 ## Data Preparation
 
-Raw datasets like MetaFood3D need to be processed into a format suitable for the training scripts.
+Raw datasets like MetaFood3D need to be processed into a format suitable for the training scripts. This can be done using standalone scripts or orchestrated via `main.py`.
+
+*   **Using `main.py`:**
+    ```bash
+    # Prepare classification data
+    python main.py --prepare-classification-data --classification_input_dir path/to/classification/images --classification_output_meta_dir data/classification
+
+    # Prepare segmentation data
+    python main.py --prepare-segmentation-data --segmentation_rgbd_input_dir path/to/segmentation/rgbd --segmentation_pointcloud_input_dir path/to/segmentation/pc --segmentation_output_meta_dir data/segmentation
+    ```
 
 *   **Classification Data (`data/classification/`):**
     *   Images should be organized into subdirectories by class, or listed in `metadata.json` with their corresponding labels.
@@ -157,11 +175,24 @@ Configuration is managed through YAML files:
     *   `volume_params`: Parameters for volume calculation (e.g., depth cutoffs).
     *   `classification_confidence_threshold`: Minimum confidence for a classification to be considered valid.
 
-## Training Models (Locally)
+## Training Models
 
-Ensure data is prepared and configuration files (`models/*/config.yaml`) are set up correctly.
+Ensure data is prepared and configuration files (`models/*/config.yaml`) are set up correctly. Training can be initiated directly via model-specific scripts or through `main.py`.
 
-1.  **Train Classification Model:**
+*   **Using `main.py` (Recommended for pipeline consistency):**
+    ```bash
+    # Train classification model
+    python main.py --train-classification
+
+    # Train segmentation model
+    python main.py --train-segmentation
+
+    # Train both
+    python main.py --train-classification --train-segmentation
+    ```
+
+*   **Locally (Direct Scripts):**
+    1.  **Train Classification Model:**
     ```bash
     python models/classification/train.py --config models/classification/config.yaml
     ```
@@ -179,11 +210,24 @@ Ensure data is prepared and configuration files (`models/*/config.yaml`) are set
     tensorboard --logdir logs/segmentation
     ```
 
-## Exporting Models to TFLite (Locally)
+## Exporting Models to TFLite
 
-After training, export the Keras models to TensorFlow Lite format.
+After training, export the Keras models to TensorFlow Lite format. This can be done using standalone scripts or orchestrated via `main.py`.
 
-1.  **Export Classification Model:**
+*   **Using `main.py` (Recommended for pipeline consistency):**
+    ```bash
+    # Export classification model to TFLite
+    python main.py --export-classification-tflite
+
+    # Export segmentation model to TFLite
+    python main.py --export-segmentation-tflite
+
+    # Export both
+    python main.py --export-classification-tflite --export-segmentation-tflite
+    ```
+
+*   **Locally (Direct Scripts):**
+    1.  **Export Classification Model:**
     ```bash
     python models/classification/export_tflite.py --config models/classification/config.yaml
     ```
