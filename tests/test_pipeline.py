@@ -4,13 +4,9 @@ import json
 import os
 import tempfile
 
-# Utility to get project root dynamically
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 MAIN_SCRIPT_PATH = os.path.join(PROJECT_ROOT, 'main.py')
 CONFIG_PATH = os.path.join(PROJECT_ROOT, 'config_pipeline.yaml') # Default config
-
-# Define test cases
-# In a more complex setup, this could come from a JSON or CSV file
 TEST_CASES = [
     {
         "name": "apple_1_with_precomputed_mask",
@@ -20,7 +16,6 @@ TEST_CASES = [
             "mask_path": "E:/_MetaFood3D_new_RGBD_videos/RGBD_videos/Apple/apple_1/masks/0.jpg",
             "mesh_file_path": "E:/_MetaFood3D_new_3D_Mesh/3D_Mesh/Apple/apple_1/apple_1.obj",
             "point_cloud_file": "E:/_MetaFood3D_new_Point_cloud/Point_cloud/4096/Apple/apple_1/apple_1_sampled_1.ply",
-            # "api_key": "zMUj0HH7Y269G0VvO5aowSVdlCNH8PmMrL37aNow", # Removed, will rely on env var
             "config": CONFIG_PATH
         },
         "expected_outputs": {
@@ -30,7 +25,7 @@ TEST_CASES = [
             "volume_tolerance_percent": 5.0
         }
     },
-    # Add more test cases here: e.g., banana, different data, no precomputed mask, etc.
+ 
 ]
 
 class TestFoodAnalysisPipeline(unittest.TestCase):
@@ -39,14 +34,11 @@ class TestFoodAnalysisPipeline(unittest.TestCase):
         """Helper function to run a single pipeline test case."""
         args = ['python', MAIN_SCRIPT_PATH]
         
-        # Use a temporary file for the output JSON to avoid cluttering the directory
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tmp_output_file:
             output_json_path = tmp_output_file.name
         
         for key, value in test_case_data['inputs'].items():
-            if value is not None: # Only add arg if value is provided
-                # Convert argument names from snake_case (used in dict) to kebab-case or as expected by main.py
-                # For main.py, it's mostly --snake_case
+            if value is not None: 
                 arg_name = f"--{key.replace('_', '-')}" 
                 if key == "mask_path" or key == "mesh_file_path" or key == "point_cloud_file" or key == "config" or key=="image" or key=="depth":
                      arg_name = f"--{key}"
@@ -59,23 +51,21 @@ class TestFoodAnalysisPipeline(unittest.TestCase):
             print(f"Running test: {test_case_data['name']}\nCommand: {' '.join(args)}")
             completed_process = subprocess.run(args, capture_output=True, text=True, check=False, cwd=PROJECT_ROOT)
             
-            # Print stdout/stderr for debugging, especially on failure
+            
             if completed_process.stdout:
                 print("STDOUT:\n", completed_process.stdout)
             if completed_process.stderr:
                 print("STDERR:\n", completed_process.stderr)
             
-            completed_process.check_returncode() # Raise HTTPError for bad responses (4xx or 5xx)
+            completed_process.check_returncode() 
 
             self.assertTrue(os.path.exists(output_json_path), f"Output JSON file not found: {output_json_path}")
             with open(output_json_path, 'r') as f:
                 results = json.load(f)
             
-            # Basic check: ensure no error message from pipeline
             self.assertIsNone(results.get('error_message'), 
                               f"Pipeline reported an error: {results.get('error_message')}")
 
-            # Assert specific expected outputs
             expected = test_case_data['expected_outputs']
             if 'food_label' in expected:
                 self.assertEqual(results.get('food_label'), expected['food_label'])
@@ -90,7 +80,6 @@ class TestFoodAnalysisPipeline(unittest.TestCase):
                                      msg=f"Volume {volume_actual} not within {expected['volume_tolerance_percent']}% of {volume_expected}")
 
         finally:
-            # Clean up the temporary output file
             if os.path.exists(output_json_path):
                 os.remove(output_json_path)
 

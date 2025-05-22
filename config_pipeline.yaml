@@ -1,19 +1,14 @@
 models:
-  segmentation_tflite: "trained_models/segmentation/exported/segmentation_model_default.tflite" # Check if this is the correct exported model path/name
-  classification_tflite: "trained_models/classification/exported/classification_model_full_default.tflite" # Check if this is the correct exported model path/name
-  classification_labels: "trained_models/classification/label_map.json" # Path to the label map
-  # classification_labels: "trained_models/classification/exported/labels.txt" # Verify this path and filename
-
+  segmentation_tflite: "trained_models/segmentation/exported/segmentation_model_default.tflite" 
+  classification_tflite: "trained_models/classification/exported/classification_model_full_default.tflite" 
+  classification_labels: "data/classification/label_map.json" 
 model_params:
   # Input sizes expected by the TFLite models (Height, Width)
-  segmentation_input_size: [256, 256] # Verify from segmentation training config
+  segmentation_input_size: [256, 256] 
   # Add the number of output classes for your segmentation model (e.g., 2 for binary background/foreground)
-  segmentation_num_classes: 2 # Verify this number (e.g., 2 for background/foreground)
-  classification_input_size: [224, 224] # Verify from classification training config
-  # Minimum confidence score for a classification to be considered valid.
-  # Predictions below this threshold will be flagged or handled as 'uncertain'.
+  segmentation_num_classes: 1 
+  classification_input_size: [224, 224] 
   classification_confidence_threshold: 0.6
-
 camera_intrinsics:
   fx: 1120.42 # Focal length in x, in pixels
   fy: 1120.42 # Focal length in y, in pixels
@@ -21,16 +16,11 @@ camera_intrinsics:
   cy: 512.0   # Principal point y-coordinate, in pixels
   # Note: These values (fx, fy, cx, cy) heavily influence volume estimation accuracy.
   # Use values calibrated for the specific depth sensor/camera being used.
-
 volume_params:
-  # Optional: Define min/max depth range (in meters) for filtering point cloud
-  min_depth_m: 0.1 # Adjust based on typical distance to food
-  max_depth_m: 1.5 # Adjust based on typical distance/sensor range
+  min_depth_m: 0.1
+  max_depth_m: 1.5 
   # Depth scale factor: Multiply depth values by this factor to get depth in millimeters.
   # For Intel RealSense, this is often 1000.0 (if depth unit is meters).
   # For Kinect Azure, it's 1.0 (if depth unit is millimeters).
   # For MetaFood3D (assuming depth values are in meters from Blender renders if not specified), a common practice is to scale to mm.
   depth_scale_factor: 1000.0
-
-# Optional: Add other pipeline settings if needed
-# e.g., default confidence thresholds, volume estimation method flags, etc.
