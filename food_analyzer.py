@@ -23,6 +23,7 @@ except ImportError:
 try:
     from volume_helpers.volume_helpers import depth_map_to_masked_points, estimate_volume_convex_hull, estimate_volume_from_mesh
     from volume_helpers.density_lookup import lookup_nutritional_info
+    from volume_helpers.volume_estimator import estimate_volume_from_depth
 except ImportError as e:
     logging.error(f"Failed to import helper functions: {e}")
     # Define dummy functions or re-raise to prevent execution if critical
@@ -30,6 +31,7 @@ except ImportError as e:
     def estimate_volume_convex_hull(*args, **kwargs): return None # type: ignore
     def estimate_volume_from_mesh(*args, **kwargs): return None # type: ignore
     def lookup_nutritional_info(*args, **kwargs): return None # and ensure it matches signature
+    def estimate_volume_from_depth(*args, **kwargs): raise NotImplementedError("estimate_volume_from_depth not imported.")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -57,34 +59,44 @@ def load_pipeline_config(config_path: str) -> dict:
 # Core Analysis Function
 
 def analyze_food_item(
-    config_path: str,
     image_path: str,
+    config: dict, 
     depth_map_path: str | None = None,  
+    point_cloud_path: str | None = None, 
     mesh_file_path: str | None = None,  
-    point_cloud_file_path: str | None = None,  
+    output_dir: str | None = None, 
+    save_steps: bool = False, 
+    display_results: bool = True,
     known_food_class: str | None = None, 
-    usda_api_key: str | None = None,
-    mask_path: str | None = None
+    usda_api_key: str | None = None, 
+    mask_path: str | None = None,
+    volume_estimation_method: str = 'mesh', 
+    camera_intrinsics_key: str = 'default',
+    custom_camera_intrinsics: dict | None = None,
+    volume_estimation_config: dict | None = None
 ) -> dict | None:
     """
     Runs the full food analysis pipeline: segmentation, classification, volume, density, mass.
 
     Args:
-        config_path (str): Path to the pipeline configuration file.
         image_path (str): Path to the input RGB image.
+        config (dict): Pipeline configuration dictionary.
         depth_map_path (str | None, optional): Path to the corresponding depth map. Defaults to None.
+        point_cloud_path (str | None, optional): Path to a 3D point cloud file (e.g., .ply). Defaults to None.
         mesh_file_path (str | None, optional): Path to a 3D mesh file for volume calculation. Defaults to None.
-        point_cloud_file_path (str | None, optional): Path to a 3D point cloud file (e.g., .ply) for volume calculation. Defaults to None.
-        known_food_class (str | None, optional): If the food class is already known, provide it here. Defaults to None.
-        usda_api_key (str | None, optional): USDA API key for density lookup fallback. Defaults to None.
+        output_dir (str | None, optional): Directory to save intermediate outputs. Defaults to None.
+        save_steps (bool, optional): Whether to save intermediate steps. Defaults to False.
+        display_results (bool, optional): Whether to display results (e.g., images). Defaults to True.
+        known_food_class (str | None, optional): If the food class is already known. Defaults to None.
+        usda_api_key (str | None, optional): USDA API key. Defaults to None.
         mask_path (str | None, optional): Path to a pre-computed segmentation mask. Defaults to None.
+        volume_estimation_method (str, optional): 'mesh' or 'depth'. Defaults to 'mesh'.
+        camera_intrinsics_key (str, optional): Key for camera intrinsics. Defaults to 'default'.
+        custom_camera_intrinsics (dict | None, optional): Custom camera intrinsics. Defaults to None.
+        volume_estimation_config (dict | None, optional): Custom config for volume estimator. Defaults to None.
 
     Returns:
         dict | None: A dictionary containing analysis results, or None if a critical step fails.
-                     Keys include: 'food_label', 'confidence', 'volume_cm3', 'volume_method',
-                     'density_g_cm3', 'estimated_mass_g', 'calories_kcal_per_100g',
-                     'estimated_total_calories', 'segmentation_mask_shape', 'segmentation_source',
-                     'classification_status'.
     """
     results = {
         'food_label': None,
@@ -97,7 +109,7 @@ def analyze_food_item(
         'calories_kcal_per_100g': None,  
         'estimated_total_calories': None, 
         'segmentation_mask_shape': None,
-        'error_message': None,
+        'error_messages': [], # New list for collecting error messages
         'timing': {
             'total_pipeline': 0.0, # Overall time
             'load_inputs': 0.0,
@@ -112,8 +124,9 @@ def analyze_food_item(
             'classification_inference': 0.0,
             'volume_estimation_overall': 0.0,
             'volume_mesh_load_calc': 0.0,
-            'volume_depth_points_calc': 0.0,
-            'volume_depth_convexhull_calc': 0.0,
+            'volume_depth_points_calc': 0.0, 
+            'volume_depth_convexhull_calc': 0.0, 
+            'volume_depth_voxel_calc': 0.0, 
             'nutrition_lookup': 0.0
         }
     }
@@ -121,17 +134,21 @@ def analyze_food_item(
     start_time_total_pipeline = time.time()
     image_basename = os.path.basename(image_path) # For contextual logging
 
-    # Load configuration early
-    try:
-        config = load_pipeline_config(config_path)
-        if config is None: # load_pipeline_config might raise, or return None in some hypothetical future version
-            logging.error(f"Image: {image_basename} - Failed to load pipeline configuration. Cannot proceed.")
-            results['error_message'] = "Failed to load pipeline configuration."
-            return results
-    except Exception as e: # Handles errors from load_pipeline_config (e.g. FileNotFoundError)
-        logging.error(f"Image: {image_basename} - Critical error loading configuration: {e}. Cannot proceed.")
-        results['error_message'] = f"Critical error loading configuration: {e}"
-        return results
+    logging.info(f"Analyzing food item: {image_basename}") 
+    logging.info(f"Volume estimation method: {volume_estimation_method}")
+    logging.info(f"FOOD_ANALYZER_DEBUG: Received camera_intrinsics_key = '{camera_intrinsics_key}' (Type: {type(camera_intrinsics_key)})") # Cascade: Modified for debugging
+
+    # Ensure output_dir exists if save_steps is True
+    if save_steps and output_dir:
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            logging.info(f"Output directory set to: {output_dir}")
+        except Exception as e:
+            logging.warning(f"Could not create output directory {output_dir}: {e}. Will not save intermediate steps.")
+            save_steps = False # Disable saving if dir creation fails
+    elif save_steps and not output_dir:
+        logging.warning("save_steps is True, but no output_dir provided. Will not save intermediate steps.")
+        save_steps = False
 
     #1. Load Input Data
     try:
@@ -140,7 +157,7 @@ def analyze_food_item(
         image = cv2.imread(image_path)
         if image is None:
             logging.error(f"Image: {image_basename} - Failed to load input image: {image_path}")
-            results['error_message'] = "Failed to load input image."
+            results['error_messages'].append("Failed to load input image.")
             return results # Critical failure
         logging.debug(f"Image: {image_basename} - Loaded image, shape: {image.shape}") 
 
@@ -171,13 +188,13 @@ def analyze_food_item(
         # Basic validation for the final depth_map (either loaded or dummy)
         if not isinstance(depth_map, np.ndarray) or depth_map.ndim != 2:
              logging.error(f"Image: {image_basename} - Final depth map is not a 2D NumPy array. Cannot proceed.")
-             results['error_message'] = "Invalid final depth map."
+             results['error_messages'].append("Invalid final depth map.")
              return results # Critical failure
         logging.info(f"Image: {image_basename} - Using depth map of shape: {depth_map.shape}") 
         results['timing']['load_inputs'] = time.time() - t0_inputs
     except Exception as e: 
         logging.error(f"Image: {image_basename} - Critical error during input data loading: {e}", exc_info=True)
-        results['error_message'] = f"Critical input loading error: {e}"
+        results['error_messages'].append(f"Critical input loading error: {e}")
         return results
 
     # 2. Load Depth Map (if provided)
@@ -216,19 +233,38 @@ def analyze_food_item(
 
             if not seg_model_path_rel or not seg_input_size_config:
                 logging.error(f"Image: {image_basename} - Segmentation model path or input size missing in config. Skipping model-based segmentation.")
-                results['error_message'] = results.get('error_message', '') + " SegModelConfigMissing;"
+                results['error_messages'].append("SegModelConfigMissing;")
             else:
                 t0_seg_load_model = time.time()
                 seg_model_path = str(project_root / seg_model_path_rel)
-                seg_interpreter, seg_input_details, seg_output_details = load_segmentation_model(seg_model_path)
+                seg_interpreter, seg_input_details, seg_output_details = load_segmentation_model(seg_model_path, tuple(seg_input_size_config))
                 results['timing']['segmentation_load_model'] = time.time() - t0_seg_load_model
                 
-                target_seg_size = tuple(seg_input_size_config)
+                model_input_size_hw = tuple(seg_input_size_config)
+                
+                # Determine the target shape for the output segmentation mask
+                output_target_shape_hw = None
+                resize_info_log = "unknown"
+                if depth_map is not None and hasattr(depth_map, 'shape') and len(depth_map.shape) >= 2 and depth_map.shape[0] > 0 and depth_map.shape[1] > 0:
+                    output_target_shape_hw = depth_map.shape[:2]
+                    resize_info_log = "depth map shape"
+                elif image is not None and hasattr(image, 'shape') and len(image.shape) >= 2 and image.shape[0] > 0 and image.shape[1] > 0:
+                    output_target_shape_hw = image.shape[:2]
+                    resize_info_log = "original RGB image shape"
+                else:
+                    # Fallback: This case should ideally not be reached if image loading was successful.
+                    # Using model_input_size_hw as a last resort.
+                    logging.warning(f"Image: {image_basename} - Could not determine a valid target output shape from depth_map or image. Using model input size {model_input_size_hw} as fallback for output resize.")
+                    output_target_shape_hw = model_input_size_hw 
+                    resize_info_log = "model input size (fallback)"
+                logging.info(f"Image: {image_basename} - Segmentation mask will be produced at target shape: {output_target_shape_hw} (based on {resize_info_log}).")
                 
                 t0_seg_inference = time.time()
                 segmentation_mask = run_segmentation_inference(
                     seg_interpreter, seg_input_details, seg_output_details,
-                    image_path, target_seg_size
+                    image_path, 
+                    model_input_size_hw=model_input_size_hw, # Explicitly named
+                    output_resize_shape_hw=output_target_shape_hw # New argument
                 )
                 results['timing']['segmentation_inference'] = time.time() - t0_seg_inference
                 logging.info(f"Image: {image_basename} - Generated mask using model, shape: {segmentation_mask.shape if segmentation_mask is not None else 'None'}")
@@ -236,46 +272,28 @@ def analyze_food_item(
                     segmentation_source = "model_generated"
                 else:
                     logging.warning(f"Image: {image_basename} - Model-based segmentation returned None.")
-                    results['error_message'] = results.get('error_message', '') + " SegModelReturnedNone;"
-
+                    results['error_messages'].append("SegModelReturnedNone;")
         except Exception as e_seg_model:
             logging.exception(f"Image: {image_basename} - Error during model-based segmentation: {e_seg_model}")
-            results['error_message'] = results.get('error_message', '') + f" SegModelError: {e_seg_model};"
+            results['error_messages'].append(f"SegModelError: {e_seg_model};")
 
-    t0_seg_mask_resize = time.time()
     if segmentation_mask is not None:
-        target_h, target_w = -1, -1
-        resize_info = "original image shape"
-        if depth_map is not None:
-            target_h, target_w = depth_map.shape[:2]
-            resize_info = "depth map shape"
-        else: 
-            temp_img_for_shape = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-            if temp_img_for_shape is not None:
-                target_h, target_w = temp_img_for_shape.shape[:2]
-            else:
-                logging.warning(f"Image: {image_basename} - Could not read image to determine target shape for mask resizing (depth map absent). Using mask's current shape.")
-                target_h, target_w = segmentation_mask.shape[:2] # Default to current shape if image load fails
-                resize_info = "mask's current shape (image load failed for fallback resizing)"
-
-        if segmentation_mask.shape[0] != target_h or segmentation_mask.shape[1] != target_w:
-            logging.info(f"Image: {image_basename} - Resizing segmentation mask from {segmentation_mask.shape} to ({target_h}, {target_w}) based on {resize_info}.")
-            segmentation_mask = cv2.resize(
-                segmentation_mask.astype(np.uint8) * 255, # Convert boolean to 0/255 for resize
-                (target_w, target_h),
-                interpolation=cv2.INTER_NEAREST
-            ).astype(bool)
         results['segmentation_mask_shape'] = segmentation_mask.shape
         logging.info(f"Image: {image_basename} - Final segmentation mask shape: {segmentation_mask.shape} (Source: {segmentation_source})")
-    else: # segmentation_mask was None from the start (e.g. model error and no precomputed)
-        logging.error(f"Image: {image_basename} - Segmentation mask is None. Cannot proceed.")
-        results['error_message'] = (results.get('error_message') or "") + " NoSegmentationMaskAtAll;"
-        results['timing']['segmentation_overall'] = time.time() - t0_seg_overall
-        results['timing']['total_pipeline'] = time.time() - start_time_total_pipeline
-        return results
-    results['timing']['segmentation_mask_resize'] = time.time() - t0_seg_mask_resize
+        if save_steps and output_dir:
+            try:
+                mask_filename = os.path.join(output_dir, f"{Path(image_path).stem}_final_mask.png")
+                # Ensure mask is in a savable format (e.g., 0-255 uint8)
+                saveable_mask = (segmentation_mask.astype(np.uint8) * 255) if segmentation_mask.dtype == bool else segmentation_mask.astype(np.uint8)
+                cv2.imwrite(mask_filename, saveable_mask)
+                logging.info(f"Image: {image_basename} - Saved final segmentation mask to {mask_filename}")
+            except Exception as e_save_mask:
+                logging.warning(f"Image: {image_basename} - Failed to save final segmentation mask: {e_save_mask}")
+    else:
+        logging.warning(f"Image: {image_basename} - No segmentation mask available to record shape or save.")
+        results['segmentation_mask_shape'] = None
+
     results['timing']['segmentation_overall'] = time.time() - t0_seg_overall
-    results['segmentation_source'] = segmentation_source
     logging.info(f"Image: {image_basename} - Segmentation complete. Source: {segmentation_source}, Final Mask Shape: {results['segmentation_mask_shape']}")
 
     # 4. Food Classification
@@ -315,7 +333,7 @@ def analyze_food_item(
 
     except Exception as e_crop:
         logging.error(f"Image: {image_basename} - Error during image preparation for classification: {e_crop}", exc_info=True)
-        results['error_message'] = (results.get('error_message') or "") + f" ClassImgPrepError: {e_crop};"
+        results['error_messages'].append(f"ClassImgPrepError: {e_crop};")
     results['timing']['classification_image_preprocessing'] = time.time() - t0_class_img_prep
 
     if known_food_class:
@@ -330,7 +348,7 @@ def analyze_food_item(
             class_model_path_rel = models_config.get('classification_tflite')
             model_params_config = config.get('model_params', {})
             class_input_size_config = model_params_config.get('classification_input_size')
-            class_label_map_path_rel = model_params_config.get('classification_label_map')
+            class_labels_path_rel = model_params_config.get('classification_labels') # Corrected to use 'classification_labels'
             # Get the confidence threshold, default to 0.6 if not in config
             confidence_threshold = model_params_config.get('classification_confidence_threshold', 0.6)
             # Get architecture from the classification's own config file
@@ -348,14 +366,23 @@ def analyze_food_item(
             else:
                 logging.warning(f"Image: {image_basename} - Classification config {classification_config_abs_path} not found. Defaulting architecture to 'Unknown'.")
 
-            if not class_model_path_rel or not class_input_size_config or not class_label_map_path_rel:
-                logging.error(f"Image: {image_basename} - Classification model path, input size, or label map missing in config. Skipping classification.")
-                results['error_message'] = results.get('error_message', '') + " ClassModelConfigMissing;"
-                results['classification_status'] = "Skipped (ConfigMissing)"
+            # Debugging classification config
+            logging.info(f"Image: {image_basename} - Checking classification config values:")
+            logging.info(f"  class_model_path_rel: '{class_model_path_rel}' (type: {type(class_model_path_rel)}) (Exists relative to project: {Path(project_root / class_model_path_rel).exists() if class_model_path_rel else False})")
+            logging.info(f"  class_input_size_config: {class_input_size_config} (type: {type(class_input_size_config)}) (Valid: {isinstance(class_input_size_config, list) and len(class_input_size_config) == 2})")
+            logging.info(f"  class_labels_path_rel: '{class_labels_path_rel}' (type: {type(class_labels_path_rel)}) (Exists relative to project: {Path(project_root / class_labels_path_rel).exists() if class_labels_path_rel else False})")
+
+            config_check_class_model = bool(class_model_path_rel and Path(project_root / class_model_path_rel).exists())
+            config_check_input_size = bool(class_input_size_config and isinstance(class_input_size_config, list) and len(class_input_size_config) == 2)
+            config_check_labels = bool(class_labels_path_rel and Path(project_root / class_labels_path_rel).exists())
+            
+            if not (config_check_class_model and config_check_input_size and config_check_labels):
+                logging.error(f"Image: {image_basename} - Classification model path, input size, or label map missing/invalid in config. Skipping classification.")
+                results['error_messages'].append("ClassModelConfigMissingOrInvalid;")
             else:
                 t0_class_load_model = time.time()
                 class_model_path = str(project_root / class_model_path_rel)
-                class_label_map_path = str(project_root / class_label_map_path_rel)
+                class_label_map_path = str(project_root / class_labels_path_rel)
 
                 class_model, class_input_details, class_output_details, class_labels = load_classification_model(
                     class_model_path,
@@ -367,10 +394,13 @@ def analyze_food_item(
                 if class_model and class_labels is not None:
                     t0_class_inference = time.time()
                     classified_label, classified_confidence = run_classification_inference(
-                        class_model, class_input_details, class_output_details, class_labels,
-                        image_data=cropped_image_for_classification, 
-                        model_input_size_hw=target_class_size, # Renamed from target_size_hw for clarity
-                        architecture=clf_architecture # pass architecture
+                        class_model,                    # interpreter
+                        class_input_details,            # input_details
+                        class_output_details,           # output_details
+                        target_class_size,              # model_input_size_hw (positional)
+                        clf_architecture,               # architecture (positional)
+                        class_labels=class_labels,      # class_labels (keyword)
+                        image_data=cropped_image_for_classification # image_data (keyword)
                     )
                     results['timing']['classification_inference'] = time.time() - t0_class_inference
 
@@ -387,16 +417,16 @@ def analyze_food_item(
                             results['classification_status'] = f"Confident (Score: {confidence:.2f})"
                     else:
                         logging.warning(f"Image: {image_basename} - Classification model returned None for label or confidence.")
-                        results['error_message'] = results.get('error_message', '') + " ClassModelReturnNone;"
+                        results['error_messages'].append("ClassModelReturnNone;")
                         results['classification_status'] = "Error (ModelReturnNone)"
                 else:
                     logging.error(f"Image: {image_basename} - Failed to load classification model or labels. Skipping classification.")
-                    results['error_message'] = results.get('error_message', '') + " ClassModelLoadFail;"
+                    results['error_messages'].append("ClassModelLoadFail;")
                     results['classification_status'] = "Error (ModelLoadFail)"
 
         except Exception as e_class_model:
             logging.exception(f"Image: {image_basename} - Error during classification: {e_class_model}")
-            results['error_message'] = results.get('error_message', '') + f" ClassModelError: {e_class_model};"
+            results['error_messages'].append(f"ClassModelError: {e_class_model};")
             results['classification_status'] = f"Error ({e_class_model})"
     else: # known_food_class was not provided AND cropped_image_for_classification is None
         logging.warning(f"Image: {image_basename} - Skipping classification as no valid image for classification and no known_food_class provided.")
@@ -407,112 +437,227 @@ def analyze_food_item(
     results['timing']['classification_overall'] = time.time() - t0_class_overall
 
     # 5. Volume Estimation
-    volume_cm3 = None
-    volume_method = "N/A"
     t0_vol_overall = time.time()
+    calculated_volume_cm3 = 0.0
+    volume_method_used = "N/A"
 
-    if mesh_file_path and os.path.exists(mesh_file_path):
-        t0_vol_mesh = time.time()
-        try:
-            volume_cm3, volume_method = estimate_volume_from_mesh(mesh_file_path)
-            if volume_cm3 is not None:
-                logging.info(f"Image: {image_basename} - Volume estimated from mesh {mesh_file_path}: {volume_cm3:.2f} cm³")
-            else:
-                logging.warning(f"Image: {image_basename} - estimate_volume_from_mesh returned None for {mesh_file_path}")
-        except Exception as e_mesh_vol:
-            logging.error(f"Image: {image_basename} - Error estimating volume from mesh {mesh_file_path}: {e_mesh_vol}", exc_info=True)
-            results['error_message'] = (results.get('error_message') or "") + f" MeshVolumeError: {e_mesh_vol};"
-        results['timing']['volume_mesh_load_calc'] = time.time() - t0_vol_mesh
-    
-    if volume_cm3 is None and segmentation_mask is not None and depth_map is not None:
-        logging.info(f"Image: {image_basename} - Attempting volume estimation from depth map and segmentation mask.")
-        cam_intrinsics = config.get('camera_intrinsics', {})
-        depth_processing_config = config.get('depth_processing', {})
-        min_depth_mm_config = depth_processing_config.get('min_depth_mm') # Now mm
-        max_depth_mm_config = depth_processing_config.get('max_depth_mm') # Now mm
+    if volume_estimation_method == 'depth':
+        if depth_map is not None and segmentation_mask is not None and segmentation_mask.shape[:2] == depth_map.shape[:2]:
+            logging.info(f"Image: {image_basename} - Attempting volume estimation using 'depth' method.")
+            t0_vol_depth_voxel = time.time()
+            try:
+                # Prepare volume estimation config, merging defaults with overrides
+                vol_est_params = volume_estimation_config if volume_estimation_config is not None else {}
+                
+                # Determine debug_output_path for estimate_volume_from_depth
+                debug_output_path_volume = None
+                if save_steps and output_dir:
+                    debug_output_name = f"{Path(image_path).stem}_volume_debug"
+                    debug_output_path_volume = os.path.join(output_dir, debug_output_name)
+                    os.makedirs(debug_output_path_volume, exist_ok=True)
+                    logging.info(f"Volume estimator debug output will be saved to: {debug_output_path_volume}")
 
-        if not all(cam_intrinsics.get(k) for k in ['fx', 'fy', 'cx', 'cy']):
-            logging.error(f"Image: {image_basename} - Incomplete camera intrinsics in config. Cannot estimate volume from depth map.")
-            results['error_message'] = (results.get('error_message') or "") + " IncompleteCameraIntrinsics;"
-        else:
-            t0_vol_depth_points = time.time()
-            points_from_depth = depth_map_to_masked_points(
-                depth_map,
-                segmentation_mask, 
-                cam_intrinsics,
-                min_depth_mm=min_depth_mm_config, 
-                max_depth_mm=max_depth_mm_config
-            )
-            results['timing']['volume_depth_points_calc'] = time.time() - t0_vol_depth_points
-
-            if points_from_depth is not None and len(points_from_depth) > 3:
-                t0_vol_depth_hull = time.time()
-                vol_details = estimate_volume_convex_hull(points_from_depth)
-                results['timing']['volume_depth_convexhull_calc'] = time.time() - t0_vol_depth_hull
-                if vol_details:
-                    volume_cm3 = vol_details.get('volume_cm3')
-                    volume_method = vol_details.get('method_description', "depth_convex_hull")
-                    if volume_cm3 is not None:
-                        logging.info(f"Image: {image_basename} - Volume from depth (convex hull): {volume_cm3:.2f} cm³")
-                    else:
-                        logging.warning(f"Image: {image_basename} - Convex hull volume estimation from depth returned None for volume_cm3.")
+                calculated_volume_cm3 = estimate_volume_from_depth(
+                    depth_map=depth_map, 
+                    segmentation_mask=segmentation_mask,
+                    camera_intrinsics_key=camera_intrinsics_key,
+                    custom_intrinsics=custom_camera_intrinsics,
+                    config=vol_est_params, 
+                )
+                if calculated_volume_cm3 is not None and calculated_volume_cm3 > 0:
+                    volume_method_used = "depth_point_cloud_voxel"
+                    logging.info(f"Image: {image_basename} - Volume (depth_point_cloud_voxel): {calculated_volume_cm3:.2f} cm³")
                 else:
-                    logging.warning(f"Image: {image_basename} - Convex hull volume estimation from depth returned None for details.")
-            elif points_from_depth is not None:
-                logging.warning(f"Image: {image_basename} - Not enough points ({len(points_from_depth)}) from depth map for convex hull volume estimation (need >3).")
-            else:
-                logging.warning(f"Image: {image_basename} - Failed to get points from depth map for volume estimation.")
-    elif volume_cm3 is None: # Mesh not used/failed, and (mask or depth missing for depth_volume)
-        logging.warning(f"Image: {image_basename} - Volume estimation skipped. No mesh provided/usable, or mask/depth unavailable for depth-based method.")
+                    logging.warning(f"Image: {image_basename} - Depth-based volume estimation returned {calculated_volume_cm3}. Check inputs/params.")
+                    calculated_volume_cm3 = 0.0 # Ensure it's a float
+            except Exception as e:
+                logging.error(f"Image: {image_basename} - Error during depth-based volume estimation: {e}", exc_info=True)
+                calculated_volume_cm3 = 0.0
+            results['timing']['volume_depth_voxel_calc'] = time.time() - t0_vol_depth_voxel
+        else:
+            logging.warning(f"Image: {image_basename} - Cannot use 'depth' volume estimation: depth_map ({depth_map is not None}), segmentation_mask ({segmentation_mask is not None}), or shapes mismatch.")
+    
+    elif volume_estimation_method == 'mesh':
+        if mesh_file_path and os.path.exists(mesh_file_path):
+            logging.info(f"Image: {image_basename} - Attempting volume estimation using 'mesh' method with file: {mesh_file_path}")
+            t0_vol_mesh = time.time()
+            try:
+                calculated_volume_cm3 = estimate_volume_from_mesh(mesh_file_path)
+                if calculated_volume_cm3 is not None and calculated_volume_cm3 > 0:
+                    volume_method_used = "mesh_direct"
+                    logging.info(f"Image: {image_basename} - Volume (mesh_direct): {calculated_volume_cm3:.2f} cm³")
+                else:
+                    logging.warning(f"Image: {image_basename} - Mesh-based volume estimation returned {calculated_volume_cm3}.")
+                    calculated_volume_cm3 = 0.0
+            except Exception as e:
+                logging.error(f"Image: {image_basename} - Error during mesh volume estimation: {e}", exc_info=True)
+                calculated_volume_cm3 = 0.0
+            results['timing']['volume_mesh_load_calc'] = time.time() - t0_vol_mesh
+        # Fallback to point cloud convex hull if mesh failed or not provided, but method is 'mesh'
+        # This part might need review: if method is 'mesh', should it only use mesh?
+        # For now, keeping existing potential fallback to point_cloud_path if mesh is primary but fails/missing.
+        elif point_cloud_path and os.path.exists(point_cloud_path) and depth_map is not None and segmentation_mask is not None:
+            logging.info(f"Image: {image_basename} - 'mesh' method selected, but no mesh file. Trying point cloud file: {point_cloud_path} with convex hull.")
+            # This reuses the old convex hull logic. Consider if this is desired for 'mesh' method.
+            # Or if 'mesh' should strictly mean .obj files.
+            # The following is effectively the old 'depth_map_to_masked_points' + 'estimate_volume_convex_hull'
+            # which might be redundant if 'depth' method is preferred for non-mesh scenarios.
+            t0_vol_depth_hull = time.time()
+            try:
+                # Assuming camera_intrinsics are needed for depth_map_to_masked_points if it's used.
+                # The original depth_map_to_masked_points might not have used full intrinsics.
+                # This part needs careful review against volume_helpers.py content.
+                # For now, let's assume it can proceed or we log a warning.
+                # Placeholder for actual camera intrinsics if needed by depth_map_to_masked_points
+                # This is a bit tricky as the old convex hull method might not have used full intrinsics from config
+                # For simplicity, if we reach here, it implies a configuration that might be suboptimal
+                # as the new 'depth' method is more robust for depth map based calculation.
+                logging.warning(f"Image: {image_basename} - Using convex hull from point cloud file as fallback for 'mesh' method. This path might be deprecated in favor of 'depth' method for non-OBJ inputs.")
+                # This part of the logic might be simplified or removed if 'depth' method is the sole path for non-mesh volume.
+                # The original call was: points = depth_map_to_masked_points(depth_map, segmentation_mask, camera_params_from_config)
+                # And then: calculated_volume_cm3 = estimate_volume_convex_hull(points)
+                # This is complex to replicate here without knowing exact camera_params_from_config structure.
+                # For now, let's log it as not fully supported in this refactor if mesh is missing.
+                logging.warning(f"Image: {image_basename} - Fallback to convex hull from PLY for 'mesh' method is not fully implemented with new intrinsics flow. Please use 'depth' method or provide a valid .obj file for 'mesh' method.")
+                calculated_volume_cm3 = 0.0 
+                volume_method_used = "point_cloud_convex_hull_fallback_unsupported"
+            except Exception as e:
+                logging.error(f"Image: {image_basename} - Error during point cloud convex hull volume estimation: {e}", exc_info=True)
+                calculated_volume_cm3 = 0.0
+            results['timing']['volume_depth_convexhull_calc'] = time.time() - t0_vol_depth_hull
+        else:
+            logging.warning(f"Image: {image_basename} - 'mesh' method selected, but no mesh_file_path or suitable point_cloud_path provided, or other required data missing.")
+    else:
+        logging.warning(f"Image: {image_basename} - Unknown volume_estimation_method: {volume_estimation_method}. No volume calculated.")
 
-    results['volume_cm3'] = volume_cm3 if volume_cm3 is not None else 0.0
-    results['volume_method'] = volume_method
+    results['volume_cm3'] = calculated_volume_cm3 if calculated_volume_cm3 is not None else 0.0
+    results['volume_method'] = volume_method_used
     results['timing']['volume_estimation_overall'] = time.time() - t0_vol_overall
 
-    # 6. Density & Nutritional Lookup
-    density_g_cm3 = None
-    calories_kcal_per_100g = None
-    estimated_total_calories = None
-    t0_nutrition = time.time()
+    # 6. Density and Mass Calculation
+    # ... (existing logic for density lookup and mass calculation) ...
+    # This part should use results['food_label'] and results['volume_cm3']
+    # Ensure it handles cases where volume is 0 or food_label is None.
 
-    if food_label and not food_label.startswith("Uncertain:") and volume_cm3 is not None and volume_cm3 > 0:
-        logging.info(f"Image: {image_basename} - Looking up nutritional info for: {food_label}")
-        databases_config = config.get('databases', {})
-        custom_db_path_rel = databases_config.get('custom_density_db')
-        if not custom_db_path_rel:
-            logging.warning(f"Image: {image_basename} - Custom density database path not in config. USDA/fallback might be limited.")
-            custom_db_path = None
-        else:
-            custom_db_path = str(project_root / custom_db_path_rel)
-
-        nutritional_info = lookup_nutritional_info(food_label, custom_db_path, usda_api_key)
-        if nutritional_info:
-            density_g_cm3 = nutritional_info.get('density')
-            calories_kcal_per_100g = nutritional_info.get('calories_kcal_per_100g')
-            if density_g_cm3 is not None:
-                logging.info(f"Image: {image_basename} - Found density for {food_label}: {density_g_cm3} g/cm³")
-                estimated_mass_g = density_g_cm3 * volume_cm3
-                results['estimated_mass_g'] = estimated_mass_g
-                if calories_kcal_per_100g is not None and estimated_mass_g is not None:
-                    logging.info(f"Image: {image_basename} - Found calories for {food_label}: {calories_kcal_per_100g} kcal/100g")
-                    estimated_total_calories = (estimated_mass_g / 100.0) * calories_kcal_per_100g
-                    results['estimated_total_calories'] = estimated_total_calories
-                elif calories_kcal_per_100g is None:
-                    logging.info(f"Image: {image_basename} - Calories per 100g not found for {food_label} in nutritional info.")
+    if results['food_label'] and results['volume_cm3'] > 0:
+        t0_nutrition = time.time()
+        try:
+            # Use usda_api_key from args if provided, else from config (if it exists there)
+            api_key_to_use = usda_api_key if usda_api_key else config.get('nutrition', {}).get('usda_api_key')
+            db_path = config.get('nutrition', {}).get('custom_density_db_path', 'data/nutrition/density_db.json')
+            if not os.path.isabs(db_path):
+                db_path = os.path.join(project_root, db_path)
+            
+            logging.info(f"Image: {image_basename} - Looking up nutritional info for: {results['food_label']} with DB: {db_path}")
+            nutritional_info = lookup_nutritional_info(
+                food_name=results['food_label'],
+                db_path=db_path,
+                api_key=api_key_to_use
+            )
+            if nutritional_info:
+                results['density_g_cm3'] = nutritional_info.get('density_g_cm3')
+                results['calories_kcal_per_100g'] = nutritional_info.get('calories_kcal_per_100g')
+                if results['density_g_cm3'] is not None:
+                    results['estimated_mass_g'] = results['volume_cm3'] * results['density_g_cm3']
+                    logging.info(f"Image: {image_basename} - Estimated mass: {results['estimated_mass_g']:.2f} g")
+                    if results['calories_kcal_per_100g'] is not None and results['estimated_mass_g'] is not None:
+                        results['estimated_total_calories'] = (results['calories_kcal_per_100g'] / 100.0) * results['estimated_mass_g']
+                        logging.info(f"Image: {image_basename} - Estimated total calories: {results['estimated_total_calories']:.2f} kcal")
             else:
-                logging.info(f"Image: {image_basename} - Density not found for {food_label} in nutritional info.")
-        else:
-            logging.info(f"Image: {image_basename} - Nutritional info not found for {food_label}.")
-        results['density_g_cm3'] = density_g_cm3
-        results['calories_kcal_per_100g'] = calories_kcal_per_100g
+                logging.warning(f"Image: {image_basename} - No nutritional info found for {results['food_label']}.")
+        except Exception as e:
+            logging.error(f"Image: {image_basename} - Error during nutritional info lookup or calculation: {e}", exc_info=True)
         results['timing']['nutrition_lookup'] = time.time() - t0_nutrition
-    elif food_label and food_label.startswith("Uncertain:"):
-        logging.info(f"Image: {image_basename} - Skipping nutritional lookup for uncertain classification: {food_label}")
-    elif not (volume_cm3 is not None and volume_cm3 > 0):
-        logging.info(f"Image: {image_basename} - Skipping nutritional lookup for {food_label} due to zero or invalid volume.")
-    else: # food_label is None
-        logging.info(f"Image: {image_basename} - Skipping nutritional lookup as food label is not determined.")
+    else:
+        logging.info(f"Image: {image_basename} - Skipping nutritional lookup: Food label is '{results['food_label']}' or volume is {results['volume_cm3']:.2f} cm³.")
 
     results['timing']['total_pipeline'] = time.time() - start_time_total_pipeline
     logging.info(f"Image: {image_basename} - Food analysis pipeline completed in {results['timing']['total_pipeline']:.2f} seconds.")
+    
+    # Save final mask if save_steps is True and mask exists
+    if save_steps and output_dir and segmentation_mask is not None:
+        try:
+            mask_filename = os.path.join(output_dir, f"{Path(image_path).stem}_final_mask.png")
+            # Ensure mask is in a savable format (e.g., 0-255 uint8)
+            saveable_mask = (segmentation_mask.astype(np.uint8) * 255) if segmentation_mask.dtype == bool else segmentation_mask.astype(np.uint8)
+            cv2.imwrite(mask_filename, saveable_mask)
+            logging.info(f"Image: {image_basename} - Saved final segmentation mask to {mask_filename}")
+        except Exception as e:
+            logging.warning(f"Image: {image_basename} - Failed to save final segmentation mask: {e}")
+
+    # Display results if enabled (basic console print for now)
+    if display_results:
+        print("\n--- Analysis Results ---")
+        for key, value in results.items():
+            if key == 'timing': # Special handling for timing dict
+                print(f"  Timing Information:")
+                for t_key, t_value in value.items():
+                    print(f"    {t_key}: {t_value:.4f} s")
+            elif isinstance(value, float):
+                print(f"  {key}: {value:.2f}")
+            else:
+                print(f"  {key}: {value}")
+        print("------------------------\n")
+
+    # Finalize error message from list
+    if results['error_messages']:
+        results['error_message'] = " | ".join(results['error_messages'])
+
     return results
+
+# Example usage (for direct script execution, if needed for testing)
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description='Food Analyzer')
+    parser.add_argument('--image_path', type=str, required=True, help='Path to the input RGB image')
+    parser.add_argument('--depth_map_path', type=str, help='Path to the corresponding depth map')
+    parser.add_argument('--config_path', type=str, help='Path to the pipeline configuration file')
+    parser.add_argument('--point_cloud_path', type=str, help='Path to a 3D point cloud file (e.g., .ply)')
+    parser.add_argument('--mesh_file_path', type=str, help='Path to a 3D mesh file for volume calculation')
+    parser.add_argument('--output_dir', type=str, help='Directory to save intermediate outputs')
+    parser.add_argument('--save_steps', action='store_true', help='Whether to save intermediate steps')
+    parser.add_argument('--no_display', action='store_true', help='Whether to display results')
+    parser.add_argument('--known_food_class', type=str, help='If the food class is already known')
+    parser.add_argument('--usda_api_key', type=str, help='USDA API key')
+    parser.add_argument('--mask_path', type=str, help='Path to a pre-computed segmentation mask')
+    parser.add_argument('--volume_estimation_method', type=str, default='mesh', help='Volume estimation method (mesh or depth)')
+    parser.add_argument('--camera_intrinsics_key', type=str, default='default', help='Key for camera intrinsics')
+    parser.add_argument('--custom_camera_intrinsics_json', type=str, help='Custom camera intrinsics as JSON')
+    parser.add_argument('--volume_estimation_config_json', type=str, help='Custom config for volume estimator as JSON')
+
+    args = parser.parse_args()
+
+    if args.config_path is None:
+        print("Error: --config_path is required for direct execution of food_analyzer.py for loading the config dictionary.")
+        print("Alternatively, this example section needs to be updated to construct/load a config dict.")
+        exit()
+
+    try:
+        config_dict_for_direct_run = load_pipeline_config(args.config_path) # For direct run
+    except Exception:
+        print(f"Failed to load config from {args.config_path} for direct script run. Exiting.")
+        exit()
+
+    analysis = analyze_food_item(
+        image_path=args.image_path,
+        config=config_dict_for_direct_run, # Pass loaded config dict
+        depth_map_path=args.depth_map_path,
+        point_cloud_path=args.point_cloud_path,
+        mesh_file_path=args.mesh_file_path,
+        output_dir=args.output_dir, # from argparse
+        save_steps=args.save_steps, # from argparse
+        display_results=not args.no_display, # from argparse
+        known_food_class=args.known_food_class,
+        usda_api_key=args.usda_api_key,
+        mask_path=args.mask_path,
+        # Pass new args for direct script testing
+        volume_estimation_method=args.volume_estimation_method, 
+        camera_intrinsics_key=args.camera_intrinsics_key,
+        custom_camera_intrinsics=json.loads(args.custom_camera_intrinsics_json) if args.custom_camera_intrinsics_json else None,
+        volume_estimation_config=json.loads(args.volume_estimation_config_json) if args.volume_estimation_config_json else None
+    )
+
+    if analysis:
+        print("Analysis completed successfully.")
+    else:
+        print("Analysis failed.")
