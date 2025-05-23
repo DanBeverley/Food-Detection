@@ -45,17 +45,64 @@ def export_model_to_tflite(config: dict):
 
     # Determine Input Model Path
     model_dir = os.path.join(project_root, paths_config.get('model_save_dir', 'trained_models/classification'))
-    # Option 1: Use explicitly defined model path in export config
-    model_filename = export_config.get('keras_model_filename')
-    # Option 2: Fallback to the final model saved by train.py
-    if not model_filename:
-        model_filename = 'final_model.h5'
-        logger.info(f"'keras_model_filename' not specified in export config, using default: {model_filename}")
-    # Option 3: Could add logic to find the 'best' checkpoint if needed
+    
+    keras_model_path = None
+    specified_model_filename = export_config.get('keras_model_filename')
 
-    keras_model_path = os.path.join(model_dir, model_filename)
-    if not os.path.exists(keras_model_path):
-        raise FileNotFoundError(f"Keras model not found at: {keras_model_path}")
+    if specified_model_filename:
+        potential_path = os.path.join(model_dir, specified_model_filename)
+        if os.path.exists(potential_path) and os.path.isfile(potential_path):
+            keras_model_path = potential_path
+            logger.info(f"Using Keras model specified in config: {specified_model_filename}")
+        else:
+            logger.warning(
+                f"Keras model specified in config ('{specified_model_filename}') not found at '{potential_path}'. \
+                Attempting to find latest model in '{model_dir}'."
+            )
+
+    if not keras_model_path:  # If not specified or specified file not found
+        if not os.path.isdir(model_dir):
+            logger.error(f"Model save directory not found: {model_dir}")
+            raise FileNotFoundError(f"Model save directory missing: {model_dir}")
+
+        h5_files = [
+            f for f in os.listdir(model_dir) 
+            if f.endswith('.h5') and os.path.isfile(os.path.join(model_dir, f))
+        ]
+
+        if not h5_files:
+            logger.error(f"No .h5 model files found in directory: {model_dir}")
+            raise FileNotFoundError(f"No .h5 Keras model files found in {model_dir}")
+
+        # Prefer files with "final" in their name (case-insensitive)
+        final_files = [f for f in h5_files if "final" in f.lower()]
+        
+        selected_file_list = final_files if final_files else h5_files
+        
+        # Get the most recently modified file from the selected list
+        try:
+            latest_model_file = max(
+                selected_file_list, 
+                key=lambda f: os.path.getmtime(os.path.join(model_dir, f))
+            )
+            keras_model_path = os.path.join(model_dir, latest_model_file)
+            if final_files and latest_model_file in final_files:
+                logger.info(f"Found 'final' model. Using latest: {latest_model_file} from {model_dir}")
+            elif h5_files: # Ensure we have some h5 files before logging this path
+                logger.info(f"No 'final' model found or specified one missing. Using latest .h5 model: {latest_model_file} from {model_dir}")
+        except ValueError: # Should not happen if h5_files is not empty
+             logger.error(f"Could not determine latest model file in {model_dir} from list: {selected_file_list}")
+             raise FileNotFoundError(f"Could not determine latest model file in {model_dir}")
+
+    # Check if a model path was actually determined
+    if not keras_model_path or not os.path.exists(keras_model_path):
+        # This case should ideally be caught by earlier checks, but as a safeguard:
+        error_msg = f"Keras model not found. Searched in '{model_dir}'" 
+        if specified_model_filename:
+            error_msg += f" (specified: '{specified_model_filename}')"
+        logger.error(error_msg)
+        raise FileNotFoundError(error_msg)
+        
     logger.info(f"Loading Keras model from: {keras_model_path}")
 
     # Determine Output TFLite Path 
