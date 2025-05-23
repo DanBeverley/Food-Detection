@@ -216,6 +216,12 @@ def analyze_food_item(
                 _, thresholded_mask = cv2.threshold(loaded_mask_gray, 1, 255, cv2.THRESH_BINARY)
                 segmentation_mask = thresholded_mask.astype(bool)
                 logging.info(f"Image: {image_basename} - Successfully loaded pre-computed mask from: {mask_path} with initial shape {segmentation_mask.shape}")
+                # --- SEG_DEBUG: Log loaded mask properties ---
+                if segmentation_mask is not None:
+                    logging.info(f"SEG_DEBUG (Loaded Mask): Shape={segmentation_mask.shape}, dtype={segmentation_mask.dtype}, "
+                                 f"Min={segmentation_mask.min()}, Max={segmentation_mask.max()}, "
+                                 f"Non-zero pixels={np.count_nonzero(segmentation_mask)}")
+                # --- End SEG_DEBUG ---
                 segmentation_source = f"precomputed_mask_file: {os.path.basename(mask_path)}"
             else:
                 logging.warning(f"Image: {image_basename} - cv2.imread returned None for pre-computed mask {mask_path}. Falling back to model generation.")
@@ -230,6 +236,8 @@ def analyze_food_item(
             seg_model_path_rel = models_config.get('segmentation_tflite')
             model_params_config = config.get('model_params', {})
             seg_input_size_config = model_params_config.get('segmentation_input_size')
+            seg_num_classes_config = model_params_config.get('segmentation_num_classes', 1) # Default to 1 if not found
+            seg_threshold_config = model_params_config.get('segmentation_threshold', 0.5) # Default to 0.5
 
             if not seg_model_path_rel or not seg_input_size_config:
                 logging.error(f"Image: {image_basename} - Segmentation model path or input size missing in config. Skipping model-based segmentation.")
@@ -264,9 +272,20 @@ def analyze_food_item(
                     seg_interpreter, seg_input_details, seg_output_details,
                     image_path, 
                     model_input_size_hw=model_input_size_hw, # Explicitly named
-                    output_resize_shape_hw=output_target_shape_hw # New argument
+                    output_resize_shape_hw=output_target_shape_hw, # New argument
+                    num_classes=seg_num_classes_config, # Pass num_classes
+                    threshold=seg_threshold_config # Pass threshold
                 )
                 results['timing']['segmentation_inference'] = time.time() - t0_seg_inference
+                # --- SEG_DEBUG: Log model-generated mask properties ---
+                if segmentation_mask is not None:
+                    logging.info(f"SEG_DEBUG (Model Output Raw - from run_segmentation_inference): "
+                                 f"Shape={segmentation_mask.shape}, dtype={segmentation_mask.dtype}, "
+                                 f"Min={segmentation_mask.min()}, Max={segmentation_mask.max()}, "
+                                 f"Non-zero pixels={np.count_nonzero(segmentation_mask)}")
+                else:
+                    logging.info("SEG_DEBUG (Model Output Raw - from run_segmentation_inference): Mask is None.")
+                # --- End SEG_DEBUG ---
                 logging.info(f"Image: {image_basename} - Generated mask using model, shape: {segmentation_mask.shape if segmentation_mask is not None else 'None'}")
                 if segmentation_mask is not None:
                     segmentation_source = "model_generated"
@@ -405,16 +424,20 @@ def analyze_food_item(
                     results['timing']['classification_inference'] = time.time() - t0_class_inference
 
                     if classified_label and classified_confidence is not None:
-                        food_label = classified_label
-                        confidence = float(classified_confidence)
-                        logging.info(f"Image: {image_basename} - Classification result: {food_label} (Confidence: {confidence:.2f})")
+                        raw_food_label = classified_label
+                        raw_confidence = float(classified_confidence)
+                        logging.info(f"Image: {image_basename} - Raw Classification: '{raw_food_label}' (Confidence: {raw_confidence:.2f})")
 
-                        if confidence < confidence_threshold:
-                            logging.warning(f"Image: {image_basename} - Classification confidence {confidence:.2f} is below threshold {confidence_threshold}. Label '{food_label}' marked as uncertain.")
-                            food_label = f"Uncertain: {food_label}"
-                            results['classification_status'] = f"BelowConfidenceThreshold (Score: {confidence:.2f})"
+                        if raw_confidence < confidence_threshold:
+                            food_label = f"Uncertain: {raw_food_label}"
+                            confidence = raw_confidence # Store raw confidence even if uncertain
+                            logging.warning(f"Image: {image_basename} - Classification confidence {raw_confidence:.2f} is below threshold {confidence_threshold}. Final label: '{food_label}'")
+                            results['classification_status'] = f"BelowConfidenceThreshold (Score: {raw_confidence:.2f})"
                         else:
+                            food_label = raw_food_label
+                            confidence = raw_confidence
                             results['classification_status'] = f"Confident (Score: {confidence:.2f})"
+                            logging.info(f"Image: {image_basename} - Final Classification: '{food_label}' (Confidence: {confidence:.2f})")
                     else:
                         logging.warning(f"Image: {image_basename} - Classification model returned None for label or confidence.")
                         results['error_messages'].append("ClassModelReturnNone;")
@@ -435,6 +458,7 @@ def analyze_food_item(
     results['food_label'] = food_label
     results['confidence'] = confidence
     results['timing']['classification_overall'] = time.time() - t0_class_overall
+    logging.info(f"Image: {image_basename} - Classification phase complete. Determined Food Label: '{food_label}', Confidence: {confidence:.2f}")
 
     # 5. Volume Estimation
     t0_vol_overall = time.time()
@@ -457,11 +481,21 @@ def analyze_food_item(
                     os.makedirs(debug_output_path_volume, exist_ok=True)
                     logging.info(f"Volume estimator debug output will be saved to: {debug_output_path_volume}")
 
+                # --- Debugging: Log mask properties before passing to volume estimator ---
+                if segmentation_mask is not None:
+                    logging.info(f"FOOD_ANALYZER_DEBUG: Passing segmentation_mask to volume_estimator with: "
+                                 f"Shape={segmentation_mask.shape}, dtype={segmentation_mask.dtype}, "
+                                 f"Non-zero pixels={np.count_nonzero(segmentation_mask)}")
+                else:
+                    logging.info("FOOD_ANALYZER_DEBUG: segmentation_mask is None before calling volume_estimator.")
+                # --- End Debugging ---
+
                 calculated_volume_cm3 = estimate_volume_from_depth(
                     depth_map=depth_map, 
                     segmentation_mask=segmentation_mask,
                     camera_intrinsics_key=camera_intrinsics_key,
                     custom_intrinsics=custom_camera_intrinsics,
+                    all_camera_intrinsics=config.get('camera_intrinsics', {}), # Pass all known intrinsics
                     config=vol_est_params, 
                 )
                 if calculated_volume_cm3 is not None and calculated_volume_cm3 > 0:
@@ -533,43 +567,56 @@ def analyze_food_item(
     results['volume_cm3'] = calculated_volume_cm3 if calculated_volume_cm3 is not None else 0.0
     results['volume_method'] = volume_method_used
     results['timing']['volume_estimation_overall'] = time.time() - t0_vol_overall
+    logging.info(f"Image: {image_basename} - Volume estimation phase complete. Calculated Volume: {calculated_volume_cm3:.2f} cm³ (Method: {volume_method_used})")
 
-    # 6. Density and Mass Calculation
-    # ... (existing logic for density lookup and mass calculation) ...
-    # This part should use results['food_label'] and results['volume_cm3']
-    # Ensure it handles cases where volume is 0 or food_label is None.
+    # 6. Nutritional Information Lookup
+    t0_nutrition = time.time()
+    nutritional_info = None
+    results['nutritional_info_status'] = "Not Attempted"
 
-    if results['food_label'] and results['volume_cm3'] > 0:
-        t0_nutrition = time.time()
+    logging.info(f"Image: {image_basename} - Preparing for nutritional lookup. Food Label: '{food_label}', Volume: {calculated_volume_cm3:.2f} cm³")
+
+    can_lookup_nutrition = True
+    skip_reason = ""
+    if food_label is None or "Uncertain:" in food_label or "Unknown" in food_label:
+        can_lookup_nutrition = False
+        skip_reason += "Food label is uncertain or unknown. "
+    if calculated_volume_cm3 <= 0:
+        can_lookup_nutrition = False
+        skip_reason += "Calculated volume is zero or less." 
+
+    if can_lookup_nutrition:
+        logging.info(f"Image: {image_basename} - Attempting nutritional lookup for '{food_label}' with volume {calculated_volume_cm3:.2f} cm³.")
         try:
-            # Use usda_api_key from args if provided, else from config (if it exists there)
-            api_key_to_use = usda_api_key if usda_api_key else config.get('nutrition', {}).get('usda_api_key')
-            db_path = config.get('nutrition', {}).get('custom_density_db_path', 'data/nutrition/density_db.json')
-            if not os.path.isabs(db_path):
-                db_path = os.path.join(project_root, db_path)
-            
-            logging.info(f"Image: {image_basename} - Looking up nutritional info for: {results['food_label']} with DB: {db_path}")
+            # Ensure food_label passed to lookup is the clean version if it was uncertain
+            clean_food_label_for_lookup = food_label.replace("Uncertain: ", "") if food_label else None
+
             nutritional_info = lookup_nutritional_info(
-                food_name=results['food_label'],
-                db_path=db_path,
-                api_key=api_key_to_use
+                food_item_label=clean_food_label_for_lookup,
+                volume_cm3=calculated_volume_cm3,
+                density_db_path=config.get('density_db_path', str(project_root / 'data' / 'databases' / 'food_density_db.json')),
+                usda_api_key=usda_api_key,
+                cache_dir=str(project_root / '.cache' / 'usda_api_cache')
             )
             if nutritional_info:
-                results['density_g_cm3'] = nutritional_info.get('density_g_cm3')
-                results['calories_kcal_per_100g'] = nutritional_info.get('calories_kcal_per_100g')
-                if results['density_g_cm3'] is not None:
-                    results['estimated_mass_g'] = results['volume_cm3'] * results['density_g_cm3']
-                    logging.info(f"Image: {image_basename} - Estimated mass: {results['estimated_mass_g']:.2f} g")
-                    if results['calories_kcal_per_100g'] is not None and results['estimated_mass_g'] is not None:
-                        results['estimated_total_calories'] = (results['calories_kcal_per_100g'] / 100.0) * results['estimated_mass_g']
-                        logging.info(f"Image: {image_basename} - Estimated total calories: {results['estimated_total_calories']:.2f} kcal")
+                logging.info(f"Image: {image_basename} - Nutritional lookup successful for '{clean_food_label_for_lookup}'. Calories: {nutritional_info.get('total_calories', 'N/A')} kcal.")
+                # Log more details if needed, e.g., nutritional_info['source_used']
+                results['nutritional_info_status'] = f"Success (Source: {nutritional_info.get('source_used', 'Unknown')})"
             else:
-                logging.warning(f"Image: {image_basename} - No nutritional info found for {results['food_label']}.")
-        except Exception as e:
-            logging.error(f"Image: {image_basename} - Error during nutritional info lookup or calculation: {e}", exc_info=True)
-        results['timing']['nutrition_lookup'] = time.time() - t0_nutrition
+                logging.warning(f"Image: {image_basename} - Nutritional lookup for '{clean_food_label_for_lookup}' returned no information.")
+                results['nutritional_info_status'] = "NoInfoReturned"
+        except Exception as e_nutrition:
+            logging.exception(f"Image: {image_basename} - Error during nutritional lookup for '{food_label}': {e_nutrition}")
+            results['error_messages'].append(f"NutritionError: {e_nutrition};")
+            results['nutritional_info_status'] = f"Error ({e_nutrition})"
     else:
-        logging.info(f"Image: {image_basename} - Skipping nutritional lookup: Food label is '{results['food_label']}' or volume is {results['volume_cm3']:.2f} cm³.")
+        logging.warning(f"Image: {image_basename} - Skipping nutritional lookup. Reason: {skip_reason.strip()}")
+        results['nutritional_info_status'] = f"Skipped ({skip_reason.strip()})"
+
+    results['nutritional_info'] = nutritional_info
+    results['timing']['nutritional_lookup'] = time.time() - t0_nutrition
+
+    # ... (existing logic for density lookup and mass calculation) ...
 
     results['timing']['total_pipeline'] = time.time() - start_time_total_pipeline
     logging.info(f"Image: {image_basename} - Food analysis pipeline completed in {results['timing']['total_pipeline']:.2f} seconds.")
@@ -602,6 +649,33 @@ def analyze_food_item(
     # Finalize error message from list
     if results['error_messages']:
         results['error_message'] = " | ".join(results['error_messages'])
+
+    # --- PRODUCTION SUMMARY LOG ---
+    summary_food_label = results.get('food_label', 'N/A')
+    summary_confidence = results.get('confidence', 0.0) 
+    summary_volume_cm3 = results.get('volume_cm3', 0.0)
+    
+    nut_info = results.get('nutritional_info')
+    summary_calories_per_100g = "N/A"
+    summary_nutrition_source = "N/A"
+    summary_total_calories = "N/A"
+
+    if nut_info:
+        summary_calories_per_100g = nut_info.get('calories_kcal_per_100g', 'N/A')
+        summary_nutrition_source = nut_info.get('source_used', 'N/A')
+        summary_total_calories = nut_info.get('total_calories', 'N/A')
+        if isinstance(summary_total_calories, (float, int)):
+            summary_total_calories = f"{summary_total_calories:.2f}"
+        if isinstance(summary_calories_per_100g, (float, int)):
+            summary_calories_per_100g = f"{summary_calories_per_100g:.2f}"
+
+    logging.info(f"--- PRODUCTION SUMMARY LOG [{image_basename}] ---"
+                 f"\n  Food: {summary_food_label} (Confidence: {summary_confidence:.2f})"
+                 f"\n  Volume: {summary_volume_cm3:.2f} cm³"
+                 f"\n  Nutrition Source: {summary_nutrition_source}"
+                 f"\n  Calories/100g: {summary_calories_per_100g} kcal"
+                 f"\n  Estimated Total Calories: {summary_total_calories} kcal"
+                 f"\n--- END SUMMARY ---")
 
     return results
 
