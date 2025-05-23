@@ -31,8 +31,16 @@ CAMERA_INTRINSICS_1280_720 = {
     "cy": 359.5   # height / 2 - 0.5
 }
 
-# Users should select or provide the correct intrinsics for their depth data.
-DEFAULT_CAMERA_INTRINSICS = CAMERA_INTRINSICS_640_480 # Defaulting to this for now
+CAMERA_INTRINSICS_1440_1920 = {
+    "width": 1440,
+    "height": 1920,
+    "fx": 1181.25,
+    "fy": 1181.25, 
+    "cx": 719.5,
+    "cy": 959.5
+}
+
+DEFAULT_CAMERA_INTRINSICS = CAMERA_INTRINSICS_1440_1920
 
 def create_point_cloud_from_depth_mask(
     depth_map: np.ndarray,
@@ -71,6 +79,37 @@ def create_point_cloud_from_depth_mask(
     fy = camera_intrinsics['fy']
     cx = camera_intrinsics['cx']
     cy = camera_intrinsics['cy']
+
+    # --- Debugging: Mask and Depth Stats ---
+    num_mask_pixels = np.count_nonzero(segmentation_mask)
+    logger.info(f"PCD_CREATE_DEBUG: Number of non-zero pixels in segmentation_mask: {num_mask_pixels}")
+
+    if num_mask_pixels > 0:
+        depth_map_m = depth_map.astype(np.float32) / depth_scale # Convert to meters
+        masked_depth_values_m = depth_map_m[segmentation_mask > 0]
+        
+        # Filter out non-positive depth values before stats, as they are invalid for point cloud generation
+        valid_masked_depth_values_m = masked_depth_values_m[masked_depth_values_m > 0]
+        
+        if valid_masked_depth_values_m.size > 0:
+            logger.info(f"PCD_CREATE_DEBUG: Scaled depth map (meters) stats (where mask > 0 and depth > 0): "
+                        f"Min={np.min(valid_masked_depth_values_m):.4f}m, Max={np.max(valid_masked_depth_values_m):.4f}m, Mean={np.mean(valid_masked_depth_values_m):.4f}m")
+        else:
+            logger.info("PCD_CREATE_DEBUG: No valid positive depth values found where mask > 0.")
+            # Also log stats for all masked depth values, even non-positive, to see raw values
+            if masked_depth_values_m.size > 0:
+                 logger.info(f"PCD_CREATE_DEBUG: Raw scaled depth map (meters) stats (where mask > 0, including non-positive): "
+                             f"Min={np.min(masked_depth_values_m):.4f}m, Max={np.max(masked_depth_values_m):.4f}m, Mean={np.mean(masked_depth_values_m):.4f}m") 
+            else:
+                logger.info("PCD_CREATE_DEBUG: Mask is non-empty, but no depth values extracted under the mask (possibly all NaN or similar issue).")
+
+    else: # num_mask_pixels is 0
+        logger.info("PCD_CREATE_DEBUG: Segmentation mask is empty. No depth statistics to calculate.")
+
+    logger.info(f"PCD_CREATE_DEBUG: Using depth_trunc_m (max depth): {depth_trunc_m:.4f}m")
+    logger.info(f"PCD_CREATE_DEBUG: Using depth_scale: {depth_scale}")
+    logger.info(f"PCD_CREATE_DEBUG: project_valid_depth_only: {project_valid_depth_only}")
+    # --- End Debugging ---
 
     points = []
     for v_idx in range(img_height):  # y-coordinate
@@ -182,8 +221,9 @@ def estimate_volume_voxel_grid(
 def estimate_volume_from_depth(
     depth_map: np.ndarray, # Expected in millimeters or units defined by depth_scale
     segmentation_mask: np.ndarray,
-    camera_intrinsics_key: str = 'default', # Key to select intrinsics or a custom dict
+    camera_intrinsics_key: str = 'default', # Key to select intrinsics
     custom_intrinsics: dict = None, # Allow passing a full intrinsics dict directly
+    all_camera_intrinsics: dict = None, # Dictionary containing all known intrinsics from config
     config: dict = None
 ) -> float:
     """
@@ -192,10 +232,12 @@ def estimate_volume_from_depth(
     Args:
         depth_map: (H, W) np.ndarray, depth values (e.g., in mm).
         segmentation_mask: (H, W) np.ndarray, binary mask (0 or 1).
-        camera_intrinsics_key: String key ('640x480', '1280x720', 'default') to use predefined
-                                 intrinsics, or 'custom' if custom_intrinsics is provided.
+        camera_intrinsics_key: String key (e.g., '640x480', '1920x1440', 'default') to select
+                                 intrinsics. Also used with 'custom' if custom_intrinsics is provided.
         custom_intrinsics: A dict with {'width', 'height', 'fx', 'fy', 'cx', 'cy'}.
-                           Used if camera_intrinsics_key is 'custom'.
+                           Takes precedence if provided.
+        all_camera_intrinsics: A dictionary mapping keys (like '1920x1440') to their
+                                 full intrinsics dictionaries. Used if custom_intrinsics is not set.
         config: Dictionary for overriding default processing parameters:
             "depth_scale": float (e.g., 1000.0 for mm to m)
             "depth_trunc_m": float (max depth in meters)
@@ -219,19 +261,45 @@ def estimate_volume_from_depth(
     }
     if config: cfg.update(config)
 
-    # Select camera intrinsics
-    if custom_intrinsics and camera_intrinsics_key == 'custom':
+    # --- Intrinsics Debug Logging --- 
+    logger.info(f"VOLUME_ESTIMATOR_DEBUG: Received camera_intrinsics_key: '{camera_intrinsics_key}'")
+    if custom_intrinsics is not None:
+        logger.info(f"VOLUME_ESTIMATOR_DEBUG: custom_intrinsics type: {type(custom_intrinsics)}, keys: {list(custom_intrinsics.keys()) if isinstance(custom_intrinsics, dict) else 'N/A'}")
+    else:
+        logger.info("VOLUME_ESTIMATOR_DEBUG: custom_intrinsics is None")
+    if all_camera_intrinsics is not None:
+        logger.info(f"VOLUME_ESTIMATOR_DEBUG: all_camera_intrinsics type: {type(all_camera_intrinsics)}, keys: {list(all_camera_intrinsics.keys()) if isinstance(all_camera_intrinsics, dict) else 'N/A'}")
+    else:
+        logger.info("VOLUME_ESTIMATOR_DEBUG: all_camera_intrinsics is None")
+    # --- End Intrinsics Debug Logging ---
+
+    # Select camera intrinsics with improved logic
+    selected_intrinsics = None
+    source_of_intrinsics = "None"
+
+    if custom_intrinsics and isinstance(custom_intrinsics, dict) and all(k in custom_intrinsics for k in ['width', 'height', 'fx', 'fy', 'cx', 'cy']):
         selected_intrinsics = custom_intrinsics
-        logger.info(f"Using custom camera intrinsics: {selected_intrinsics}")
-    elif camera_intrinsics_key == '640x480':
+        source_of_intrinsics = f"custom_intrinsics provided directly for key '{camera_intrinsics_key}'"
+    elif all_camera_intrinsics and isinstance(all_camera_intrinsics, dict) and camera_intrinsics_key in all_camera_intrinsics:
+        selected_intrinsics = all_camera_intrinsics[camera_intrinsics_key]
+        source_of_intrinsics = f"all_camera_intrinsics using key '{camera_intrinsics_key}'"
+    elif camera_intrinsics_key == '640x480' and 'CAMERA_INTRINSICS_640_480' in globals():
         selected_intrinsics = CAMERA_INTRINSICS_640_480
-    elif camera_intrinsics_key == '1280x720':
+        source_of_intrinsics = "local CAMERA_INTRINSICS_640_480"
+    elif camera_intrinsics_key == '1280x720' and 'CAMERA_INTRINSICS_1280_720' in globals():
         selected_intrinsics = CAMERA_INTRINSICS_1280_720
-    else: # Default
-        selected_intrinsics = DEFAULT_CAMERA_INTRINSICS
-        logger.warning(f"Using default camera intrinsics ({camera_intrinsics_key}). Specify if different.")
+        source_of_intrinsics = "local CAMERA_INTRINSICS_1280_720"
     
-    logger.info(f"Selected intrinsics for {selected_intrinsics['width']}x{selected_intrinsics['height']}")
+    if selected_intrinsics:
+        logger.info(f"Using camera intrinsics from: {source_of_intrinsics}")
+        logger.info(f"Selected intrinsics details: w={selected_intrinsics['width']}, h={selected_intrinsics['height']}, fx={selected_intrinsics['fx']}")
+    else:
+        selected_intrinsics = DEFAULT_CAMERA_INTRINSICS # Fallback to default
+        logger.warning(
+            f"Camera intrinsics key '{camera_intrinsics_key}' not found in custom_intrinsics, all_camera_intrinsics, or local predefined. "
+            f"Falling back to DEFAULT_CAMERA_INTRINSICS ({DEFAULT_CAMERA_INTRINSICS.get('width', 'N/A')}x{DEFAULT_CAMERA_INTRINSICS.get('height', 'N/A')}). "
+            f"This may lead to inaccurate volume estimation."
+        )
 
     # 1. Create Point Cloud
     pcd = create_point_cloud_from_depth_mask(
@@ -268,7 +336,7 @@ if __name__ == '__main__':
     logger.info("Testing volume_estimator.py...")
 
     # Create dummy data based on a common resolution
-    test_intrinsics_key = '640x480'
+    test_intrinsics_key = '1440x1920'
     intr = CAMERA_INTRINSICS_640_480
     img_h, img_w = intr['height'], intr['width']
     
