@@ -4,8 +4,11 @@ import os
 import subprocess
 import yaml
 import glob
+import json # For parsing JSON string arguments
 from food_analyzer import analyze_food_item # Assuming analyze_food_item is the entry point for inference
 from scripts.utils import _get_project_root # Assuming this utility exists
+# Ensure this path is correct relative to your project structure
+from volume_helpers.volume_estimator import estimate_volume_from_depth
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -255,6 +258,54 @@ def run_inference(args, project_root):
         logger.error(f"Error parsing pipeline configuration file {pipeline_config_full_path}: {e}")
         return False
 
+    # Parse JSON string arguments for custom intrinsics and volume config
+    custom_intrinsics_dict = None
+    # Determine the final camera_intrinsics_key to use
+    # Priority: 
+    # 1. 'custom' if --custom_camera_intrinsics_json is validly parsed.
+    # 2. Specific key from --camera_intrinsics_key if it's not 'default' (argparse default) or 'custom'.
+    # 3. default_intrinsics_key from pipeline_config.yaml if --camera_intrinsics_key was 'default'.
+    # 4. The 'default' key (from argparse) if none of the above apply.
+
+    final_camera_intrinsics_key = args.camera_intrinsics_key # Initialize with the value from argparse
+
+    if args.custom_camera_intrinsics_json:
+        try:
+            custom_intrinsics_dict = json.loads(args.custom_camera_intrinsics_json)
+            logger.info(f"Successfully parsed custom camera intrinsics: {custom_intrinsics_dict}")
+            # If custom JSON is provided and valid, the key MUST be 'custom' for food_analyzer to use the dict
+            final_camera_intrinsics_key = 'custom' 
+            logger.info(f"Setting camera_intrinsics_key to 'custom' due to provided JSON.")
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing --custom_camera_intrinsics_json: {e}. Custom intrinsics will not be used.")
+            # If parsing fails, custom_intrinsics_dict remains None. 
+            # final_camera_intrinsics_key will then be determined by args.camera_intrinsics_key or config default.
+            # If args.camera_intrinsics_key was 'custom' but JSON failed, it will fall through to config default or argparse default.
+            if args.camera_intrinsics_key == 'custom': # If user intended custom but JSON failed
+                 logger.warning("Attempted to use 'custom' intrinsics key, but JSON parsing failed. Will try config default or argparse default.")
+                 # Reset to argparse default so config default can be checked next
+                 final_camera_intrinsics_key = 'default' # Or whatever your argparse default is
+
+    if final_camera_intrinsics_key != 'custom': # Only check config default if not using custom JSON
+        # Check if the user provided a specific key (that isn't 'default') OR if it's the argparse default 'default'
+        if args.camera_intrinsics_key == 'default': # Assuming 'default' is the argparse default value
+            default_from_config = config.get('volume_estimation', {}).get('default_intrinsics_key')
+            if default_from_config:
+                final_camera_intrinsics_key = default_from_config
+                logger.info(f"Using default_intrinsics_key from pipeline_config.yaml: {final_camera_intrinsics_key}")
+            # else: final_camera_intrinsics_key remains 'default' (from argparse)
+        # else: if args.camera_intrinsics_key was specific (e.g., '640x480'), it's already set in final_camera_intrinsics_key
+    
+    logger.info(f"Final camera_intrinsics_key for food_analyzer: {final_camera_intrinsics_key}")
+
+    volume_estimation_config_dict = None
+    if args.volume_estimation_config_json:
+        try:
+            volume_estimation_config_dict = json.loads(args.volume_estimation_config_json)
+            logger.info(f"Successfully parsed volume estimation config: {volume_estimation_config_dict}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing --volume_estimation_config_json: {e}. Using default parameters from volume_estimator.py.")
+
     # Dynamically find the latest 'final' TFLite models by reading their respective config files
     classification_model_path = find_final_tflite_model(project_root, CLASSIFICATION_CONFIG_PATH, "classification")
     segmentation_model_path = find_final_tflite_model(project_root, SEGMENTATION_CONFIG_PATH, "segmentation")
@@ -285,17 +336,31 @@ def run_inference(args, project_root):
     # or that it resolves them correctly.
 
     # Call the original inference logic
+    logger.info(f"DEBUG: About to call analyze_food_item with camera_intrinsics_key = '{final_camera_intrinsics_key}'")
     try:
         logger.info(f"Analyzing food item: {args.image_path}")
+        logger.info(f"Volume estimation method: {args.volume_estimation_method}")
+        if args.volume_estimation_method == 'depth':
+            logger.info(f"Camera intrinsics key: {args.camera_intrinsics_key}")
+            if args.camera_intrinsics_key == 'custom' and custom_intrinsics_dict:
+                 logger.info(f"Using custom camera intrinsics: {custom_intrinsics_dict}")
+            if volume_estimation_config_dict:
+                logger.info(f"Using custom volume estimation config: {volume_estimation_config_dict}")
+
         analysis_results = analyze_food_item(
             image_path=args.image_path,
             depth_map_path=args.depth_map_path,
-            point_cloud_path=args.point_cloud_path,
-            mesh_file_path=args.mesh_file_path, # Added mesh file path
+            point_cloud_path=args.point_cloud_path, # May become optional or handled differently
+            mesh_file_path=args.mesh_file_path,     # Will be conditionally used
             config=config, # Pass the potentially modified config
             output_dir=args.output_dir,
             save_steps=args.save_steps,
-            display_results=not args.no_display
+            display_results=not args.no_display,
+            # New arguments for volume estimation:
+            volume_estimation_method=args.volume_estimation_method,
+            camera_intrinsics_key=final_camera_intrinsics_key, # Use the determined key
+            custom_camera_intrinsics=custom_intrinsics_dict,    # Pass the parsed dict
+            volume_estimation_config=volume_estimation_config_dict # Pass the parsed dict
         )
         logger.info("Inference completed.")
         logger.info("Analysis Results:")
@@ -315,8 +380,9 @@ def run_inference(args, project_root):
         return False
 
 def main():
-    parser = argparse.ArgumentParser(description="End-to-end Food Detection Pipeline: Data Prep, Training, TFLite Export, Inference.")
-    project_root = _get_project_root() # Get project root once
+    parser = argparse.ArgumentParser(description="Main script for Food Detection pipeline.")
+    project_root = _get_project_root()
+    parser.add_argument('--project_root', type=str, default=str(project_root), help='Path to the project root directory.')
 
     # --- Stage Control Arguments ---
     parser.add_argument('--run-all', action='store_true', help="Run all stages: data prep, train all, export all, then inference if image_path provided.")
@@ -341,7 +407,34 @@ def main():
     parser.add_argument('--mesh_file_path', type=str, default=None, help="Path to the .obj mesh file for volume calculation (optional).")
     parser.add_argument('--output_dir', type=str, default='output_analysis', help="Directory to save analysis results and intermediate steps.")
     parser.add_argument('--save_steps', action='store_true', help="Save intermediate images/outputs from the analysis pipeline.")
-    parser.add_argument('--no_display', action='store_true', help="Do not display results directly (e.g., images).")
+    parser.add_argument('--no_display', action='store_true', help="Do not display inference results visually.")
+
+    # New arguments for volume estimation
+    parser.add_argument(
+        '--volume_estimation_method',
+        type=str,
+        default='mesh',  # Current default; change to 'depth' to make the new method default
+        choices=['mesh', 'depth'],
+        help="Method for volume estimation: 'mesh' (uses provided .obj file) or 'depth' (calculates from depth map)."
+    )
+    parser.add_argument(
+        '--camera_intrinsics_key',
+        type=str,
+        default='default', # Uses DEFAULT_CAMERA_INTRINSICS from volume_estimator.py
+        help="Key for predefined camera intrinsics (e.g., '640x480', '1280x720', 'default') or 'custom' to use --custom_camera_intrinsics_json."
+    )
+    parser.add_argument(
+        '--custom_camera_intrinsics_json',
+        type=str,
+        default=None,
+        help="JSON string of custom camera intrinsics (e.g., '{\"width\":640, \"height\":480, \"fx\":525, \"fy\":525, \"cx\":319.5, \"cy\":239.5}') to be used if --camera_intrinsics_key is 'custom'."
+    )
+    parser.add_argument(
+        '--volume_estimation_config_json',
+        type=str,
+        default=None,
+        help="JSON string for overriding volume estimation parameters (e.g., voxel sizes, depth scale). See volume_estimator.py for options."
+    )
 
     # --- Dataset Path Arguments (for data preparation scripts if they need overrides) ---
     parser.add_argument('--classification_input_dir', type=str, help="Root directory for raw classification images (required if preparing classification data).")
@@ -351,6 +444,10 @@ def main():
     parser.add_argument('--segmentation_output_meta_dir', type=str, default=DEFAULT_SEGMENTATION_META_OUTPUT_DIR, help=f"Directory to save segmentation metadata.json (default: {DEFAULT_SEGMENTATION_META_OUTPUT_DIR}).")
 
     args = parser.parse_args()
+
+    # Update project_root if provided via CLI, otherwise use the auto-detected one
+    if args.project_root:
+        project_root = args.project_root
 
     # Determine which stages to run
     run_any_prep = args.prepare_all_data or args.prepare_classification_data or args.prepare_segmentation_data
