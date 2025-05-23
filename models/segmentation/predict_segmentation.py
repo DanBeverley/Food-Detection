@@ -9,6 +9,7 @@ import cv2
 import logging
 from pathlib import Path
 from typing import Tuple, Optional, Dict, Any
+import time
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -17,32 +18,29 @@ def get_project_root()->Path:
     return Path(__file__).parent.parent.parent
 
 def load_and_preprocess_image(image_path:str, target_size_hw:tuple) -> tuple[np.ndarray, tuple]:
-    """
-    Loads and preprocesses an image for TFLite inference.
-
-    Args:
-        image_path: Path to the input image.
-        target_size_hw: Target size as (height, width).
-
-    Returns:
-        A tuple containing:
-         - Preprocessed image as a numpy array (batch dim added, normalized).
-         - Original image dimensions (height, width).
-    """
+    """Loads, resizes, flattens, normalizes, and batches an image."""
     try:
+        target_h, target_w = target_size_hw # e.g., (64, 64)
+
         img = Image.open(image_path).convert("RGB")
-        original_size_wh = img.size # (width, height)
-        original_size_hw = (original_size_wh[1], original_size_wh[0]) 
-        # Resize to model input size
-        target_size_wh = (target_size_hw[1], target_size_hw[0])
-        img_resized = img.resize(target_size_wh, Image.BILINEAR)
-        img_array = np.array(img_resized, dtype = np.float32)
-        # Ensure float32 [0, 255] before preprocessing
-        img_array = img_array
-        # <<< Apply EfficientNet preprocessing >>>
-        img_array = preprocess_input(img_array)
-        # Add batch dimension
-        input_data = np.expand_dims(img_array, axis = 0)
+        original_size_wh = img.size
+        original_size_hw = (original_size_wh[1], original_size_wh[0])
+        
+        # Resize to target_size_hw for the model
+        img_resized = img.resize((target_w, target_h), Image.Resampling.BILINEAR) # PIL resize is (W,H)
+        img_array = np.array(img_resized, dtype=np.float32)
+        
+        # Apply normalization (e.g., EfficientNet's preprocess_input)
+        img_array = preprocess_input(img_array) # Expects H,W,C float32
+        
+        # Flatten the spatial dimensions: (H, W, C) -> (H*W, C)
+        num_channels = img_array.shape[2]
+        img_flattened = img_array.reshape(-1, num_channels) # Shape e.g. (4096, 3)
+        logging.info(f"Image {Path(image_path).name}: Resized to {img_array.shape}, then flattened to {img_flattened.shape}")
+
+        # Add batch dimension: (H*W, C) -> (1, H*W, C)
+        input_data = np.expand_dims(img_flattened, axis=0) # Shape e.g. (1, 4096, 3)
+        logging.info(f"Image {Path(image_path).name}: Final preprocessed shape for TFLite: {input_data.shape}")
         return input_data, original_size_hw
     except FileNotFoundError:
         logging.error(f"Image file not found: {image_path}")
@@ -118,27 +116,30 @@ def overlay_mask_on_image(image_path:str, mask:np.ndarray, alpha:float=0.5) -> n
 
 # Core logic
 
-def load_segmentation_model(tflite_model_path:str):
-    """Loads the TFLite segmentation model interpreter"""
+def load_segmentation_model(tflite_model_path:str, expected_input_size_hw: tuple) -> tuple[tf.lite.Interpreter, list, list]:
+    """Loads the TFLite segmentation model interpreter."""
     try:
+        logging.info(f"Loading TFLite segmentation model from: {tflite_model_path}")
         interpreter = tf.lite.Interpreter(model_path=tflite_model_path)
-        interpreter.allocate_tensors()
+        interpreter.allocate_tensors() # Allocate tensors directly
+        
         input_details = interpreter.get_input_details()
         output_details = interpreter.get_output_details()
-        logging.info(f"TFLite segmentation model loaded: {tflite_model_path}")
-        logging.debug(f"Input details: {input_details}")
-        logging.debug(f"Output details: {output_details}")
+        
+        logging.info(f"Model input_details[0]['shape'] AFTER alloc: {input_details[0]['shape']}")
+        logging.info(f"Model input_details[0]['dtype'] AFTER alloc: {input_details[0]['dtype']}")
+            
         return interpreter, input_details, output_details
-    except Exception as e:
-        logging.error(f"Failed to load TFLite interpreter from {tflite_model_path}: {e}")
+    except ValueError as e:
+        logging.error(f"Failed to load TFLite interpreter or allocate tensors for {tflite_model_path}: {e}")
         raise
 
 def run_segmentation_inference(
     interpreter:tf.lite.Interpreter,
-    input_details:list,
+    input_details:list, # These are now details AFTER potential resize and alloc
     output_details:list,
     image_path:str,
-    model_input_size_hw:tuple,
+    model_input_size_hw:tuple, # e.g. (256,256) from config
     output_resize_shape_hw:tuple, # e.g., original image shape or depth map shape
     num_classes:int = 2):
     """
@@ -162,7 +163,7 @@ def run_segmentation_inference(
 
         # Load and preprocess image
         try:
-            preprocessed_image, _ = load_and_preprocess_image(image_path, model_input_size_hw)
+            preprocessed_image, original_size_hw = load_and_preprocess_image(image_path, model_input_size_hw)
             if preprocessed_image is None:
                 logging.error(f"Preprocessing failed for image: {image_path}")
                 return None
@@ -171,22 +172,16 @@ def run_segmentation_inference(
             logging.exception(f"Error during preprocessing for {image_path}: {preproc_e}")
             return None
 
-        # Set input tensor
         input_index = input_details[0]['index']
-        expected_input_dtype = input_details[0]['dtype']
-        logging.debug(f"Setting input tensor at index {input_index}. Expected dtype: {expected_input_dtype}, Actual dtype: {preprocessed_image.dtype}")
-        if preprocessed_image.dtype != expected_input_dtype:
-            logging.warning(f"Casting preprocessed image dtype {preprocessed_image.dtype} to match model expected dtype {expected_input_dtype}")
-            preprocessed_image = tf.cast(preprocessed_image, expected_input_dtype)
+        logging.info(f"--- Pre-set_tensor --- Input shape: {preprocessed_image.shape}, Expected by model: {input_details[0]['shape']}")
         
-        try:
-            interpreter.set_tensor(input_index, preprocessed_image)
-            logging.debug("Input tensor set successfully.")
-        except Exception as set_tensor_e:
-            logging.exception(f"Error setting input tensor for {image_path}: {set_tensor_e}")
-            return None
+        expected_dtype = input_details[0]['dtype']
+        if preprocessed_image.dtype != expected_dtype:
+            logging.warning(f"Dtype mismatch! Casting from {preprocessed_image.dtype} to {expected_dtype}.")
+            preprocessed_image = preprocessed_image.astype(expected_dtype)
 
-        # Run inference
+        interpreter.set_tensor(input_index, preprocessed_image)
+        t_invoke_start = time.time()
         logging.debug("Invoking TFLite interpreter...")
         try:
             interpreter.invoke()
@@ -265,7 +260,7 @@ def predict_standalone(config_path:str, image_path:str, output_path:str = None, 
         return 
     # Load model
     try:
-        interpreter, input_details, output_details = load_segmentation_model(tflite_model_path)
+        interpreter, input_details, output_details = load_segmentation_model(tflite_model_path, model_input_size_hw)
     except Exception:
         return 
     # Get original size to resize mask
@@ -281,7 +276,7 @@ def predict_standalone(config_path:str, image_path:str, output_path:str = None, 
                                             image_path, model_input_size_hw, original_size_hw,
                                             num_classes)
     if final_mask is None:
-        logging.error("Segmentation inference faied")
+        logging.error("Segmentation inference failed")
         return 
     
     # Handle output
