@@ -415,11 +415,12 @@ def load_and_preprocess_segmentation(
         return dummy_inputs_dict, dummy_mask_tensor
 
 
-def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset], int]:
+def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, int, int, int]:
     try:
         data_cfg = config['data']
         paths_cfg = config['paths']
         model_cfg = config['model'] # Used for backbone specific preprocessing
+        training_cfg = config.get('training', {}) # Get training config for debug mode check
         aug_cfg = data_cfg.get('augmentation', {})
 
         target_size_py = tuple(data_cfg.get('image_size', (256, 256))) 
@@ -429,6 +430,10 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         num_classes_tensor = tf.constant(num_classes, dtype=tf.int32)
         split_ratios = data_cfg['split_ratios']
         random_seed = data_cfg.get('random_seed', 42)
+
+        # Debug settings from config
+        is_debug_mode_active = training_cfg.get('runtime_is_debug_mode', False)
+        debug_max_samples = data_cfg.get('debug_max_samples', None)
 
         use_depth = data_cfg.get('use_depth_map', False)
         depth_map_dir_name = data_cfg.get('depth_map_dir_name', 'depth')
@@ -446,7 +451,7 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
 
         if not metadata_file.exists():
             logger.error(f"Metadata file not found: {metadata_file}")
-            return None, None, None, 0
+            return None, None, None, 0, 0, 0, 0
 
         with open(metadata_file, 'r') as f:
             metadata = json.load(f)
@@ -454,7 +459,19 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         # Directly use the loaded list if it's not empty
         if not isinstance(metadata, list) or not metadata:
             logger.error(f"Metadata file {metadata_file} does not contain a valid list of items or is empty.")
-            return None, None, None, 0
+            return None, None, None, 0, 0, 0, 0
+
+        # --- Debug Sampling Logic --- 
+        if is_debug_mode_active and debug_max_samples is not None and isinstance(debug_max_samples, int):
+            if 0 < debug_max_samples < len(metadata):
+                logger.info(f"SEGMENTATION DEBUG MODE: Limiting to {debug_max_samples} samples out of {len(metadata)} total.")
+                np.random.seed(random_seed) # Ensure consistent shuffle for debug
+                np.random.shuffle(metadata)
+                metadata = metadata[:debug_max_samples]
+            else:
+                logger.warning(f"SEGMENTATION DEBUG MODE: debug_max_samples ({debug_max_samples}) is invalid or not smaller than total samples ({len(metadata)}). Using full dataset for debug run.")
+        elif is_debug_mode_active:
+            logger.info("SEGMENTATION DEBUG MODE: runtime_is_debug_mode is True, but debug_max_samples not set or invalid in data_config. Using full dataset for debug run.")
 
         # Prepare file paths and labels
         all_rgb_paths, all_depth_paths, all_pc_paths, all_mask_paths, all_labels = [], [], [], [], []
@@ -537,9 +554,9 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
 
         if not all_rgb_paths:
             logger.error("No valid data items found after checking paths.")
-            return None, None, None, 0
+            return None, None, None, 0, 0, 0, 0
 
-        logger.info(f"Loaded {len(all_rgb_paths)} items for segmentation.")
+        logger.info(f"Loaded {len(all_rgb_paths)} items for segmentation processing.")
 
         # Create path tuples for tf.data.Dataset
         # (rgb_path, depth_path, pc_path, mask_path)
@@ -557,7 +574,15 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         val_paths = [path_tuples[i] for i in val_indices]
         test_paths = [path_tuples[i] for i in test_indices]
 
-        logger.info(f"Dataset split: Train {len(train_paths)}, Val {len(val_paths)}, Test {len(test_paths)}")
+        num_train_samples = len(train_paths)
+        num_val_samples = len(val_paths)
+        num_test_samples = len(test_paths)
+
+        logger.info(f"Dataset split: Train {num_train_samples}, Val {num_val_samples}, Test {num_test_samples}")
+
+        if num_train_samples == 0:
+            logger.error("No training samples after splitting. Check dataset size, debug settings, and split ratios.")
+            return None, None, None, num_train_samples, num_val_samples, num_test_samples, num_classes
 
         # Capture configurations for the mapping function (to avoid issues with non-tensor args in tf.data.Dataset.map)
         # These are Python dicts/values, not Tensors yet.
@@ -616,11 +641,11 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
             test_dataset = test_dataset.batch(batch_size)
             test_dataset = test_dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
 
-        return train_dataset, val_dataset, test_dataset, num_classes
+        return train_dataset, val_dataset, test_dataset, num_train_samples, num_val_samples, num_test_samples, num_classes
 
     except KeyError as e:
         logger.error(f"Configuration key error: {e}. Please check your segmentation config.yaml.")
-        return None, None, None, 0
+        return None, None, None, 0, 0, 0, 0
     except Exception as e:
         logger.error(f"An unexpected error occurred in load_segmentation_data: {e}", exc_info=True)
-        return None, None, None, 0
+        return None, None, None, 0, 0, 0, 0
