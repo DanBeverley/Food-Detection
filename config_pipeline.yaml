@@ -1,26 +1,45 @@
 models:
-  segmentation_tflite: "trained_models/segmentation/exported/segmentation_model_default.tflite" 
-  classification_tflite: "trained_models/classification/exported/classification_model_full_default.tflite" 
-  classification_labels: "data/classification/label_map.json" 
+  segmentation_tflite: "trained_models/segmentation/exported/segmentation_model_final.tflite" 
+  classification_tflite: "trained_models/classification/exported/classification_model_final.tflite" 
+  segmentation_model: "models/segmentation/segmentation_model_final.tflite"
+  segmentation_config: "models/segmentation/config.yaml"
+  classification_config: "models/classification/config.yaml" 
+
 model_params:
-  # Input sizes expected by the TFLite models (Height, Width)
-  segmentation_input_size: [256, 256] 
-  # Add the number of output classes for your segmentation model (e.g., 2 for binary background/foreground)
+  segmentation_input_size: [64, 64] 
   segmentation_num_classes: 1 
+  segmentation_threshold: 0.5 # Threshold for converting probabilities to binary mask
   classification_input_size: [224, 224] 
+  classification_labels: "trained_models/classification/exported/label_map.json" 
   classification_confidence_threshold: 0.6
+
 camera_intrinsics:
-  fx: 1120.42 # Focal length in x, in pixels
-  fy: 1120.42 # Focal length in y, in pixels
-  cx: 512.0   # Principal point x-coordinate, in pixels
-  cy: 512.0   # Principal point y-coordinate, in pixels
-  # Note: These values (fx, fy, cx, cy) heavily influence volume estimation accuracy.
-  # Use values calibrated for the specific depth sensor/camera being used.
+  default: 
+    width: 1920
+    height: 1440
+    fx: 1575.0  
+    fy: 1575.0  
+    cx: 958.5   # (1920 / 2 - 0.5)
+    cy: 718.5   # (1440 / 2 - 0.5)
+  "1024x1024": 
+    width: 1024
+    height: 1024
+    fx: 1120.42 
+    fy: 1120.42 
+    cx: 511.5   # (1024 / 2 - 0.5)
+    cy: 511.5   # (1024 / 2 - 0.5)
+  "640x480":  
+    width: 640
+    height: 480
+    fx: 525.0   
+    fy: 525.0   
+    cx: 319.5   # (640 / 2 - 0.5)
+    cy: 239.5   # (480 / 2 - 0.5)
+
+volume_estimation:
+  default_intrinsics_key: "default" 
+
 volume_params:
   min_depth_m: 0.1
   max_depth_m: 1.5 
-  # Depth scale factor: Multiply depth values by this factor to get depth in millimeters.
-  # For Intel RealSense, this is often 1000.0 (if depth unit is meters).
-  # For Kinect Azure, it's 1.0 (if depth unit is millimeters).
-  # For MetaFood3D (assuming depth values are in meters from Blender renders if not specified), a common practice is to scale to mm.
   depth_scale_factor: 1000.0
