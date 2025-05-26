@@ -2,16 +2,15 @@ import json
 import os
 import tensorflow as tf
 from typing import Tuple, List, Dict, Optional
-import numpy as np # Not strictly used in the refactored load_classification_data
+import numpy as np
 import logging
 from sklearn.model_selection import train_test_split
 import pathlib
-# import glob # No longer needed
-from tqdm import tqdm # Import tqdm
-import trimesh # For point cloud processing
-import traceback # For detailed error traceback
+from tqdm import tqdm
 import random # Import for random sampling
-from collections import Counter # Ensure Counter is imported
+from collections import Counter
+import traceback
+from pathlib import Path
 
 # Dynamic import for preprocess_input
 _PREPROCESS_FN_CACHE = {}
@@ -23,47 +22,27 @@ def _get_project_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parent.parent.parent
 
 def compute_class_weights(y_true: List[int], num_classes: int) -> Optional[Dict[int, float]]:
-    """
-    Computes class weights for imbalanced datasets.
-    Args:
-        y_true: List of true labels (integers).
-        num_classes: Total number of unique classes.
-    Returns:
-        A dictionary mapping class indices to their calculated weights, or None if input is empty.
-    """
     if not y_true:
         logger.warning("Cannot compute class weights: y_true is empty.")
         return None
-
     counts = Counter(y_true)
     total_samples = len(y_true)
     class_weights = {}
-
     for class_idx in range(num_classes):
         if counts[class_idx] > 0:
             weight = total_samples / (num_classes * counts[class_idx])
             class_weights[class_idx] = weight
-        else:
-            # If a class is not present in y_true, its weight is not added.
-            # Keras handles missing keys in class_weight dict by defaulting to a weight of 1.
-            # Alternatively, one could assign a default weight (e.g., 1.0 or 0.0)
-            # logger.debug(f"Class {class_idx} not found in y_true, weight not computed.")
-            pass 
-            
-    if not class_weights: # Should not happen if y_true is not empty and num_classes > 0
+    if not class_weights:
         logger.warning("Class weights dictionary is empty after computation. Check input y_true and num_classes.")
         return None
-        
     return class_weights
 
 def _get_preprocess_fn(architecture: str):
-    """Dynamically imports and returns the correct preprocess_input function."""
     global _PREPROCESS_FN_CACHE
     if architecture in _PREPROCESS_FN_CACHE:
         return _PREPROCESS_FN_CACHE[architecture]
-
-    preprocess_input_fn = None # Initialize to ensure it's always defined
-    if architecture == "MobileNet": # MobileNetV1
+    preprocess_input_fn = None
+    if architecture == "MobileNet":
         from tensorflow.keras.applications.mobilenet import preprocess_input as preprocess_input_fn
     elif architecture == "MobileNetV2":
         from tensorflow.keras.applications.mobilenet_v2 import preprocess_input as preprocess_input_fn
@@ -71,839 +50,636 @@ def _get_preprocess_fn(architecture: str):
         from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as preprocess_input_fn
     elif architecture.startswith("EfficientNetV2"):
         from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as preprocess_input_fn
-    elif architecture.startswith("EfficientNet"): # EfficientNetB0-B7
-            from tensorflow.keras.applications.efficientnet import preprocess_input as preprocess_input_fn
-    elif architecture.startswith("ResNet") and "V2" not in architecture: # ResNet50, ResNet101, ResNet152
-            from tensorflow.keras.applications.resnet import preprocess_input as preprocess_input_fn
-    elif architecture.startswith("ResNet") and "V2" in architecture: # ResNet50V2 etc.
-            from tensorflow.keras.applications.resnet_v2 import preprocess_input as preprocess_input_fn
+    elif architecture.startswith("EfficientNet"):
+        from tensorflow.keras.applications.efficientnet import preprocess_input as preprocess_input_fn
+    elif architecture.startswith("ResNet") and "V2" not in architecture:
+        from tensorflow.keras.applications.resnet import preprocess_input as preprocess_input_fn
+    elif architecture.startswith("ResNet") and "V2" in architecture:
+        from tensorflow.keras.applications.resnet_v2 import preprocess_input as preprocess_input_fn
     elif architecture.startswith("ConvNeXt"):
-            from tensorflow.keras.applications.convnext import preprocess_input as preprocess_input_fn
-    # Add other architectures explicitly if needed for future use
+        from tensorflow.keras.applications.convnext import preprocess_input as preprocess_input_fn
     else:
         logger.warning(f"Preprocessing function not explicitly defined or imported for {architecture}. Using generic scaling (image / 255.0). This may be suboptimal.")
-        preprocess_input_fn = lambda x: x / 255.0 # Fallback generic scaling
-    
+        preprocess_input_fn = lambda x: x / 255.0
     _PREPROCESS_FN_CACHE[architecture] = preprocess_input_fn
     return preprocess_input_fn
 
-def _build_augmentation_pipeline(config: Dict) -> Optional[tf.keras.Sequential]:
-    """Builds a data augmentation pipeline from the config."""
-    if not config.get('augmentation', {}).get('enabled', False):
+def _build_augmentation_pipeline(data_conf: Dict) -> Optional[tf.keras.Sequential]: # Corrected to take data_conf
+    aug_config = data_conf.get('augmentation', {})
+    image_s = tuple(data_conf.get('image_size', [224, 224]))
+
+    if not aug_config.get('enabled', False):
         return None
-
-    aug_config = config['augmentation']
+    
     pipeline = tf.keras.Sequential(name="augmentation_pipeline")
-    pipeline.add(tf.keras.layers.Input(shape=(*config['image_size'], 3)))
-
+    pipeline.add(tf.keras.layers.Input(shape=(*image_s, 3))) # Use image_s
+    
+    # Basic augmentations
     if aug_config.get('horizontal_flip', False):
         pipeline.add(tf.keras.layers.RandomFlip("horizontal"))
     if aug_config.get('rotation_range', 0) > 0:
         factor = aug_config['rotation_range'] / 360.0
         pipeline.add(tf.keras.layers.RandomRotation(factor))
-    if aug_config.get('shear_range', 0) > 0:
-        # pipeline.add(tf.keras.layers.RandomShear(intensity=aug_config['shear_range']))
-        logger.warning("RandomShear augmentation is currently commented out due to potential TF version incompatibility.")
     if aug_config.get('zoom_range', 0) > 0:
-        pipeline.add(tf.keras.layers.RandomZoom(height_factor=aug_config['zoom_range'], width_factor=aug_config['zoom_range']))
+        zoom_factor = aug_config['zoom_range']
+        pipeline.add(tf.keras.layers.RandomZoom(height_factor=(-zoom_factor, zoom_factor), width_factor=(-zoom_factor, zoom_factor)))
     if 'brightness_range' in aug_config and aug_config['brightness_range']:
-        if isinstance(aug_config['brightness_range'], list) and len(aug_config['brightness_range']) == 2:
-            factor = max(abs(1.0 - aug_config['brightness_range'][0]), abs(aug_config['brightness_range'][1] - 1.0))
+        br_range = aug_config['brightness_range']
+        if isinstance(br_range, list) and len(br_range) == 2:
+            factor = max(abs(1.0 - br_range[0]), abs(br_range[1] - 1.0))
         else:
-            factor = aug_config['brightness_range'] 
+            factor = br_range 
         pipeline.add(tf.keras.layers.RandomBrightness(factor=factor))
-
     if aug_config.get("width_shift_range", 0) > 0:
         pipeline.add(tf.keras.layers.RandomTranslation(height_factor=0, width_factor=aug_config['width_shift_range']))
     if aug_config.get("height_shift_range", 0) > 0:
         pipeline.add(tf.keras.layers.RandomTranslation(height_factor=aug_config['height_shift_range'], width_factor=0))
-    pipeline.add(tf.keras.layers.Resizing(config['image_size'][0], config['image_size'][1]))
+    
+    # Enhanced augmentations for overfitting prevention
+    if 'contrast_range' in aug_config and aug_config['contrast_range']:
+        contrast_range = aug_config['contrast_range']
+        if isinstance(contrast_range, list) and len(contrast_range) == 2:
+            factor = max(abs(1.0 - contrast_range[0]), abs(contrast_range[1] - 1.0))
+            pipeline.add(tf.keras.layers.RandomContrast(factor=factor))
+    
+    # Random erasing (cutout) for regularization
+    random_erasing_config = aug_config.get('random_erasing', {})
+    if random_erasing_config.get('enabled', False):
+        pipeline.add(RandomErasing(
+            probability=random_erasing_config.get('probability', 0.25),
+            area_ratio_range=tuple(random_erasing_config.get('area_ratio_range', [0.02, 0.33])),
+            aspect_ratio_range=tuple(random_erasing_config.get('aspect_ratio_range', [0.3, 3.3]))
+        ))
+        logger.info("Random erasing layer added to augmentation pipeline")
+    
+    # Gaussian noise for robustness
+    if aug_config.get('gaussian_noise_std', 0) > 0:
+        pipeline.add(GaussianNoise(stddev=aug_config['gaussian_noise_std']))
+        logger.info(f"Gaussian noise layer added with std={aug_config['gaussian_noise_std']}")
+    
+    pipeline.add(tf.keras.layers.Resizing(image_s[0], image_s[1])) # Use image_s
     return pipeline
 
-# MixUp function (to be applied after batching)
 @tf.function
 def mixup(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_classes: int) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Applies MixUp augmentation to a batch of images and labels.
-
-    Args:
-        batch_images: A batch of images (batch_size, height, width, channels).
-        batch_labels: A batch of labels (batch_size,). Assumed to be integer class indices.
-        alpha: The alpha parameter for the Beta distribution (controls mixing strength).
-        num_classes: The total number of classes for one-hot encoding the labels.
-
-    Returns:
-        A tuple of (mixed_images, mixed_labels).
-    """
     batch_size = tf.shape(batch_images)[0]
-    # Ensure labels are one-hot encoded for mixing
-    # If labels are already one-hot, this tf.one_hot will need to be adjusted or skipped.
-    # Assuming batch_labels are sparse (indices) based on sparse_categorical_crossentropy typical usage.
-    labels_one_hot = tf.one_hot(tf.cast(batch_labels, dtype=tf.int32), depth=num_classes)
-
-    # Sample lambda from a Beta distribution
-    # Gamma(alpha, 1) / (Gamma(alpha,1) + Gamma(alpha,1)) if alpha > 0 else 1
-    # tf.random.gamma requires alpha > 0.
-    # If alpha is 0, it implies no mixing, so lambda is 1.
-    if alpha > 0.0:
-        beta_dist = tf.compat.v1.distributions.Beta(alpha, alpha)
-        lambda_val = beta_dist.sample(batch_size)
-        # Reshape lambda for broadcasting: (batch_size,) -> (batch_size, 1, 1, 1) for images, (batch_size, 1) for labels
-        lambda_img = tf.reshape(lambda_val, [batch_size, 1, 1, 1])
-        lambda_lbl = tf.reshape(lambda_val, [batch_size, 1])
-    else: # No mixing if alpha is 0
-        lambda_img = tf.ones((batch_size, 1, 1, 1), dtype=tf.float32)
-        lambda_lbl = tf.ones((batch_size, 1), dtype=tf.float32)
-
-    # Shuffle the batch to create pairs for mixing
-    # Use tf.random.shuffle to ensure reproducibility with global/op seeds if set
-    shuffled_indices = tf.random.shuffle(tf.range(batch_size))
-    
-    shuffled_images = tf.gather(batch_images, shuffled_indices)
-    shuffled_labels_one_hot = tf.gather(labels_one_hot, shuffled_indices)
-
-    # Perform MixUp
-    mixed_images = lambda_img * batch_images + (1.0 - lambda_img) * shuffled_images
-    mixed_labels = lambda_lbl * labels_one_hot + (1.0 - lambda_lbl) * shuffled_labels_one_hot
-    
-    return mixed_images, mixed_labels
-
-# CutMix function (to be applied after batching)
-@tf.function
-def cutmix(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_classes: int) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Applies CutMix augmentation to a batch of images and labels.
-
-    Args:
-        batch_images: A batch of images (batch_size, height, width, channels).
-        batch_labels: A batch of labels. Assumed to be one-hot if coming after MixUp,
-                      or sparse (indices) if MixUp is disabled.
-        alpha: The alpha parameter for the Beta distribution (controls patch size).
-        num_classes: The total number of classes for one-hot encoding if labels are sparse.
-
-    Returns:
-        A tuple of (mixed_images, mixed_labels).
-    """
-    batch_size = tf.shape(batch_images)[0]
-    image_h = tf.shape(batch_images)[1]
-    image_w = tf.shape(batch_images)[2]
-
-    # Ensure labels are one-hot. If MixUp was applied, labels are already one-hot.
-    # If MixUp was not applied, batch_labels are likely sparse.
+    # Ensure labels are one-hot.
     if len(tf.shape(batch_labels)) == 1: # Sparse labels (batch_size,)
         labels_one_hot = tf.one_hot(tf.cast(batch_labels, dtype=tf.int32), depth=num_classes)
     else: # Already one-hot (batch_size, num_classes)
         labels_one_hot = batch_labels
 
-    # Sample lambda from a Beta distribution
     if alpha > 0.0:
         beta_dist = tf.compat.v1.distributions.Beta(alpha, alpha)
-        lambda_val = beta_dist.sample(1)[0] # Sample a single lambda for the batch
+        lambda_val = beta_dist.sample(batch_size) # Sample per image in batch
+        lambda_img = tf.reshape(lambda_val, [batch_size, 1, 1, 1])
+        lambda_lbl = tf.reshape(lambda_val, [batch_size, 1])
     else: # No mixing if alpha is 0
-        return batch_images, labels_one_hot # Or original batch_labels if it was sparse
+        return batch_images, labels_one_hot
 
-    # Shuffle the batch to create pairs for mixing
     shuffled_indices = tf.random.shuffle(tf.range(batch_size))
     shuffled_images = tf.gather(batch_images, shuffled_indices)
     shuffled_labels_one_hot = tf.gather(labels_one_hot, shuffled_indices)
 
-    # Calculate patch coordinates
-    cut_ratio = tf.math.sqrt(1.0 - lambda_val) # Proportional to patch size
-    cut_h = tf.cast(cut_ratio * tf.cast(image_h, tf.float32), tf.int32)
-    cut_w = tf.cast(cut_ratio * tf.cast(image_w, tf.float32), tf.int32)
+    mixed_images = lambda_img * batch_images + (1.0 - lambda_img) * shuffled_images
+    mixed_labels = lambda_lbl * labels_one_hot + (1.0 - lambda_lbl) * shuffled_labels_one_hot
+    return mixed_images, mixed_labels
 
-    # Uniformly sample the center of the patch
-    center_y = tf.random.uniform(shape=[], minval=0, maxval=image_h, dtype=tf.int32)
-    center_x = tf.random.uniform(shape=[], minval=0, maxval=image_w, dtype=tf.int32)
+@tf.function
+def cutmix(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_classes: int) -> Tuple[tf.Tensor, tf.Tensor]:
+    batch_size = tf.shape(batch_images)[0]
+    image_h = tf.shape(batch_images)[1]
+    image_w = tf.shape(batch_images)[2]
 
-    y1 = tf.clip_by_value(center_y - cut_h // 2, 0, image_h)
-    y2 = tf.clip_by_value(center_y + cut_h // 2, 0, image_h)
-    x1 = tf.clip_by_value(center_x - cut_w // 2, 0, image_w)
-    x2 = tf.clip_by_value(center_x + cut_w // 2, 0, image_w)
+    if len(tf.shape(batch_labels)) == 1:
+        labels_one_hot = tf.one_hot(tf.cast(batch_labels, dtype=tf.int32), depth=num_classes)
+    else:
+        labels_one_hot = batch_labels
+
+    if alpha > 0.0:
+        beta_dist = tf.compat.v1.distributions.Beta(alpha, alpha)
+        lambda_val = beta_dist.sample(1)[0] 
+    else:
+        return batch_images, labels_one_hot
+    
+    shuffled_indices = tf.random.shuffle(tf.range(batch_size))
+    shuffled_images = tf.gather(batch_images, shuffled_indices)
+    shuffled_labels_one_hot = tf.gather(labels_one_hot, shuffled_indices)
+
+    cut_ratio = tf.sqrt(1.0 - lambda_val) 
+    cut_h = tf.cast(cut_ratio * tf.cast(image_h, dtype=tf.float32), dtype=tf.int32)
+    cut_w = tf.cast(cut_ratio * tf.cast(image_w, dtype=tf.float32), dtype=tf.int32)
+
+    # Ensure cut_h and cut_w are at least 1 to avoid issues with tf.zeros
+    cut_h = tf.maximum(cut_h, 1)
+    cut_w = tf.maximum(cut_w, 1)
+    
+    # Ensure bbx1, bby1 calculations do not result in negative ranges for uniform
+    range_w = image_w - cut_w
+    range_h = image_h - cut_h
+
+    bbx1 = tf.random.uniform([], minval=0, maxval=tf.maximum(1, range_w), dtype=tf.int32) if range_w > 0 else 0
+    bby1 = tf.random.uniform([], minval=0, maxval=tf.maximum(1, range_h), dtype=tf.int32) if range_h > 0 else 0
+    
+    bbx2 = bbx1 + cut_w
+    bby2 = bby1 + cut_h
 
     # Create mask
-    # Mask has 1s where the patch from the shuffled image should be, 0s otherwise.
-    patch_height = y2 - y1
-    patch_width = x2 - x1
-
-    # Ensure patch area is not zero before division
-    actual_patch_area = tf.cast(patch_height * patch_width, tf.float32)
-    total_area = tf.cast(image_h * image_w, tf.float32)
+    # The mask needs to be of shape (height, width, 1) to broadcast correctly with (h, w, c) images
+    mask_center_shape = [cut_h, cut_w, 1] # For broadcasting with channels
+    padding = [[bby1, image_h - bby2], [bbx1, image_w - bbx2], [0, 0]] # Pad for channels dim too
     
-    # Adjust lambda based on the actual patch area that fits within the image
-    # lambda_val here represents the proportion of the first image in the mix
-    lambda_adjusted = 1.0 - (actual_patch_area / tf.maximum(total_area, 1e-8)) # Avoid division by zero if total_area is somehow 0
+    mask_center = tf.zeros(mask_center_shape, dtype=tf.float32)
+    mask = tf.pad(mask_center, padding, "CONSTANT", constant_values=1.0) # Pad with 1s
 
-    # Create the mask for pasting
-    mask_shape = (batch_size, image_h, image_w, 1) # Mask will be broadcast to channels
-    padding = [[y1, image_h - y2], [x1, image_w - x2]]
-    mask_patch = tf.ones([batch_size, patch_height, patch_width, 1], dtype=tf.float32)
-    # Pad the patch to create the full image mask. Padded areas are 0.
-    # Correct padding for tf.pad: it pads *around* the patch.
-    # We want to create a mask that is 1 in the patch area and 0 outside.
-    # A more direct way to create the mask:
-    mask_y = tf.logical_and(tf.range(image_h)[:, tf.newaxis] >= y1, tf.range(image_h)[:, tf.newaxis] < y2)
-    mask_x = tf.logical_and(tf.range(image_w)[tf.newaxis, :] >= x1, tf.range(image_w)[tf.newaxis, :] < x2)
-    mask_2d = tf.cast(tf.logical_and(mask_y, mask_x), tf.float32) # (H, W)
-    mask = mask_2d[tf.newaxis, :, :, tf.newaxis] # (1, H, W, 1)
-    mask = tf.tile(mask, [batch_size, 1, 1, 1]) # (B, H, W, 1)
+    # Apply mask to images
+    # Mask has 1s where original image should be, 0s where patch from shuffled image should be
+    cutmix_images = batch_images * mask + shuffled_images * (1.0 - mask)
+    mixed_labels = lambda_val * labels_one_hot + (1.0 - lambda_val) * shuffled_labels_one_hot
+    return cutmix_images, mixed_labels
 
-    # Apply CutMix
-    # Original image where mask is 0, shuffled image where mask is 1.
-    cutmix_images = batch_images * (1.0 - mask) + shuffled_images * mask
-    cutmix_labels = labels_one_hot * lambda_adjusted + shuffled_labels_one_hot * (1.0 - lambda_adjusted)
+# Custom augmentation layers for overfitting prevention
+class RandomErasing(tf.keras.layers.Layer):
+    """Random Erasing augmentation layer for regularization."""
+    
+    def __init__(self, probability=0.25, area_ratio_range=(0.02, 0.33), aspect_ratio_range=(0.3, 3.3), **kwargs):
+        super().__init__(**kwargs)
+        self.probability = probability
+        self.area_ratio_range = area_ratio_range
+        self.aspect_ratio_range = aspect_ratio_range
+    
+    def call(self, inputs, training=None):
+        if not training:
+            return inputs
+        
+        # Simple random erasing implementation
+        def apply_erasing():
+            shape = tf.shape(inputs)
+            height = shape[0]
+            width = shape[1]
+            channels = shape[2]
+            
+            # Fixed erasing size for simplicity (10% of image area)
+            erase_area = tf.cast(height * width, tf.float32) * 0.1
+            erase_size = tf.cast(tf.sqrt(erase_area), tf.int32)
+            erase_size = tf.minimum(erase_size, tf.minimum(height, width) // 2)
+            erase_size = tf.maximum(erase_size, 1)
+            
+            # Random position
+            max_y = tf.maximum(height - erase_size, 0)
+            max_x = tf.maximum(width - erase_size, 0)
+            y = tf.random.uniform([], 0, max_y + 1, dtype=tf.int32)
+            x = tf.random.uniform([], 0, max_x + 1, dtype=tf.int32)
+            
+            # Create a mask
+            mask = tf.ones_like(inputs)
+            # Create zero patch
+            zero_patch = tf.zeros([erase_size, erase_size, channels])
+            
+            # Apply the patch using slicing
+            erased = tf.concat([
+                inputs[:y],
+                tf.concat([
+                    inputs[y:y+erase_size, :x],
+                    zero_patch,
+                    inputs[y:y+erase_size, x+erase_size:]
+                ], axis=1),
+                inputs[y+erase_size:]
+            ], axis=0)
+            
+            return erased
+        
+        # Random decision to apply erasing
+        should_erase = tf.random.uniform([]) < self.probability
+        return tf.cond(should_erase, apply_erasing, lambda: inputs)
 
-    return cutmix_images, cutmix_labels
+class GaussianNoise(tf.keras.layers.Layer):
+    """Gaussian noise layer for regularization."""
+    
+    def __init__(self, stddev=0.02, **kwargs):
+        super().__init__(**kwargs)
+        self.stddev = stddev
+    
+    def call(self, inputs, training=None):
+        if not training:
+            return inputs
+        
+        noise = tf.random.normal(tf.shape(inputs), mean=0.0, stddev=self.stddev)
+        return inputs + noise
 
-def load_classification_data(config: Dict) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, Dict[int, str], Optional[Dict[int, float]]]:
-    """
-    Load and prepare classification data using a metadata.json file.
-    Refactored to read from metadata_path, use label_map_path from paths config.
-    Args:
-        config: Dictionary from classification/config.yaml.
-    Returns:
-        Tuple of (train_dataset, val_dataset, test_dataset, num_classes, index_to_label_map, class_weights_dict).
-    """
+def load_classification_data(
+    config: Dict,
+    max_samples_to_load: Optional[int] = None
+) -> Tuple[
+    Optional[tf.data.Dataset],
+    Optional[tf.data.Dataset],
+    Optional[tf.data.Dataset],
+    int, # num_train_samples
+    int, # num_val_samples
+    int, # num_test_samples
+    List[str], # class_names (ordered by index)
+    int, # num_classes
+]:
     project_root = _get_project_root()
+    data_config = config.get('data', {})
+    training_config = config.get('training', {})
+    model_config = config.get('model', {})
 
+    metadata_path = project_root / data_config.get('paths', {}).get('metadata_file', 'data/classification/metadata.json')
+    label_map_path = project_root / data_config.get('paths', {}).get('label_map_file', 'data/classification/label_map.json')
+    base_image_dir = project_root 
+
+    image_size = tuple(data_config.get('image_size', [224, 224]))
+    batch_size = data_config.get('batch_size', 32)
+    val_split = data_config.get('validation_split', 0.2)
+    test_split = data_config.get('test_split', 0.1) 
+
+    logger.info(f"Loading classification metadata from: {metadata_path}")
+    logger.info(f"Using batch_size: {batch_size} from data configuration")
+    
+    if not metadata_path.exists():
+        logger.error(f"Metadata file not found: {metadata_path}")
+        return None, None, None, 0, 0, 0, [], 0
     try:
-        # Essential paths from config
-        paths_config = config['paths']
-        data_cfg = config['data']
-        model_cfg = config['model']
-
-        # Construct metadata_path and label_map_path using paths_config
-        # Ensure paths are absolute if they are relative to project root or a specific data_dir
-        base_data_dir = project_root / paths_config.get('data_dir', 'data/classification')
-
-        metadata_filename = paths_config.get('metadata_filename', 'metadata.json')
-        metadata_path = base_data_dir / metadata_filename
-
-        label_map_filename = paths_config.get('label_map_filename', 'label_map.json')
-        label_map_path = base_data_dir / label_map_filename
-
-        if not metadata_path.exists():
-            logger.error(f"Metadata file not found: {metadata_path}")
-            return None, None, None, 0, {}, {}
-        if not label_map_path.exists():
-            logger.error(f"Label map file not found: {label_map_path}")
-            return None, None, None, 0, {}, {}
-
         with open(metadata_path, 'r') as f:
-            all_items = json.load(f)
-        with open(label_map_path, 'r') as f:
-            label_map_loaded = json.load(f)
-            # Invert the map and convert index to int: {class_name: index_int}
-            label_to_index = {name: int(idx) for idx, name in label_map_loaded.items()}
-            index_to_label = {int(idx): name for idx, name in label_map_loaded.items()}
-    
-        num_classes_from_map = len(label_to_index)
-        # Define the authoritative number of classes for the model and one-hot encoding
-        model_configured_num_classes = model_cfg.get('num_classes', num_classes_from_map)
-        logger.info(f"Model will be configured for {model_configured_num_classes} classes (derived from map: {num_classes_from_map}, config override: {model_cfg.get('num_classes')}).")
-
-        image_size = tuple(data_cfg['image_size'])
-        batch_size = data_cfg['batch_size']
-        split_ratio = data_cfg.get('split_ratio', 0.2) # Default to 0.2 if not specified
-
-        # New: Configs for additional modalities
-        use_depth_map = data_cfg.get('use_depth_map', False)
-        depth_map_dir_name = data_cfg.get('depth_map_dir_name', 'depth')
-        use_point_cloud = data_cfg.get('use_point_cloud', False)
-        point_cloud_root_dir = data_cfg.get('point_cloud_root_dir', '')
-        pc_sampling_rate_dir = data_cfg.get('point_cloud_sampling_rate_dir', '')
-        pc_suffix = data_cfg.get('point_cloud_suffix', '_sampled_1.ply')
-
-        # Prepare lists for all modalities
-        all_rgb_paths = []
-        all_labels_numeric = [] # Initialize all_labels_numeric
-        all_depth_paths = []
-        all_pc_paths = []    
-
-        skipped_missing_path = 0
-        skipped_missing_label = 0
-        processed_count = 0
-
-        # Progress bar setup
-        progress_bar = tqdm(all_items, desc="Processing metadata items", unit="item")
-
-        for item in progress_bar:
-            # Check for explicit image_path first
-            rgb_path_str = item['image_path']
-            # Basic validation: ensure rgb_path_str is not empty and exists
-            if not rgb_path_str or not pathlib.Path(rgb_path_str).exists():
-                logger.warning(f"RGB path missing or file not found: '{rgb_path_str}' for item {item.get('instance_name', 'N/A')}. Skipping item.")
-                skipped_missing_path += 1
-                continue
-            
-            all_rgb_paths.append(rgb_path_str)
-            class_name = item.get('class_name')
-            current_label = None
-            if class_name and class_name in label_to_index:
-                current_label = label_to_index[class_name]
-            elif class_name:
-                logger.warning(f"Class name '{class_name}' found in metadata item {rgb_path_str} but not in label_map. Skipping item.")
-                skipped_missing_label += 1
-                # Remove the already added rgb_path if label is invalid
-                if all_rgb_paths and all_rgb_paths[-1] == rgb_path_str:
-                    all_rgb_paths.pop()
-                continue 
-            else:
-                logger.warning(f"Missing 'class_name' in metadata for item {rgb_path_str}. Skipping item.")
-                skipped_missing_label += 1
-                if all_rgb_paths and all_rgb_paths[-1] == rgb_path_str:
-                    all_rgb_paths.pop()
-                continue
-            all_labels_numeric.append(current_label)
-            
-            # instance_id or instance_name is used for constructing depth/pc paths if they follow a pattern like .../class_name/instance_id_or_name/...
-            # Prioritize 'instance_id', then 'instance_name', then a default if neither exists (though usually one should for multi-modal)
-            instance_identifier = item.get('instance_id', item.get('instance_name', ''))
-            # all_instance_ids.append(instance_identifier) # Though this list itself isn't directly used for stratified split anymore
-
-            depth_path_str = "" # Default to empty string
-            if use_depth_map:
-                # Path for depth map: data_root / class_name / instance_name / depth_dir_name / frame_number.png (example)
-                # We need a robust way to get the frame_filename or identifier from rgb_path_str
-                frame_filename = pathlib.Path(rgb_path_str).name
-                # Assuming depth maps are in a subfolder relative to the RGB image's folder, or a parallel folder structure
-                # Example: E:\_MetaFood3D_new_RGBD_videos\RGBD_videos\Carrot\carrot_2\original\72.jpg
-                # Depth:   E:\_MetaFood3D_new_RGBD_videos\RGBD_videos\Carrot\carrot_2\depth\72.png (if .png)
-                # This logic assumes depth map has the same stem but possibly different suffix and parent dir named depth_map_dir_name
-                potential_depth_path = pathlib.Path(rgb_path_str).parent.parent / depth_map_dir_name / frame_filename
-                # More flexible: allow depth_map_dir_name to be relative to instance folder or class folder
-                # This example assumes depth_map_dir_name is a sibling to 'original' if rgb_path_str contains 'original'
-                # This might need adjustment based on exact dataset structure.
-                # For now, let's assume a simpler structure for classification where depth might be alongside RGB or given directly.
-                # If 'depth_path' is in metadata, use it. Otherwise, try to derive.
-                if 'depth_path' in item and item['depth_path']:
-                    potential_depth_path = pathlib.Path(item['depth_path'])
-                elif instance_identifier: # Try to derive if instance_identifier is present
-                     # This derivation is a placeholder and likely needs to match your *actual* structure for classification data
-                    potential_depth_path = pathlib.Path(rgb_path_str).parent.parent / depth_map_dir_name / frame_filename # Simplified assumption
-                else: # Cannot derive without instance identifier or explicit path
-                    potential_depth_path = None
-
-                if potential_depth_path and potential_depth_path.exists():
-                    depth_path_str = str(potential_depth_path)
-                else:
-                    logger.debug(f"Depth map not found for {rgb_path_str} (tried {potential_depth_path}). Will use zeros.")
-            all_depth_paths.append(depth_path_str)
-
-            pc_path_str = "" # Default to empty string
-            if use_point_cloud:
-                food_class_from_label = item['class_name'] 
-                # PC path construction logic (assuming it's correct as per previous steps)
-                # Point clouds are often per-instance rather than per-frame.
-                # The metadata should ideally link an RGB frame to its corresponding (potentially single) instance point cloud.
-                if 'point_cloud_path' in item and item['point_cloud_path']:
-                    potential_pc_path = pathlib.Path(item['point_cloud_path'])
-                elif instance_identifier: # Try to derive if instance_identifier is present
-                    potential_pc_path = pathlib.Path(point_cloud_root_dir) / pc_sampling_rate_dir / food_class_from_label / instance_identifier / (instance_identifier + pc_suffix)
-                else:
-                    potential_pc_path = None
-                
-                if potential_pc_path and potential_pc_path.exists():
-                    pc_path_str = str(potential_pc_path)
-                else:
-                    logger.debug(f"Point cloud not found for {rgb_path_str} (food_class: {food_class_from_label}, instance: {instance_identifier}, tried {potential_pc_path}). Will use zeros.")
-            all_pc_paths.append(pc_path_str)
-
-            processed_count += 1
-            if processed_count % 20000 == 0: # Log progress every 20000 items for full dataset
-                logger.info(f"Processed {processed_count}/{len(all_items)} metadata items...")
-
-        logger.info(f"Finished processing metadata. {processed_count} items prepared for dataset creation.")
-        logger.info(f"Skipped {skipped_missing_path} items due to missing RGB path.")
-        logger.info(f"Skipped {skipped_missing_label} items due to missing or invalid class_name.")
-
-        if not all_rgb_paths or not all_labels_numeric:
-            logger.error("No valid data items found after processing metadata. Aborting.")
-            return None, None, None, 0, {}, {}
-
-        # --- (Optional) Subset Sampling for Debugging/Testing ---
-        debug_max_total_samples = data_cfg.get('debug_max_total_samples', None)
-        if debug_max_total_samples and isinstance(debug_max_total_samples, int) and debug_max_total_samples > 0:
-            if debug_max_total_samples < len(all_rgb_paths):
-                logger.info(f"Debug mode: Sampling {debug_max_total_samples} images from the total {len(all_rgb_paths)} images for quick testing.")
-                paired_data = list(zip(all_rgb_paths, all_labels_numeric, all_depth_paths, all_pc_paths))
-                # Ensure sample size is not larger than population
-                actual_sample_size = min(debug_max_total_samples, len(paired_data))
-                if actual_sample_size < debug_max_total_samples:
-                    logger.warning(f"Requested debug_max_total_samples {debug_max_total_samples} but only {len(paired_data)} samples available. Using {actual_sample_size}.")
-                
-                if actual_sample_size > 0:
-                    sampled_pairs = random.sample(paired_data, actual_sample_size)
-                    all_rgb_paths, all_labels_numeric, all_depth_paths, all_pc_paths = zip(*sampled_pairs)
-                    all_rgb_paths = list(all_rgb_paths)
-                    all_labels_numeric = list(all_labels_numeric)
-                    all_depth_paths = list(all_depth_paths)
-                    all_pc_paths = list(all_pc_paths)
-                    logger.info(f"Sampled down to {len(all_rgb_paths)} images for debug run.")
-
-                    # --- Stratification Fix for Small Subsets ---
-                    if len(all_labels_numeric) > 0: # Proceed only if there are labels to count
-                        label_counts = Counter(all_labels_numeric)
-                        min_samples_per_class_for_split = 2 # For StratifiedShuffleSplit or train_test_split with stratification
-                        
-                        classes_to_remove = {label for label, count in label_counts.items() if count < min_samples_per_class_for_split}
-                        
-                        if classes_to_remove:
-                            logger.warning(
-                                f"Debug mode: To ensure stratification is possible, removing classes with < {min_samples_per_class_for_split} samples from the debug subset."
-                            )
-                            logger.warning(f"Classes to remove: {classes_to_remove}")
-                            
-                            # Create new lists excluding the underrepresented classes
-                            filtered_rgb_paths = []
-                            filtered_labels_numeric = []
-                            filtered_depth_paths = []
-                            filtered_pc_paths = []
-                            
-                            for i in range(len(all_labels_numeric)):
-                                if all_labels_numeric[i] not in classes_to_remove:
-                                    filtered_rgb_paths.append(all_rgb_paths[i])
-                                    filtered_labels_numeric.append(all_labels_numeric[i])
-                                    filtered_depth_paths.append(all_depth_paths[i])
-                                    filtered_pc_paths.append(all_pc_paths[i])
-                            
-                            if len(filtered_labels_numeric) < len(all_labels_numeric):
-                                logger.info(f"Removed {len(all_labels_numeric) - len(filtered_labels_numeric)} samples belonging to underrepresented classes.")
-                                all_rgb_paths = filtered_rgb_paths
-                                all_labels_numeric = filtered_labels_numeric
-                                all_depth_paths = filtered_depth_paths
-                                all_pc_paths = filtered_pc_paths
-                                logger.info(f"Final debug subset size after filtering for stratification: {len(all_rgb_paths)} samples.")
-                            else:
-                                logger.info("No classes needed removal for stratification.")
-                        else:
-                            logger.info("Debug subset has sufficient samples per class for stratification.")
-                    else:
-                        logger.warning("Debug subset has no labels after sampling. Stratification checks skipped.")
-                else:
-                    logger.warning(f"Debug mode: No samples available after attempting to sample {debug_max_total_samples}. Skipping subset processing.")
-            else:
-                logger.info(f"debug_max_total_samples ({debug_max_total_samples}) is >= total images ({len(all_rgb_paths)}). Using all images.")
-        # --- End Subset Sampling & Stratification Fix ---
-
-        if not all_rgb_paths or not all_labels_numeric:
-            logger.error("No data remains after potential debug sampling and filtering. Aborting data loading.")
-            return None, None, None, 0, {}, {}
-
-        # Determine if this is a debug run for split logic
-        is_debug_run = data_cfg.get('debug_max_total_samples', None) is not None
-
-        # Convert to TensorFlow constants for splitting
-        all_rgb_paths_tf = tf.constant(all_rgb_paths)
-
-        path_tuples = list(zip(all_rgb_paths, all_depth_paths, all_pc_paths))
-        all_labels_numeric_tf = tf.constant(all_labels_numeric, dtype=tf.int32)
-
-        # Initial split: Train vs. Temp (Validation + Test)
-        # Stratify by all_labels_numeric if possible
-        num_unique_classes_total = len(set(all_labels_numeric))
-        
-        # Calculate actual split sizes for the first split
-        first_split_temp_size_abs = int(len(path_tuples) * split_ratio)
-        # Ensure temp_size is at least 1 if len(path_tuples) * split_ratio is very small but non-zero, and total samples > 1
-        if len(path_tuples) > 1 and first_split_temp_size_abs == 0 and (len(path_tuples) * split_ratio) > 0:
-            first_split_temp_size_abs = 1 
-        first_split_train_size_abs = len(path_tuples) - first_split_temp_size_abs
-
-        stratify_for_first_split = all_labels_numeric
-        if is_debug_run and (first_split_temp_size_abs < num_unique_classes_total or first_split_train_size_abs < num_unique_classes_total):
-            logger.warning(
-                f"Debug mode: Disabling stratification for train/temp split. TEMP_SIZE ({first_split_temp_size_abs}) or TRAIN_SIZE ({first_split_train_size_abs}) "
-                f"is smaller than N_UNIQUE_CLASSES ({num_unique_classes_total})."
-            )
-            stratify_for_first_split = None
-        elif first_split_temp_size_abs == 0 or first_split_train_size_abs == 0: # Handles cases where one split would be empty
-             logger.warning(
-                f"Warning: A split part (train or temp) would be empty (temp_size={first_split_temp_size_abs}, train_size={first_split_train_size_abs}). "
-                f"Disabling stratification for train/temp split."
-            )
-             stratify_for_first_split = None
-
-        if len(path_tuples) < 2: # Cannot split if less than 2 samples
-            logger.warning(f"Total samples ({len(path_tuples)}) less than 2. Assigning all to train, val/test will be empty.")
-            train_indices = np.arange(len(path_tuples))
-            temp_indices = []
-        else:
-            try:
-                train_indices, temp_indices = train_test_split(
-                    np.arange(len(path_tuples)),
-                    test_size=split_ratio, 
-                    random_state=data_cfg.get('random_seed', 42),
-                    stratify=stratify_for_first_split
-                )
-            except ValueError as e:
-                logger.error(f"Error during first train_test_split (train/temp): {e}. Defaulting to non-stratified split.")
-                train_indices, temp_indices = train_test_split(
-                    np.arange(len(path_tuples)),
-                    test_size=split_ratio, 
-                    random_state=data_cfg.get('random_seed', 42),
-                    stratify=None
-                )
-
-        # Second split: Validation vs. Test from Temp set
-        if len(temp_indices) > 1:
-            temp_labels_for_stratify = [all_labels_numeric[i] for i in temp_indices]
-            num_unique_classes_in_temp = len(set(temp_labels_for_stratify))
-
-            # Calculate actual split sizes for the second split (0.5 for test_size)
-            second_split_test_size_abs = int(len(temp_indices) * 0.5)
-            if len(temp_indices) > 1 and second_split_test_size_abs == 0 : # Ensure test_size is at least 1 if temp_indices has e.g. 1 element and 0.5*1=0
-                 second_split_test_size_abs = 1 if len(temp_indices) > 1 else 0 # if len is 1, test size should be 0, val gets 1.
-            second_split_val_size_abs = len(temp_indices) - second_split_test_size_abs
-            
-            # Correction for len(temp_indices) == 1 where test_size 0.5 would make second_split_test_size_abs = 0
-            # We want val to get the sample if only 1 sample in temp.
-            if len(temp_indices) == 1:
-                second_split_val_size_abs = 1
-                second_split_test_size_abs = 0
-
-            stratify_for_second_split = temp_labels_for_stratify
-            if is_debug_run and (second_split_test_size_abs < num_unique_classes_in_temp or second_split_val_size_abs < num_unique_classes_in_temp):
-                logger.warning(
-                    f"Debug mode: Disabling stratification for val/test split. TEST_SIZE ({second_split_test_size_abs}) or VAL_SIZE ({second_split_val_size_abs}) "
-                    f"is smaller than N_UNIQUE_CLASSES_IN_TEMP ({num_unique_classes_in_temp})."
-                )
-                stratify_for_second_split = None
-            elif second_split_test_size_abs == 0 or second_split_val_size_abs == 0: # Handles cases where one split would be empty and other has data
-                if not (second_split_test_size_abs == 0 and second_split_val_size_abs == 0): # Avoid warning if temp_indices is empty
-                    logger.warning(
-                        f"Warning: A split part (val or test) would be empty (val_size={second_split_val_size_abs}, test_size={second_split_test_size_abs}). "
-                        f"Disabling stratification for val/test split."
-                    )
-                stratify_for_second_split = None
-            
-            try:
-                val_indices, test_indices = train_test_split(
-                    temp_indices,
-                    test_size=0.5, # Splitting the temp set into 50% validation, 50% test
-                    random_state=data_cfg.get('random_seed', 42),
-                    stratify=stratify_for_second_split
-                )
-            except ValueError as e:
-                logger.error(f"Error during second train_test_split (val/test): {e}. Defaulting to non-stratified split.")
-                val_indices, test_indices = train_test_split(
-                    temp_indices,
-                    test_size=0.5, 
-                    random_state=data_cfg.get('random_seed', 42),
-                    stratify=None
-                )
-        elif len(temp_indices) == 1:
-            logger.warning("Only one sample in temp set. Assigning to validation set, test set will be empty.")
-            val_indices = temp_indices
-            test_indices = []
-        else: # len(temp_indices) == 0
-            val_indices, test_indices = [], []
-
-        train_path_tuples = [path_tuples[i] for i in train_indices]
-        
-        val_path_tuples = [path_tuples[i] for i in val_indices]
-        val_labels = [all_labels_numeric_tf[i] for i in val_indices]
-
-        test_path_tuples = [path_tuples[i] for i in test_indices]
-        test_labels = [all_labels_numeric_tf[i] for i in test_indices]
-
-        # Create tf.data.Dataset objects
-        # For training dataset
-        if train_path_tuples:
-            train_dataset = tf.data.Dataset.from_tensor_slices((train_path_tuples, [all_labels_numeric_tf[i] for i in train_indices]))
-            train_dataset = train_dataset.shuffle(buffer_size=len(train_path_tuples), seed=42, reshuffle_each_iteration=True) # Shuffle before mapping
-            augmentation_pipeline = _build_augmentation_pipeline(data_cfg)
-            preprocess_fn_rgb = _get_preprocess_fn(model_cfg['architecture'])
-
-            depth_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('depth_map', {})
-            pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
-
-            # Helper function for point cloud processing (to be wrapped by tf.py_function)
-            def _load_and_preprocess_point_cloud_py(pc_path_bytes: bytes, num_points_target_tensor: tf.Tensor, normalization_method_tensor: tf.Tensor) -> np.ndarray:
-                pc_path = pc_path_bytes.numpy().decode('utf-8')
-                num_points_target = num_points_target_tensor.numpy() # Convert num_points_target tensor to Python int
-                current_normalization_method = normalization_method_tensor.numpy().decode('utf-8') # Convert normalization_method tensor to Python string
-                try:
-                    if not pc_path or not pathlib.Path(pc_path).exists():
-                        return np.zeros((num_points_target, 3), dtype=np.float32)
-
-                    mesh_or_points = trimesh.load(pc_path, process=False) 
-                    
-                    if isinstance(mesh_or_points, trimesh.Trimesh):
-                        if mesh_or_points.vertices.shape[0] == 0:
-                            return np.zeros((num_points_target, 3), dtype=np.float32)
-                        points = mesh_or_points.vertices 
-                    elif isinstance(mesh_or_points, trimesh.points.PointCloud):
-                        points = mesh_or_points.vertices
-                    else:
-                        return np.zeros((num_points_target, 3), dtype=np.float32)
-
-                    if points.shape[0] == 0:
-                        return np.zeros((num_points_target, 3), dtype=np.float32)
-
-                    # Subsample or pad to num_points_target
-                    if points.shape[0] > num_points_target:
-                        indices = np.random.choice(points.shape[0], num_points_target, replace=False)
-                        points = points[indices]
-                    elif points.shape[0] < num_points_target:
-                        if points.shape[0] == 0: 
-                            return np.zeros((num_points_target, 3), dtype=np.float32)
-                        indices = np.random.choice(points.shape[0], num_points_target, replace=True)
-                        points = points[indices]
-                
-                    # Normalize coordinates
-                    points = points.astype(np.float32) 
-                    points_mean = np.mean(points, axis=0)
-                    points_centered = points - points_mean
-
-                    if current_normalization_method == 'unit_sphere':
-                        max_dist = np.max(np.linalg.norm(points_centered, axis=1))
-                        if max_dist < 1e-6: max_dist = 1.0 
-                        points_normalized = points_centered / max_dist
-                    elif current_normalization_method == 'unit_cube':
-                        # Scale to fit within a [-1, 1] cube, maintaining aspect ratio
-                        max_abs_coord = np.max(np.abs(points_centered))
-                        if max_abs_coord < 1e-6: max_abs_coord = 1.0
-                        points_normalized = points_centered / max_abs_coord
-                        points_normalized = np.clip(points_normalized, -1.0, 1.0) 
-                    elif current_normalization_method == 'centered_only': 
-                        points_normalized = points_centered
-                    else: # Default or 'none'
-                        points_normalized = points 
-            
-                    return points_normalized.astype(np.float32)
-
-                except Exception as e:
-                    return np.zeros((num_points_target, 3), dtype=np.float32)
-
-            # Updated load_and_preprocess signature and logic
-            def load_and_preprocess(input_paths: Tuple[tf.Tensor, tf.Tensor, tf.Tensor], label: tf.Tensor, augment: bool = False) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
-                rgb_path = input_paths[0]
-                depth_path_tensor = input_paths[1]
-                pc_path_tensor = input_paths[2]
-
-                # --- RGB Image Processing ---
-                image_string = tf.io.read_file(rgb_path)
-                rgb_image = tf.image.decode_image(image_string, channels=3, expand_animations=False, dtype=tf.uint8)
-                rgb_image = tf.image.resize(rgb_image, image_size)
-                rgb_image_float = tf.cast(rgb_image, tf.float32)
-                rgb_image_float.set_shape([*image_size, 3])
-
-                if augment and augmentation_pipeline is not None:
-                    img_for_aug = tf.expand_dims(rgb_image_float, axis=0)
-                    img_aug = augmentation_pipeline(img_for_aug, training=True)
-                    rgb_image_float = tf.squeeze(img_aug, axis=0)
-                    rgb_image_float = tf.clip_by_value(rgb_image_float, 0.0, 255.0)
-        
-                rgb_image_preprocessed = preprocess_fn_rgb(rgb_image_float)
-                inputs = {'rgb_input': rgb_image_preprocessed}
-
-                # --- Depth Map Processing ---
-                if use_depth_map:
-                    # Check if depth_path_tensor is not an empty string
-                    depth_exists_cond = tf.strings.length(depth_path_tensor) > 0
-                    
-                    def load_and_process_depth():
-                        depth_string = tf.io.read_file(depth_path_tensor)
-                        # Try decoding as PNG, then JPEG if PNG fails, common for depth maps
-                        try:
-                            depth_image_decoded = tf.image.decode_png(depth_string, channels=1, dtype=tf.uint8) # Or tf.uint16 if applicable
-                        except tf.errors.InvalidArgumentError:
-                            depth_image_decoded = tf.image.decode_jpeg(depth_string, channels=1)
-                    
-                        depth_image_resized = tf.image.resize(depth_image_decoded, image_size)
-                        depth_image_float = tf.cast(depth_image_resized, tf.float32)
-                    
-                        norm_method = depth_prep_cfg.get('normalization', 'min_max_local')
-                        if norm_method == 'min_max_local':
-                            min_val = tf.reduce_min(depth_image_float)
-                            max_val = tf.reduce_max(depth_image_float)
-                            denominator = max_val - min_val
-                            depth_normalized = tf.cond(denominator < 1e-6, 
-                                                       lambda: tf.zeros_like(depth_image_float), 
-                                                       lambda: (depth_image_float - min_val) / denominator)
-                        elif norm_method == 'fixed_range':
-                            fixed_min = float(depth_prep_cfg.get('fixed_min_val', 0.0))
-                            fixed_max = float(depth_prep_cfg.get('fixed_max_val', 255.0)) # Assuming 8-bit like range if not specified
-                            denominator = fixed_max - fixed_min
-                            if denominator < 1e-6: denominator = 1.0 # Avoid division by zero, treat as no normalization
-                            depth_normalized = (depth_image_float - fixed_min) / denominator
-                            depth_normalized = tf.clip_by_value(depth_normalized, 0.0, 1.0)
-                        else: # Default or 'none'
-                            depth_normalized = depth_image_float / 255.0 # Assuming 0-255 range needs scaling to 0-1
-
-                        depth_normalized.set_shape([*image_size, 1])
-                        return depth_normalized
-                
-                    def zeros_for_depth():
-                        return tf.zeros([*image_size, 1], dtype=tf.float32)
-
-                    inputs['depth_input'] = tf.cond(depth_exists_cond, load_and_process_depth, zeros_for_depth)
-
-                # --- Point Cloud Processing ---
-                if use_point_cloud:
-                    num_points_target = int(pc_prep_cfg.get('num_points', 4096))
-                    normalization_method_str = pc_prep_cfg.get('normalization', 'unit_sphere')
-                
-                    pc_exists_cond = tf.strings.length(pc_path_tensor) > 0
-
-                    def load_and_process_pc():
-                        pc_data = tf.py_function(_load_and_preprocess_point_cloud_py, 
-                                                 inp=[pc_path_tensor, num_points_target, normalization_method_str], 
-                                                 Tout=tf.float32)
-                        pc_data.set_shape([num_points_target, 3])
-                        return pc_data
-
-                    def zeros_for_pc():
-                        return tf.zeros([num_points_target, 3], dtype=tf.float32)
-                
-                    inputs['pc_input'] = tf.cond(pc_exists_cond, load_and_process_pc, zeros_for_pc)
-            
-                return inputs, label
-
-            AUTOTUNE = tf.data.AUTOTUNE
-
-            train_dataset = train_dataset.map(lambda x, y: load_and_preprocess(x, y, augment=data_cfg.get('augmentation', {}).get('enabled', False)), num_parallel_calls=AUTOTUNE)
-            logger.info("Applying .cache() to the training dataset after mapping. This will use more RAM but speed up subsequent epochs.")
-            train_dataset = train_dataset.cache()
-            train_dataset = train_dataset.batch(batch_size, drop_remainder=True)
-
-        else:
-            train_dataset = None
-            logger.info("Training dataset is empty after split.")
-
-        # Factory function to create the one-hot encoding mapper
-        # This helps ensure num_classes is correctly captured for AutoGraph.
-        def one_hot_encode_eval_labels_factory(num_classes_to_use: int):
-            @tf.function # Explicitly mark for AutoGraph if needed, or let map handle it
-            def _map_fn(features, label):
-                return features, tf.one_hot(tf.cast(label, tf.int32), depth=num_classes_to_use)
-            return _map_fn
-
-        # Create the mapper function using the final num_classes value
-        # This num_classes is determined after potential debug filtering
-        # For one-hot encoding depth, always use model_configured_num_classes
-        one_hot_mapper_for_eval = one_hot_encode_eval_labels_factory(model_configured_num_classes)
-
-        # For validation dataset
-        if val_path_tuples:
-            val_dataset = tf.data.Dataset.from_tensor_slices((val_path_tuples, val_labels))
-            val_dataset = val_dataset.map(lambda x, y: load_and_preprocess(x, y, augment=False), num_parallel_calls=AUTOTUNE)
-            val_dataset = val_dataset.map(one_hot_mapper_for_eval, num_parallel_calls=AUTOTUNE)
-            logger.info("Applying .cache() to the validation dataset after mapping and one-hot encoding labels.")
-            val_dataset = val_dataset.cache()
-            val_dataset = val_dataset.batch(batch_size, drop_remainder=False)
-        else:
-            val_dataset = None
-            logger.info("Validation dataset is empty after split.")
-
-        # For test dataset
-        if test_path_tuples:
-            test_dataset = tf.data.Dataset.from_tensor_slices((test_path_tuples, test_labels))
-            test_dataset = test_dataset.map(lambda x, y: load_and_preprocess(x, y, augment=False), num_parallel_calls=AUTOTUNE)
-            test_dataset = test_dataset.map(one_hot_mapper_for_eval, num_parallel_calls=AUTOTUNE)
-            logger.info("Applying .cache() to the test dataset after mapping and one-hot encoding labels.")
-            test_dataset = test_dataset.cache()
-            test_dataset = test_dataset.batch(batch_size, drop_remainder=False)
-            test_dataset = test_dataset.prefetch(buffer_size=AUTOTUNE)
-        else:
-            test_dataset = None
-            logger.info("Test dataset is empty after split.")
-
-        # Apply MixUp and CutMix after batching
-        # These augmentations operate on batches and can change label distributions (e.g., to soft labels).
-        # The structure of train_dataset elements (tensor vs dict) depends on whether multi-modal is enabled.
-        
-        is_multimodal_enabled = data_cfg.get('modalities_config', {}).get('enabled', False)
-
-        mixup_config = data_cfg.get('augmentation', {}).get('mixup', {})
-        if train_dataset and mixup_config.get('enabled', False) and mixup_config.get('alpha', 0.0) > 0:
-            mixup_alpha = float(mixup_config.get('alpha', 0.2))
-            logger.info(f"Applying MixUp augmentation with alpha={mixup_alpha} and num_classes={model_configured_num_classes}.")
-            
-            def apply_mixup_map(features_input, labels_input):
-                rgb_to_process = features_input['rgb_input'] # load_and_preprocess always returns a dict
-                mixed_rgb, mixed_labels = mixup(rgb_to_process, labels_input, mixup_alpha, model_configured_num_classes)
-                if is_multimodal_enabled:
-                    # Update the dict for multi-modal case
-                    updated_features = features_input.copy() # Make a copy to modify
-                    updated_features['rgb_input'] = mixed_rgb
-                    return updated_features, mixed_labels
-                else:
-                    # Return only the mixed RGB tensor for single-modal case
-                    return mixed_rgb, mixed_labels
-            train_dataset = train_dataset.map(apply_mixup_map, num_parallel_calls=AUTOTUNE)
-        elif mixup_config.get('enabled', False):
-            logger.info("MixUp is enabled in config but alpha is 0.0 or not specified correctly. No MixUp will be applied.")
-
-        cutmix_config = data_cfg.get('augmentation', {}).get('cutmix', {})
-        if train_dataset and cutmix_config.get('enabled', False) and cutmix_config.get('alpha', 0.0) > 0:
-            cutmix_alpha = float(cutmix_config.get('alpha', 1.0))
-            logger.info(f"Applying CutMix augmentation with alpha={cutmix_alpha} and num_classes={model_configured_num_classes}.")
-
-            def apply_cutmix_map(features_input, labels_input):
-                if is_multimodal_enabled:
-                    # features_input is a dict from MixUp (or load_and_preprocess if MixUp was skipped)
-                    rgb_to_process = features_input['rgb_input']
-                else:
-                    # features_input is an RGB tensor from MixUp (or features_input['rgb_input'] from load_and_preprocess if MixUp was skipped)
-                    # This path assumes if MixUp was skipped and single-modal, the structure might still be a dict initially.
-                    # However, the MixUp stage for single-modal returns a tensor if applied.
-                    if isinstance(features_input, dict):
-                        rgb_to_process = features_input['rgb_input'] # Handle case where MixUp was skipped
-                    else:
-                        rgb_to_process = features_input # Is a tensor if MixUp (single-modal) was applied
-                
-                cutmixed_rgb, cutmixed_labels = cutmix(rgb_to_process, labels_input, cutmix_alpha, model_configured_num_classes)
-                
-                if is_multimodal_enabled:
-                    # Update the dict for multi-modal case
-                    # features_input here is already a copy if it came from the multi-modal MixUp path
-                    # If MixUp was skipped, make a copy.
-                    if not isinstance(features_input, dict):
-                         # This case should ideally not be hit if logic is consistent
-                         # but as a safeguard if prev stage was single-modal mixup returning tensor.
-                         updated_features = {'rgb_input': cutmixed_rgb} # Potential loss of other modalities if not careful
-                         logger.warning("CutMix in multi-modal path received tensor, potential loss of other modalities.")
-                    else:
-                        updated_features = features_input.copy() 
-                    updated_features['rgb_input'] = cutmixed_rgb
-                    return updated_features, cutmixed_labels
-                else:
-                    # Return only the cutmixed RGB tensor for single-modal case
-                    return cutmixed_rgb, cutmixed_labels
-            train_dataset = train_dataset.map(apply_cutmix_map, num_parallel_calls=AUTOTUNE)
-        elif cutmix_config.get('enabled', False):
-            logger.info("CutMix is enabled in config but alpha is 0.0 or not specified correctly. No CutMix will be applied.")
-
-        if train_dataset:
-            train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
-            logger.info("Training dataset created and prefetched.")
-    
-        if val_dataset:
-            val_dataset = val_dataset.prefetch(buffer_size=AUTOTUNE)
-            logger.info("Validation dataset created and prefetched.")
-    
-        class_weights_dict = compute_class_weights(all_labels_numeric, model_configured_num_classes)
-        if class_weights_dict:
-            logger.info(f"Computed class weights for {len(class_weights_dict)} classes based on {model_configured_num_classes} configured classes.")
-        else:
-            logger.info("Class weights not computed (e.g., empty labels or uniform distribution implied).")
-
-        logger.info("Data loading and preprocessing complete.")
-        return train_dataset, val_dataset, test_dataset, model_configured_num_classes, index_to_label, class_weights_dict
-
-    except FileNotFoundError as e:
-        logger.error(f"Configuration or data file not found: {e}")
-        traceback.print_exc()
-        return None, None, None, 0, {}, {}
-    except KeyError as e:
-        logger.error(f"Missing expected key in configuration: {e}")
-        traceback.print_exc()
-        return None, None, None, 0, {}, {}
-    except ValueError as e:
-        logger.error(f"ValueError during data loading/splitting: {e}")
-        traceback.print_exc()
-        return None, None, None, 0, {}, {}
+            metadata = json.load(f)
     except Exception as e:
-        logger.error(f"Failed to load classification data: {e}")
-        traceback.print_exc() 
-        return None, None, None, 0, {}, {}
+        logger.error(f"Error loading metadata from {metadata_path}: {e}")
+        return None, None, None, 0, 0, 0, [], 0
+
+    logger.info(f"Loading label map from: {label_map_path}")
+    if not label_map_path.exists():
+        logger.error(f"Label map file not found: {label_map_path}")
+        return None, None, None, 0, 0, 0, [], 0 
+    try:
+        with open(label_map_path, 'r') as f:
+            index_to_label_map_str_keys = json.load(f)
+            index_to_label_map = {int(k): v for k, v in index_to_label_map_str_keys.items()}
+            num_classes = len(index_to_label_map)
+            class_names = [index_to_label_map[i] for i in sorted(index_to_label_map.keys())]
+            if not class_names or num_classes == 0:
+                logger.error(f"Label map loaded from {label_map_path} is empty or invalid.")
+                return None, None, None, 0, 0, 0, [], 0
+            logger.info(f"Successfully loaded label map. Number of classes: {num_classes}")
+    except Exception as e:
+        logger.error(f"Error loading or processing label map from {label_map_path}: {e}")
+        return None, None, None, 0, 0, 0, [], 0
+
+    all_image_paths = []
+    all_labels = [] 
+    label_to_index_map = {v: k for k, v in index_to_label_map.items()}
+
+    logger.info("Collecting image paths and labels from metadata...")
+    # Handle both list format and dict format for metadata
+    if isinstance(metadata, list):
+        metadata_items = metadata
+    else:
+        metadata_items = metadata.get('images', [])
+    
+    for item in tqdm(metadata_items, desc="Processing metadata entries"):
+        # Handle different field name formats
+        relative_path = item.get('path') or item.get('image_path')
+        label_name = item.get('label') or item.get('class_name')
+        
+        if not relative_path or label_name is None:
+            logger.warning(f"Skipping item due to missing path or label: {item}")
+            continue
+        
+        # Handle absolute paths from the dataset
+        if relative_path.startswith('E:'):
+            # Use the absolute path directly
+            full_image_path = Path(relative_path)
+        else:
+            # Handle relative paths
+            if relative_path.startswith(str(base_image_dir)):
+                relative_path = str(Path(relative_path).relative_to(base_image_dir))
+            full_image_path = base_image_dir / relative_path
+        
+        if not full_image_path.exists():
+            logger.warning(f"Image file not found: {full_image_path}. Skipping.")
+            continue
+
+        if label_name not in label_to_index_map:
+            logger.error(f"Label '{label_name}' from metadata not found in label_map {label_map_path}. Skipping image {full_image_path}.")
+            continue
+        
+        all_image_paths.append(str(full_image_path))
+        all_labels.append(label_to_index_map[label_name])
+
+    if not all_image_paths:
+        logger.error("No valid image paths found after processing metadata.")
+        return None, None, None, 0, 0, 0, class_names, num_classes
+    
+    logger.info(f"Collected {len(all_image_paths)} total image paths with labels.")
+
+    if max_samples_to_load is not None and max_samples_to_load > 0:
+        logger.info(f"Debug mode: max_samples_to_load specified as {max_samples_to_load}.")
+        if len(all_image_paths) > max_samples_to_load:
+            logger.info(f"Shuffling and truncating dataset from {len(all_image_paths)} to {max_samples_to_load} samples.")
+            combined = list(zip(all_image_paths, all_labels))
+            random.shuffle(combined)
+            all_image_paths_shuffled, all_labels_shuffled = zip(*combined)
+            all_image_paths = list(all_image_paths_shuffled[:max_samples_to_load])
+            all_labels = list(all_labels_shuffled[:max_samples_to_load])
+            logger.info(f"Dataset truncated to {len(all_image_paths)} samples for debug mode.")
+        else:
+            logger.info(f"max_samples_to_load ({max_samples_to_load}) is >= total samples ({len(all_image_paths)}). Using all collected samples.")
+
+    if not all_image_paths: 
+        logger.error("No image paths remaining after potential debug mode truncation.")
+        return None, None, None, 0, 0, 0, class_names, num_classes
+
+    all_image_paths_np = np.array(all_image_paths)
+    all_labels_np = np.array(all_labels)
+
+    if val_split + test_split >= 1.0:
+        logger.error(f"Validation split ({val_split}) + Test split ({test_split}) must be less than 1.0.")
+        return None, None, None, 0, 0, 0, class_names, num_classes
+
+    can_stratify_initial = True
+    if num_classes > 1:
+        label_counts = Counter(all_labels_np)
+        if any(count < 2 for count in label_counts.values()):
+            logger.warning("Cannot stratify initial split: at least one class has fewer than 2 samples. Proceeding without stratification.")
+            can_stratify_initial = False
+    else: 
+        can_stratify_initial = False
+        logger.info("Single class dataset or num_classes <= 1, proceeding without stratification.")
+
+    if (1.0 - val_split - test_split) <= 0: # Ensure train split is positive
+        logger.error(f"The combined validation ({val_split}) and test ({test_split}) splits leave no data for training.")
+        return None, None, None, 0, 0, 0, class_names, num_classes
+
+    if test_split > 0:
+        if len(all_image_paths_np) < 2 : # Need at least 2 samples to split
+            logger.warning(f"Too few samples ({len(all_image_paths_np)}) to create a test set. Test set will be empty.")
+            train_val_paths, train_val_labels = all_image_paths_np, all_labels_np
+            test_paths, test_labels = np.array([]), np.array([])
+        else:
+            stratify_param_tv = all_labels_np if can_stratify_initial else None
+            train_val_paths, test_paths, train_val_labels, test_labels = train_test_split(
+                all_image_paths_np, all_labels_np, 
+                test_size=test_split, 
+                random_state=data_config.get('random_seed', 42),
+                stratify=stratify_param_tv
+            )
+    else:
+        train_val_paths, train_val_labels = all_image_paths_np, all_labels_np
+        test_paths, test_labels = np.array([]), np.array([]) 
+
+    if val_split > 0 and len(train_val_paths) > 0:
+        # Adjust val_split fraction relative to the remaining train_val_paths
+        adjusted_val_split = val_split / (1.0 - test_split) if (1.0 - test_split) > 0 else val_split
+
+        if len(train_val_paths) < 2:
+            logger.warning(f"Too few samples in train_val_paths ({len(train_val_paths)}) for validation set. Validation set will be empty.")
+            train_paths, train_labels = train_val_paths, train_val_labels
+            val_paths, val_labels = np.array([]), np.array([])
+        else:
+            can_stratify_val = True
+            if num_classes > 1:
+                tv_label_counts = Counter(train_val_labels)
+                if any(count < 2 for count in tv_label_counts.values()):
+                    logger.warning("Cannot stratify train/validation split. Proceeding without stratification for this split.")
+                    can_stratify_val = False
+            else:
+                can_stratify_val = False
+            
+            stratify_param_val = train_val_labels if can_stratify_val else None
+            train_paths, val_paths, train_labels, val_labels = train_test_split(
+                train_val_paths, train_val_labels, 
+                test_size=adjusted_val_split, 
+                random_state=data_config.get('random_seed', 42), 
+                stratify=stratify_param_val
+            )
+    elif len(train_val_paths) > 0:
+        train_paths, train_labels = train_val_paths, train_val_labels
+        val_paths, val_labels = np.array([]), np.array([])
+    else: 
+        train_paths, train_labels = np.array([]), np.array([])
+        val_paths, val_labels = np.array([]), np.array([])
+
+    num_train_samples = len(train_paths)
+    num_val_samples = len(val_paths)
+    num_test_samples = len(test_paths)
+
+    logger.info(f"Dataset split sizes: Train={num_train_samples}, Validation={num_val_samples}, Test={num_test_samples}")
+
+    if num_train_samples == 0:
+        logger.warning("Training set is empty after splits. Cannot proceed with training.")
+        # Still return class_names and num_classes as they are derived from label_map
+        return None, None, None, 0, 0, num_test_samples, class_names, num_classes
+
+    # Class weights computation is now done in train.py if needed, using train_labels
+
+    architecture = model_config.get('architecture', 'MobileNetV2')
+    preprocess_input_fn = _get_preprocess_fn(architecture)
+    augmentation_pipeline = _build_augmentation_pipeline(data_config) # Pass data_config
+
+    def load_and_preprocess_image(path: str, label: int) -> Tuple[tf.Tensor, int]:
+        try:
+            img = tf.io.read_file(path)
+            img = tf.image.decode_image(img, channels=3, expand_animations=False)
+            img = tf.image.resize(img, image_size) 
+            return img, label 
+        except Exception as e:
+            logger.error(f"Error loading image {path}: {e}. Traceback: {traceback.format_exc()}")
+            dummy_img = tf.zeros([*image_size, 3], dtype=tf.float32)
+            dummy_label = tf.constant(0, dtype=tf.int32) 
+            return dummy_img, dummy_label
+
+    def configure_dataset(paths_np: np.ndarray, labels_np: np.ndarray, shuffle_ds: bool, augment_ds: bool, is_training_set_flag: bool) -> Optional[tf.data.Dataset]:
+        if len(paths_np) == 0:
+            return None
+        try:
+            dataset = tf.data.Dataset.from_tensor_slices((list(paths_np), list(labels_np)))
+            dataset = dataset.map(load_and_preprocess_image, num_parallel_calls=tf.data.AUTOTUNE)
+            
+            def map_fn_wrapper(image, label):
+                image = tf.cast(image, tf.float32)
+                if augmentation_pipeline is not None and augment_ds and is_training_set_flag:
+                    # Add batch dimension for augmentation pipeline
+                    image = tf.expand_dims(image, 0)
+                    image = augmentation_pipeline(image, training=True) # Pass training=True
+                    # Remove batch dimension
+                    image = tf.squeeze(image, 0)
+                if preprocess_input_fn:
+                    image = preprocess_input_fn(image)
+                return image, label
+
+            dataset = dataset.map(map_fn_wrapper, num_parallel_calls=tf.data.AUTOTUNE)
+
+            if shuffle_ds:
+                buffer_size = data_config.get('shuffle_buffer_size', 1000)
+                dataset_size = len(paths_np)
+                actual_buffer_size = min(buffer_size, dataset_size)
+                if actual_buffer_size > 0 : # Ensure buffer_size is positive
+                    dataset = dataset.shuffle(actual_buffer_size, seed=data_config.get('random_seed', None))
+            
+            dataset = dataset.batch(batch_size)
+            
+            # Convert integer labels to one-hot encoding
+            def convert_to_one_hot(images, labels):
+                labels_one_hot = tf.one_hot(labels, depth=num_classes)
+                return images, labels_one_hot
+            
+            dataset = dataset.map(convert_to_one_hot, num_parallel_calls=tf.data.AUTOTUNE)
+
+            if is_training_set_flag: # Apply MixUp/CutMix only to training set after batching
+                # Read from both old and new config locations for backward compatibility
+                mixup_alpha = training_config.get('mixup_alpha', 0.0)
+                cutmix_alpha = training_config.get('cutmix_alpha', 0.0)
+                
+                # Check advanced_augmentation section for new config
+                advanced_aug_config = data_config.get('advanced_augmentation', {})
+                if advanced_aug_config.get('mixup', {}).get('enabled', False):
+                    mixup_alpha = advanced_aug_config['mixup'].get('alpha', mixup_alpha)
+                if advanced_aug_config.get('cutmix', {}).get('enabled', False):
+                    cutmix_alpha = advanced_aug_config['cutmix'].get('alpha', cutmix_alpha)
+                
+                if mixup_alpha > 0.0:
+                    logger.info(f"Applying MixUp with alpha={mixup_alpha} to the training dataset.")
+                    dataset = dataset.map(
+                        lambda images, lbls: mixup(images, lbls, mixup_alpha, num_classes),
+                        num_parallel_calls=tf.data.AUTOTUNE
+                    )
+                if cutmix_alpha > 0.0:
+                    logger.info(f"Applying CutMix with alpha={cutmix_alpha} to the training dataset.")
+                    dataset = dataset.map(
+                        lambda images, lbls: cutmix(images, lbls, cutmix_alpha, num_classes),
+                        num_parallel_calls=tf.data.AUTOTUNE
+                    )
+            
+            dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
+            return dataset
+        except Exception as e:
+            logger.error(f"Error configuring dataset: {e}. Traceback: {traceback.format_exc()}")
+            return None
+
+    augment_train = data_config.get('augmentation', {}).get('augment_training_data', True) and data_config.get('augmentation', {}).get('enabled', False)
+    augment_val = data_config.get('augmentation', {}).get('augment_validation_data', False) and data_config.get('augmentation', {}).get('enabled', False)
+
+    train_dataset = configure_dataset(train_paths, train_labels, shuffle_ds=True, augment_ds=augment_train, is_training_set_flag=True)
+    val_dataset = configure_dataset(val_paths, val_labels, shuffle_ds=data_config.get('shuffle_validation_data', True), augment_ds=augment_val, is_training_set_flag=False)
+    test_dataset = configure_dataset(test_paths, test_labels, shuffle_ds=False, augment_ds=False, is_training_set_flag=False)
+
+    if train_dataset: logger.info(f"Training dataset: {tf.data.experimental.cardinality(train_dataset).numpy()} batches.")
+    if val_dataset: logger.info(f"Validation dataset: {tf.data.experimental.cardinality(val_dataset).numpy()} batches.")
+    if test_dataset: logger.info(f"Test dataset: {tf.data.experimental.cardinality(test_dataset).numpy()} batches.")
+
+    return (
+        train_dataset, val_dataset, test_dataset, 
+        num_train_samples, num_val_samples, num_test_samples, 
+        class_names, num_classes
+    )
+
+if __name__ == '__main__':
+    logger.info("Testing load_classification_data function...")
+    dummy_config_classification = {
+        'data': {
+            'paths': {
+                'metadata_file': 'data/classification/metadata_small_test.json', 
+                'label_map_file': 'data/classification/label_map_small_test.json'
+            },
+            'image_size': [64, 64], 
+            'validation_split': 0.2,
+            'test_split': 0.1,
+            'random_seed': 42,
+            'shuffle_buffer_size': 10, 
+            'shuffle_validation_data': True,
+            'augmentation': {
+                'enabled': True,
+                'augment_training_data': True,
+                'augment_validation_data': False, 
+                'horizontal_flip': True,
+                'rotation_range': 10, 
+                'zoom_range': 0.1,
+                'brightness_range': [0.8, 1.2]
+            }
+        },
+        'training': {
+            'batch_size': 4, 
+            'use_class_weights': True, 
+            'mixup_alpha': 0.2, 
+            'cutmix_alpha': 0.1 
+        },
+        'model': {
+            'architecture': 'MobileNetV2' 
+        }
+    }
+
+    project_r = _get_project_root()
+    os.makedirs(project_r / 'data/classification', exist_ok=True)
+    dummy_image_base_dir = project_r / "dummy_images_clf_test" 
+    os.makedirs(dummy_image_base_dir / "class_a", exist_ok=True)
+    os.makedirs(dummy_image_base_dir / "class_b", exist_ok=True)
+    os.makedirs(dummy_image_base_dir / "class_c", exist_ok=True)
+
+    dummy_label_map = {0: "class_a", 1: "class_b", 2: "class_c"}
+    with open(project_r / dummy_config_classification['data']['paths']['label_map_file'], 'w') as f:
+        json.dump(dummy_label_map, f)
+
+    dummy_metadata_content = {"images": []}
+    images_created_count = 0
+    try:
+        from PIL import Image
+        for i in range(15):
+            for class_idx, class_label_str_val in dummy_label_map.items():
+                img_rel_path = f"dummy_images_clf_test/{class_label_str_val}/img_{i}_{class_label_str_val}.png"
+                img_abs_path = project_r / img_rel_path
+                
+                dummy_pil_img = Image.new('RGB', (20, 20), color = (random.randint(0,255), random.randint(0,255), random.randint(0,255)))
+                dummy_pil_img.save(img_abs_path)
+                dummy_metadata_content["images"].append({"path": img_rel_path, "label": class_label_str_val})
+                images_created_count +=1
+    except ImportError: 
+        logger.warning("Pillow not installed. Cannot create dummy image files for testing. Test might fail at image loading.")
+    except Exception as e_img: 
+        logger.error(f"Error creating dummy image {img_abs_path}: {e_img}")
+
+    if images_created_count == 0 : 
+        logger.warning("No dummy images were created. Test might not be meaningful.")
+    else: 
+        logger.info(f"Created {images_created_count} dummy images for testing in {dummy_image_base_dir}.")
+
+    with open(project_r / dummy_config_classification['data']['paths']['metadata_file'], 'w') as f:
+        json.dump(dummy_metadata_content, f)
+    
+    logger.info(f"Created dummy metadata: {project_r / dummy_config_classification['data']['paths']['metadata_file']}")
+    logger.info(f"Created dummy label map: {project_r / dummy_config_classification['data']['paths']['label_map_file']}")
+
+    logger.info("\n--- Testing with max_samples_to_load = 7 ---")
+    datasets_debug = load_classification_data(dummy_config_classification, max_samples_to_load=7)
+    if datasets_debug and datasets_debug[0] is not None: 
+        train_ds_debug, val_ds_debug, test_ds_debug, num_tr_debug, num_v_debug, num_t_debug, cn_debug, nc_debug = datasets_debug
+        logger.info(f"Debug - Num train: {num_tr_debug}, Num val: {num_v_debug}, Num test: {num_t_debug}. Total actual: {num_tr_debug+num_v_debug+num_t_debug} (expected <=7). Classes: {nc_debug}, Names: {cn_debug}")
+        if train_ds_debug:
+            for img_batch, lbl_batch in train_ds_debug.take(1): 
+                logger.info(f"Debug train batch - Images shape: {img_batch.shape}, Labels shape: {lbl_batch.shape}")
+                pass
+            logger.info("Successfully iterated over one batch of debug training data.")
+        if val_ds_debug:
+             for img_batch, lbl_batch in val_ds_debug.take(1): 
+                logger.info(f"Debug val batch - Images shape: {img_batch.shape}, Labels shape: {lbl_batch.shape}")
+                pass
+    else: 
+        logger.error("load_classification_data with max_samples_to_load failed or returned None for train_dataset.")
+
+    logger.info("\n--- Testing with full dummy dataset ({} images) ---".format(images_created_count))
+    datasets_full = load_classification_data(dummy_config_classification)
+    if datasets_full and datasets_full[0] is not None:
+        train_ds_full, val_ds_full, test_ds_full, n_tr_f, n_v_f, n_t_f, cn_f, nc_f = datasets_full
+        logger.info(f"Full - Num train: {n_tr_f}, Num val: {n_v_f}, Num test: {n_t_f}. Total: {n_tr_f+n_v_f+n_t_f}. Classes: {nc_f}, Names: {cn_f}")
+        if train_ds_full:
+            for img_batch, lbl_batch in train_ds_full.take(1): 
+                logger.info(f"Full train batch - Images shape: {img_batch.shape}, Labels shape: {lbl_batch.shape}")
+                pass
+            logger.info("Successfully iterated over one batch of full training data.")
+        if val_ds_full:
+            for img_batch, lbl_batch in val_ds_full.take(1): 
+                logger.info(f"Full val batch - Images shape: {img_batch.shape}, Labels shape: {lbl_batch.shape}")
+                pass
+    else: 
+        logger.error("load_classification_data with full dataset failed or returned None for train_dataset.")
+    
+    logger.info("Test finished. Consider cleaning up dummy files and directories if created by Pillow, especially in 'dummy_images_clf_test'.")
