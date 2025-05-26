@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import subprocess
+import sys
 import yaml
 import glob
 import json # For parsing JSON string arguments
@@ -120,9 +121,14 @@ def prepare_data(args, project_root):
 def train_models(args, project_root):
     logger.info("Starting model training stage...")
     success = True
+    common_extra_args = []
+    if args.debug: # Check the debug flag from main.py's args
+        logger.info("Main pipeline --debug flag is active. Propagating --debug to training scripts.")
+        common_extra_args.append('--debug')
+
     if args.train_classification or args.run_all:
         logger.info("Training classification model...")
-        if not run_script(TRAIN_CLASSIFICATION_SCRIPT, CLASSIFICATION_CONFIG_PATH, project_root):
+        if not run_script(TRAIN_CLASSIFICATION_SCRIPT, CLASSIFICATION_CONFIG_PATH, project_root, extra_args=common_extra_args):
             success = False
             logger.error("Classification model training failed.")
         else:
@@ -130,7 +136,7 @@ def train_models(args, project_root):
 
     if args.train_segmentation or args.run_all:
         logger.info("Training segmentation model...")
-        if not run_script(TRAIN_SEGMENTATION_SCRIPT, SEGMENTATION_CONFIG_PATH, project_root):
+        if not run_script(TRAIN_SEGMENTATION_SCRIPT, SEGMENTATION_CONFIG_PATH, project_root, extra_args=common_extra_args):
             success = False
             logger.error("Segmentation model training failed.")
         else:
@@ -399,6 +405,9 @@ def main():
     parser.add_argument('--export-segmentation-tflite', action='store_true', help="Export segmentation model to TFLite.")
 
     parser.add_argument('--run-inference', action='store_true', help="Run the inference pipeline on a food item.")
+
+    # --- Debug Flag --- 
+    parser.add_argument('--debug', action='store_true', help="Run the pipeline in debug mode (affects data loading and epochs in training).")
 
     # --- Inference Specific Arguments (copied from original main.py, ensure they match food_analyzer call) ---
     parser.add_argument('--image_path', type=str, help="Path to the input RGB image file for inference.")
