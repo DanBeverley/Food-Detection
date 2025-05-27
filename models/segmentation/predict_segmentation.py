@@ -33,13 +33,9 @@ def load_and_preprocess_image(image_path:str, target_size_hw:tuple) -> tuple[np.
         # Apply normalization (e.g., EfficientNet's preprocess_input)
         img_array = preprocess_input(img_array) # Expects H,W,C float32
         
-        # Flatten the spatial dimensions: (H, W, C) -> (H*W, C)
-        num_channels = img_array.shape[2]
-        img_flattened = img_array.reshape(-1, num_channels) # Shape e.g. (4096, 3)
-        logging.info(f"Image {Path(image_path).name}: Resized to {img_array.shape}, then flattened to {img_flattened.shape}")
-
-        # Add batch dimension: (H*W, C) -> (1, H*W, C)
-        input_data = np.expand_dims(img_flattened, axis=0) # Shape e.g. (1, 4096, 3)
+        # Add batch dimension: (H, W, C) -> (1, H, W, C)
+        input_data = np.expand_dims(img_array, axis=0) # Shape e.g. (1, 128, 128, 3)
+        logging.info(f"Image {Path(image_path).name}: Resized to {img_array.shape}, final shape: {input_data.shape}")
         logging.info(f"Image {Path(image_path).name}: Final preprocessed shape for TFLite: {input_data.shape}")
         return input_data, original_size_hw
     except FileNotFoundError:
