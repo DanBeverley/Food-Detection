@@ -388,6 +388,10 @@ def load_and_preprocess_segmentation(
             prebuilt_geometric_layer # MODIFIED: Pass layer
         )
         
+        # Ensure mask has correct shape [H, W] instead of [H, W, 1]
+        if len(final_mask.shape) == 3 and final_mask.shape[-1] == 1:
+            final_mask = tf.squeeze(final_mask, axis=-1)
+        
         return final_processed_inputs, final_mask
 
     except Exception as e: 
@@ -412,6 +416,8 @@ def load_and_preprocess_segmentation(
             'pc_input': tf.zeros(dummy_pc_shape, dtype=tf.float32),
         }
         dummy_mask_tensor = tf.zeros(dummy_mask_shape, dtype=tf.float32)
+        # Ensure dummy mask has correct shape [H, W] instead of [H, W, 1]
+        dummy_mask_tensor = tf.squeeze(dummy_mask_tensor, axis=-1)
         return dummy_inputs_dict, dummy_mask_tensor
 
 
