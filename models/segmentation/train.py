@@ -357,6 +357,12 @@ class BinaryIoU(tf.keras.metrics.Metric):
         y_pred = tf.cast(y_pred > self.threshold, tf.float32)
         y_true = tf.cast(y_true, tf.float32)
         
+        # Handle shape mismatch: model output [batch, H, W, 1] vs mask [batch, H, W]
+        if len(y_pred.shape) == 4 and y_pred.shape[-1] == 1:
+            y_pred = tf.squeeze(y_pred, axis=-1)
+        if len(y_true.shape) == 4 and y_true.shape[-1] == 1:
+            y_true = tf.squeeze(y_true, axis=-1)
+        
         intersection = tf.reduce_sum(y_true * y_pred)
         union = tf.reduce_sum(y_true) + tf.reduce_sum(y_pred) - intersection
         
@@ -384,8 +390,17 @@ class DiceCoefficient(tf.keras.metrics.Metric):
         y_pred = tf.cast(y_pred > self.threshold, tf.float32)
         y_true = tf.cast(y_true, tf.float32)
         
-        intersection = tf.reduce_sum(y_true * y_pred, axis=[1, 2, 3])
-        union = tf.reduce_sum(y_true, axis=[1, 2, 3]) + tf.reduce_sum(y_pred, axis=[1, 2, 3])
+        # Handle shape mismatch: model output [batch, H, W, 1] vs mask [batch, H, W]
+        if len(y_pred.shape) == 4 and y_pred.shape[-1] == 1:
+            y_pred = tf.squeeze(y_pred, axis=-1)
+        if len(y_true.shape) == 4 and y_true.shape[-1] == 1:
+            y_true = tf.squeeze(y_true, axis=-1)
+        
+        # Now both should be [batch, H, W]
+        reduce_axes = [1, 2]
+            
+        intersection = tf.reduce_sum(y_true * y_pred, axis=reduce_axes)
+        union = tf.reduce_sum(y_true, axis=reduce_axes) + tf.reduce_sum(y_pred, axis=reduce_axes)
         dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
         
         self.dice_sum.assign_add(tf.reduce_sum(dice))
@@ -401,8 +416,17 @@ class DiceCoefficient(tf.keras.metrics.Metric):
 # Custom loss functions
 def dice_loss(y_true, y_pred, smooth=1.0):
     """Dice loss for segmentation."""
-    y_true_f = tf.cast(tf.reshape(y_true, [-1]), tf.float32)
-    y_pred_f = tf.cast(tf.reshape(y_pred, [-1]), tf.float32)
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    
+    # Handle shape mismatch: model output [batch, H, W, 1] vs mask [batch, H, W]
+    if len(y_pred.shape) == 4 and y_pred.shape[-1] == 1:
+        y_pred = tf.squeeze(y_pred, axis=-1)
+    if len(y_true.shape) == 4 and y_true.shape[-1] == 1:
+        y_true = tf.squeeze(y_true, axis=-1)
+    
+    y_true_f = tf.reshape(y_true, [-1])
+    y_pred_f = tf.reshape(y_pred, [-1])
     intersection = tf.reduce_sum(y_true_f * y_pred_f)
     return 1.0 - (2.0 * intersection + smooth) / (tf.reduce_sum(y_true_f) + tf.reduce_sum(y_pred_f) + smooth)
 
@@ -410,6 +434,12 @@ def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
     """Focal loss for addressing class imbalance."""
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
+    
+    # Handle shape mismatch: model output [batch, H, W, 1] vs mask [batch, H, W]
+    if len(y_pred.shape) == 4 and y_pred.shape[-1] == 1:
+        y_pred = tf.squeeze(y_pred, axis=-1)
+    if len(y_true.shape) == 4 and y_true.shape[-1] == 1:
+        y_true = tf.squeeze(y_true, axis=-1)
     
     # Compute cross entropy
     ce_loss = tf.keras.losses.binary_crossentropy(y_true, y_pred, from_logits=False)
