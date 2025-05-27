@@ -114,7 +114,45 @@ def export_model(config_path: str):
         
     logger.info(f"Loading Keras model from: {keras_model_path}")
     try:
-        model = keras.models.load_model(keras_model_path)
+        # Try to load with custom objects first
+        try:
+            from train import dice_loss, focal_loss, combined_loss, BinaryIoU, DiceCoefficient
+            custom_objects = {
+                'dice_loss': dice_loss,
+                'focal_loss': focal_loss,
+                'combined_loss': combined_loss,
+                'BinaryIoU': BinaryIoU,
+                'DiceCoefficient': DiceCoefficient,
+            }
+            model = keras.models.load_model(keras_model_path, custom_objects=custom_objects)
+            logger.info("Model loaded with custom objects")
+        except ValueError as ve:
+            if "lambda" in str(ve):
+                logger.warning("Model contains lambda functions that can't be loaded. Creating inference model...")
+                # Load model architecture and weights separately
+                from train import unet_model
+                
+                # Get model config to rebuild architecture
+                model_config = config.get('model', {})
+                data_config = config.get('data', {})
+                
+                # Rebuild the model architecture
+                output_channels = data_config.get('num_classes', 1)
+                image_size = tuple(data_config.get('image_size', [128, 128])[:2])
+                
+                model = unet_model(
+                    output_channels=output_channels,
+                    image_size=image_size,
+                    model_config=model_config,
+                    data_config=data_config
+                )
+                
+                # Load weights from the saved model
+                model.load_weights(keras_model_path)
+                logger.info("Model architecture rebuilt and weights loaded successfully")
+            else:
+                raise ve
+        
         logger.info(f"Keras model loaded successfully from: {keras_model_path}")
         model.summary(print_fn=logger.info)
     except Exception as e:
