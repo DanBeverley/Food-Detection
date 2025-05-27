@@ -212,27 +212,46 @@ def _apply_segmentation_augmentations_impl(
     rgb_image_after_geom = augmented_inputs['rgb_input']
     
     # Brightness
-    brightness_delta = aug_config_dict.get("brightness_range", 0.0) # e.g., 0.1 for +/- 10% of 255
+    brightness_config = aug_config_dict.get("brightness_range", 0.0)
+    if isinstance(brightness_config, list) and len(brightness_config) == 2:
+        # Handle [min, max] format - convert to delta from 1.0
+        brightness_delta = max(abs(1.0 - brightness_config[0]), abs(brightness_config[1] - 1.0))
+    else:
+        # Handle single float format
+        brightness_delta = brightness_config
+    
     if brightness_delta > 0.0:
         rgb_image_after_geom = tf.image.random_brightness(rgb_image_after_geom, max_delta=brightness_delta * 255.0)
         rgb_image_after_geom = tf.clip_by_value(rgb_image_after_geom, 0.0, 255.0)
 
     # Contrast
-    contrast_factor_lower = aug_config_dict.get("contrast_range_lower", 1.0)
-    contrast_factor_upper = aug_config_dict.get("contrast_range_upper", 1.0)
+    contrast_config = aug_config_dict.get("contrast_range", [1.0, 1.0])
+    if isinstance(contrast_config, list) and len(contrast_config) == 2:
+        contrast_factor_lower, contrast_factor_upper = contrast_config
+    else:
+        # Fallback to old format
+        contrast_factor_lower = aug_config_dict.get("contrast_range_lower", 1.0)
+        contrast_factor_upper = aug_config_dict.get("contrast_range_upper", 1.0)
+    
     if contrast_factor_lower < contrast_factor_upper : # Check if contrast is enabled
          rgb_image_after_geom = tf.image.random_contrast(rgb_image_after_geom, lower=contrast_factor_lower, upper=contrast_factor_upper)
          rgb_image_after_geom = tf.clip_by_value(rgb_image_after_geom, 0.0, 255.0)
 
     # Saturation
-    saturation_factor_lower = aug_config_dict.get("saturation_range_lower", 1.0)
-    saturation_factor_upper = aug_config_dict.get("saturation_range_upper", 1.0)
+    saturation_config = aug_config_dict.get("saturation_range", [1.0, 1.0])
+    if isinstance(saturation_config, list) and len(saturation_config) == 2:
+        saturation_factor_lower, saturation_factor_upper = saturation_config
+    else:
+        # Fallback to old format
+        saturation_factor_lower = aug_config_dict.get("saturation_range_lower", 1.0)
+        saturation_factor_upper = aug_config_dict.get("saturation_range_upper", 1.0)
+    
     if saturation_factor_lower < saturation_factor_upper:
         rgb_image_after_geom = tf.image.random_saturation(rgb_image_after_geom, lower=saturation_factor_lower, upper=saturation_factor_upper)
         rgb_image_after_geom = tf.clip_by_value(rgb_image_after_geom, 0.0, 255.0)
 
     # Hue
-    hue_delta = aug_config_dict.get("hue_delta", 0.0) # e.g., 0.05 for +/- 5% of 2*pi
+    hue_delta = aug_config_dict.get("hue_delta", aug_config_dict.get("hue_range", 0.0)) # Support both formats
     if hue_delta > 0.0:
         rgb_image_after_geom = tf.image.random_hue(rgb_image_after_geom, max_delta=hue_delta)
         rgb_image_after_geom = tf.clip_by_value(rgb_image_after_geom, 0.0, 255.0)
