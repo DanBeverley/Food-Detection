@@ -212,12 +212,24 @@ class RandomErasing(tf.keras.layers.Layer):
         if not training:
             return inputs
         
-        # Simple random erasing implementation
+        # Handle both batched and unbatched inputs
         def apply_erasing():
-            shape = tf.shape(inputs)
-            height = shape[0]
-            width = shape[1]
-            channels = shape[2]
+            input_shape = tf.shape(inputs)
+            input_rank = len(inputs.shape)
+            
+            if input_rank == 4:
+                # Batched input: [batch, height, width, channels]
+                batch_size = input_shape[0]
+                height = input_shape[1]
+                width = input_shape[2]
+                channels = input_shape[3]
+                is_batched = True
+            else:
+                # Unbatched input: [height, width, channels]
+                height = input_shape[0]
+                width = input_shape[1]
+                channels = input_shape[2]
+                is_batched = False
             
             # Fixed erasing size for simplicity (10% of image area)
             erase_area = tf.cast(height * width, tf.float32) * 0.1
@@ -231,21 +243,34 @@ class RandomErasing(tf.keras.layers.Layer):
             y = tf.random.uniform([], 0, max_y + 1, dtype=tf.int32)
             x = tf.random.uniform([], 0, max_x + 1, dtype=tf.int32)
             
-            # Create a mask
-            mask = tf.ones_like(inputs)
-            # Create zero patch
-            zero_patch = tf.zeros([erase_size, erase_size, channels])
-            
-            # Apply the patch using slicing
-            erased = tf.concat([
-                inputs[:y],
-                tf.concat([
-                    inputs[y:y+erase_size, :x],
-                    zero_patch,
-                    inputs[y:y+erase_size, x+erase_size:]
-                ], axis=1),
-                inputs[y+erase_size:]
-            ], axis=0)
+            if is_batched:
+                # Create zero patch for batched input
+                zero_patch = tf.zeros([batch_size, erase_size, erase_size, channels])
+                
+                # Apply the patch using slicing for batched input
+                erased = tf.concat([
+                    inputs[:, :y, :, :],
+                    tf.concat([
+                        inputs[:, y:y+erase_size, :x, :],
+                        zero_patch,
+                        inputs[:, y:y+erase_size, x+erase_size:, :]
+                    ], axis=2),
+                    inputs[:, y+erase_size:, :, :]
+                ], axis=1)
+            else:
+                # Create zero patch for unbatched input
+                zero_patch = tf.zeros([erase_size, erase_size, channels])
+                
+                # Apply the patch using slicing for unbatched input
+                erased = tf.concat([
+                    inputs[:y, :, :],
+                    tf.concat([
+                        inputs[y:y+erase_size, :x, :],
+                        zero_patch,
+                        inputs[y:y+erase_size, x+erase_size:, :]
+                    ], axis=1),
+                    inputs[y+erase_size:, :, :]
+                ], axis=0)
             
             return erased
         
