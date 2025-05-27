@@ -441,35 +441,55 @@ def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
     if len(y_true.shape) == 4 and y_true.shape[-1] == 1:
         y_true = tf.squeeze(y_true, axis=-1)
     
-    # Compute cross entropy
-    ce_loss = tf.keras.losses.binary_crossentropy(y_true, y_pred, from_logits=False)
+    # Ensure both tensors have the same shape
+    y_true = tf.ensure_shape(y_true, y_pred.shape)
     
-    # Compute p_t
-    p_t = y_true * y_pred + (1 - y_true) * (1 - y_pred)
+    # Clip predictions to prevent log(0)
+    y_pred = tf.clip_by_value(y_pred, tf.keras.backend.epsilon(), 1.0 - tf.keras.backend.epsilon())
     
-    # Compute alpha_t
-    alpha_t = y_true * alpha + (1 - y_true) * (1 - alpha)
+    # Compute cross entropy manually to ensure shape consistency
+    ce_loss = -(y_true * tf.math.log(y_pred) + (1 - y_true) * tf.math.log(1 - y_pred))
+    
+    # Compute p_t (predicted probability for the true class)
+    p_t = tf.where(y_true == 1, y_pred, 1 - y_pred)
+    
+    # Compute alpha_t (class weighting)
+    alpha_t = tf.where(y_true == 1, alpha, 1 - alpha)
     
     # Compute focal weight
     focal_weight = alpha_t * tf.pow(1 - p_t, gamma)
     
-    return focal_weight * ce_loss
+    # Apply focal weight and reduce to scalar
+    focal_loss_value = focal_weight * ce_loss
+    return tf.reduce_mean(focal_loss_value)
 
 def combined_loss(y_true, y_pred, bce_weight=0.5, dice_weight=0.3, focal_weight=0.2, 
                  label_smoothing=0.1, smooth=1.0, alpha=0.25, gamma=2.0):
     """Combined loss function for better segmentation."""
+    # Handle shape mismatch: model output [batch, H, W, 1] vs mask [batch, H, W]
+    if len(y_pred.shape) == 4 and y_pred.shape[-1] == 1:
+        y_pred = tf.squeeze(y_pred, axis=-1)
+    if len(y_true.shape) == 4 and y_true.shape[-1] == 1:
+        y_true = tf.squeeze(y_true, axis=-1)
+    
+    # Ensure both tensors have the same shape
+    y_true = tf.ensure_shape(y_true, y_pred.shape)
+    
     # Binary crossentropy with label smoothing
     if label_smoothing > 0:
         y_true_smooth = y_true * (1 - label_smoothing) + 0.5 * label_smoothing
     else:
         y_true_smooth = y_true
     
-    bce = tf.keras.losses.binary_crossentropy(y_true_smooth, y_pred, from_logits=False)
+    # Calculate BCE manually to ensure shape consistency
+    y_pred_clipped = tf.clip_by_value(y_pred, tf.keras.backend.epsilon(), 1.0 - tf.keras.backend.epsilon())
+    bce = -(y_true_smooth * tf.math.log(y_pred_clipped) + (1 - y_true_smooth) * tf.math.log(1 - y_pred_clipped))
+    bce = tf.reduce_mean(bce)  # Reduce to scalar
     
-    # Dice loss
+    # Dice loss (already returns scalar)
     dice = dice_loss(y_true, y_pred, smooth=smooth)
     
-    # Focal loss
+    # Focal loss (already returns scalar)
     focal = focal_loss(y_true, y_pred, alpha=alpha, gamma=gamma)
     
     return bce_weight * bce + dice_weight * dice + focal_weight * focal
