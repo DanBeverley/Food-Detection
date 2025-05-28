@@ -592,16 +592,41 @@ def analyze_food_item(
             clean_food_label_for_lookup = food_label.replace("Uncertain: ", "") if food_label else None
 
             nutritional_info = lookup_nutritional_info(
-                food_item_label=clean_food_label_for_lookup,
-                volume_cm3=calculated_volume_cm3,
-                density_db_path=config.get('density_db_path', str(project_root / 'data' / 'databases' / 'food_density_db.json')),
-                usda_api_key=usda_api_key,
-                cache_dir=str(project_root / '.cache' / 'usda_api_cache')
+                food_item=clean_food_label_for_lookup,
+                api_key=usda_api_key
             )
             if nutritional_info:
-                logging.info(f"Image: {image_basename} - Nutritional lookup successful for '{clean_food_label_for_lookup}'. Calories: {nutritional_info.get('total_calories', 'N/A')} kcal.")
-                # Log more details if needed, e.g., nutritional_info['source_used']
-                results['nutritional_info_status'] = f"Success (Source: {nutritional_info.get('source_used', 'Unknown')})"
+                # Calculate total calories based on volume and calories per 100g
+                calories_per_100g = nutritional_info.get('calories_kcal_per_100g')
+                density_g_cm3 = nutritional_info.get('density')
+                
+                # Calculate mass and total calories if we have the necessary data
+                estimated_mass_g = None
+                estimated_total_calories = None
+                
+                if density_g_cm3 is not None and calculated_volume_cm3 > 0:
+                    estimated_mass_g = density_g_cm3 * calculated_volume_cm3
+                    results['density_g_cm3'] = density_g_cm3
+                    results['estimated_mass_g'] = estimated_mass_g
+                    
+                    if calories_per_100g is not None:
+                        estimated_total_calories = (estimated_mass_g / 100.0) * calories_per_100g
+                        results['estimated_total_calories'] = estimated_total_calories
+                        results['calories_kcal_per_100g'] = calories_per_100g
+                        
+                        logging.info(f"Image: {image_basename} - Nutritional lookup successful for '{clean_food_label_for_lookup}'. "
+                                   f"Density: {density_g_cm3:.2f} g/cm³, Mass: {estimated_mass_g:.2f}g, "
+                                   f"Calories: {calories_per_100g:.2f} kcal/100g, Total: {estimated_total_calories:.2f} kcal.")
+                    else:
+                        logging.info(f"Image: {image_basename} - Found density ({density_g_cm3:.2f} g/cm³) but no calorie information for '{clean_food_label_for_lookup}'.")
+                else:
+                    if calories_per_100g is not None:
+                        results['calories_kcal_per_100g'] = calories_per_100g
+                        logging.info(f"Image: {image_basename} - Found calorie information ({calories_per_100g:.2f} kcal/100g) but no density for '{clean_food_label_for_lookup}'.")
+                    else:
+                        logging.info(f"Image: {image_basename} - Nutritional lookup returned data but missing key information for '{clean_food_label_for_lookup}'.")
+                
+                results['nutritional_info_status'] = f"Success (USDA API)"
             else:
                 logging.warning(f"Image: {image_basename} - Nutritional lookup for '{clean_food_label_for_lookup}' returned no information.")
                 results['nutritional_info_status'] = "NoInfoReturned"
@@ -655,19 +680,14 @@ def analyze_food_item(
     summary_confidence = results.get('confidence', 0.0) 
     summary_volume_cm3 = results.get('volume_cm3', 0.0)
     
-    nut_info = results.get('nutritional_info')
-    summary_calories_per_100g = "N/A"
-    summary_nutrition_source = "N/A"
-    summary_total_calories = "N/A"
-
-    if nut_info:
-        summary_calories_per_100g = nut_info.get('calories_kcal_per_100g', 'N/A')
-        summary_nutrition_source = nut_info.get('source_used', 'N/A')
-        summary_total_calories = nut_info.get('total_calories', 'N/A')
-        if isinstance(summary_total_calories, (float, int)):
-            summary_total_calories = f"{summary_total_calories:.2f}"
-        if isinstance(summary_calories_per_100g, (float, int)):
-            summary_calories_per_100g = f"{summary_calories_per_100g:.2f}"
+    summary_calories_per_100g = results.get('calories_kcal_per_100g', 'N/A')
+    summary_nutrition_source = "USDA API" if results.get('nutritional_info_status', '').startswith('Success') else "N/A"
+    summary_total_calories = results.get('estimated_total_calories', 'N/A')
+    
+    if isinstance(summary_total_calories, (float, int)):
+        summary_total_calories = f"{summary_total_calories:.2f}"
+    if isinstance(summary_calories_per_100g, (float, int)):
+        summary_calories_per_100g = f"{summary_calories_per_100g:.2f}"
 
     logging.info(f"--- PRODUCTION SUMMARY LOG [{image_basename}] ---"
                  f"\n  Food: {summary_food_label} (Confidence: {summary_confidence:.2f})"

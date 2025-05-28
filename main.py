@@ -362,6 +362,8 @@ def run_inference(args, project_root):
             output_dir=args.output_dir,
             save_steps=args.save_steps,
             display_results=not args.no_display,
+            known_food_class=args.known_food_class, # Override classification if provided
+            usda_api_key=args.usda_api_key,         # USDA API key for nutrition lookup
             # New arguments for volume estimation:
             volume_estimation_method=args.volume_estimation_method,
             camera_intrinsics_key=final_camera_intrinsics_key, # Use the determined key
@@ -444,6 +446,8 @@ def main():
         default=None,
         help="JSON string for overriding volume estimation parameters (e.g., voxel sizes, depth scale). See volume_estimator.py for options."
     )
+    parser.add_argument('--usda_api_key', type=str, help='USDA API key for nutritional information lookup.')
+    parser.add_argument('--known_food_class', type=str, help='Override classification with a known food class name.')
 
     # --- Dataset Path Arguments (for data preparation scripts if they need overrides) ---
     parser.add_argument('--classification_input_dir', type=str, help="Root directory for raw classification images (required if preparing classification data).")
