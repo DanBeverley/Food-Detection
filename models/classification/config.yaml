@@ -1,9 +1,9 @@
 data:
   metadata_path: "data/classification/metadata.json" 
   image_size: [224, 224] 
-  batch_size: 16 
+  batch_size: 32
   split_ratio: 0.2
-  debug_max_total_samples: 100 # Keep debug sample size
+  debug_max_total_samples: null # Disabled for production - use all samples
 
   # Data splits for better validation
   validation_split: 0.2
@@ -44,7 +44,7 @@ data:
     
     # Cutout/Random erasing - enabled for production
     random_erasing:
-      enabled: true  # Enabled for production
+      enabled: true   # Enabled for production robustness
       probability: 0.25
       area_ratio_range: [0.02, 0.33]
       aspect_ratio_range: [0.3, 3.3]
@@ -132,8 +132,8 @@ metrics: ["accuracy", "top_5_accuracy", "precision", "recall"]
 
 # Production Training Configuration
 training:
-  epochs: 50
-  debug_epochs: 20  # Keep debug epochs as requested
+  epochs: 50  # Production epochs
+  debug_epochs: 3   # Reduced debug epochs
   use_mixed_precision: true
   use_tpu: false 
   

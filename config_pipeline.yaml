@@ -6,7 +6,7 @@ models:
   classification_config: "models/classification/config.yaml" 
 
 model_params:
-  segmentation_input_size: [64, 64] 
+  segmentation_input_size: [256, 256] 
   segmentation_num_classes: 1 
   segmentation_threshold: 0.5 # Threshold for converting probabilities to binary mask
   classification_input_size: [224, 224] 

@@ -1,13 +1,13 @@
 data:
-  image_size: [256, 256] 
-  batch_size: 8
+  image_size: [256, 256]  # Production image size for better accuracy
+  batch_size: 16  # Larger batch size for faster training
   split_ratios:
     train: 0.7
     val: 0.15
     test: 0.15
   num_classes: 1 # Number of segmentation classes (e.g., 1 for foreground + 1 for background, or N food classes + background)
   random_seed: 42 
-  debug_max_samples: 2000 # Keep debug sample size
+  debug_max_samples: null  # Disabled for production - use all samples
 
   use_depth_map: false  # Keep disabled for now - RGB only
   depth_map_dir_name: "depth"
@@ -82,12 +82,12 @@ model:
     - 'block3b_add'                # For 16x16 -> 32x32 stage (skip is ~32x32)
     - 'block2b_add'                # For 32x32 -> 64x64 stage (skip is ~64x64)
     - 'stem_activation'            # For 64x64 -> 128x128 stage (skip is ~128x128)
-    - 'MODEL_INPUT'                # Special: For 128x128 -> 256x256 stage (skip is original 256x256 model input)
+    - 'MODEL_INPUT'                # Special: For 64x64 -> 128x128 stage (skip is original 128x128 model input)
   
-  # Enhanced decoder with regularization - production settings
-  decoder_filters: [256, 128, 64, 32, 16] # Increased filters for better performance
-  decoder_dropout: 0.3  # Increased dropout for regularization
-  decoder_batch_norm: true  # Batch normalization in decoder
+  # Enhanced decoder with regularization - debug optimized
+  decoder_filters: [128, 64, 32, 16, 8] # Smaller filters for faster debug training
+  decoder_dropout: 0.3  # Keep dropout for production-like training
+  decoder_batch_norm: true  # Keep batch normalization
   
   # Attention mechanisms - enabled for production
   attention:
@@ -97,7 +97,7 @@ model:
   load_weights: false # Set to true to load weights from weights_path
   weights_path: '__THIS_FILE_SHOULD_DEFINITELY_NOT_EXIST_ANYWHERE__.h5' # Path to pre-trained model weights if load_weights is true
   activation: 'sigmoid' # 'sigmoid' for binary, 'softmax' for multi-class (last layer)
-  input_shape: [256, 256, 3]
+  input_shape: [128, 128, 3]  # Updated for debug image size
   num_classes: 1 
   
   # Model regularization - production settings
@@ -139,11 +139,11 @@ loss:
     alpha: 0.25
     gamma: 2.0
 
-# Production Training Configuration
+# Debug Training Configuration
 training:
   epochs: 50  # Full training epochs
-  debug_epochs: 20  # Keep debug epochs as requested
-  debug_mode: true  # Keep debug mode for sample limitation
+  debug_epochs: 3  # Fast debug epochs
+  debug_mode: false  # Disabled for production training
   use_mixed_precision: true
   use_tpu: false
   
@@ -187,7 +187,7 @@ training:
       enabled: true
       monitor: "val_binary_iou"
       mode: "max"
-      patience: 8  # Increased patience for production
+      patience: 15  # Production patience
       restore_best_weights: true
       min_delta: 0.001
 
@@ -196,7 +196,7 @@ training:
       monitor: "val_binary_iou"
       mode: "max"
       factor: 0.5
-      patience: 5
+      patience: 8  # Production patience
       min_lr: 0.00001
       cooldown: 3
 
