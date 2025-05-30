@@ -684,10 +684,10 @@ def analyze_food_item(
     summary_nutrition_source = "USDA API" if results.get('nutritional_info_status', '').startswith('Success') else "N/A"
     summary_total_calories = results.get('estimated_total_calories', 'N/A')
     
-    if isinstance(summary_total_calories, (float, int)):
-        summary_total_calories = f"{summary_total_calories:.2f}"
-    if isinstance(summary_calories_per_100g, (float, int)):
-        summary_calories_per_100g = f"{summary_calories_per_100g:.2f}"
+        if isinstance(summary_total_calories, (float, int)):
+            summary_total_calories = f"{summary_total_calories:.2f}"
+        if isinstance(summary_calories_per_100g, (float, int)):
+            summary_calories_per_100g = f"{summary_calories_per_100g:.2f}"
 
     logging.info(f"--- PRODUCTION SUMMARY LOG [{image_basename}] ---"
                  f"\n  Food: {summary_food_label} (Confidence: {summary_confidence:.2f})"
