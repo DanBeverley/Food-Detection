@@ -1,21 +1,21 @@
 data:
-  image_size: [256, 256]  # Production image size for better accuracy
-  batch_size: 16  # Larger batch size for faster training
+  image_size: [256, 256]  
+  batch_size: 32  
   split_ratios:
     train: 0.7
     val: 0.15
     test: 0.15
   num_classes: 1 # Number of segmentation classes (e.g., 1 for foreground + 1 for background, or N food classes + background)
   random_seed: 42 
-  debug_max_samples: null  # Disabled for production - use all samples
+  debug_max_samples: null  
 
-  use_depth_map: false  # Keep disabled for now - RGB only
+  use_depth_map: true
   depth_map_dir_name: "depth"
 
-  use_point_cloud: false  # Keep disabled for now - RGB only
+  use_point_cloud: true
   point_cloud_root_dir: "E:/_MetaFood3D_new_Point_cloud/Point_cloud"
   point_cloud_sampling_rate_dir: "4096" 
-  point_cloud_suffix: "_sampled_1.ply"
+  point_cloud_suffix: "_sampled_1.ply" 
 
   modalities_preprocessing:
     depth_map:
@@ -55,7 +55,7 @@ data:
       aspect_ratio_range: [0.3, 3.3]
     
     # Apply geometric transformations to depth maps as well
-    apply_geometric_to_depth: true
+    apply_geometric_to_depth: true 
     
     # Elastic deformation for medical-style augmentation - can be enabled
     elastic_deformation:
@@ -141,7 +141,7 @@ loss:
 
 # Debug Training Configuration
 training:
-  epochs: 50  # Full training epochs
+  epochs: 30  # Full training epochs
   debug_epochs: 3  # Fast debug epochs
   debug_mode: false  # Disabled for production training
   use_mixed_precision: true

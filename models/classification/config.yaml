@@ -55,7 +55,7 @@ data:
     mixup:
       enabled: true
       alpha: 0.4
-    
+
     # CutMix Augmentation
     cutmix:
       enabled: true
@@ -84,7 +84,7 @@ model:
     pooling: "GlobalAveragePooling2D" 
     dense_layers: 
       - units: 512  # Increased for production
-        dropout: 0.5
+    dropout: 0.5 
         batch_norm: true
         l2_regularization: 0.001
       - units: 256  # Increased for production
@@ -98,7 +98,7 @@ model:
     # Regularization
     kernel_l2_factor: 0.002
     activity_l2_factor: 0.001
-    
+
     # Batch normalization
     use_batch_norm: true
     batch_norm_momentum: 0.99
@@ -132,7 +132,7 @@ metrics: ["accuracy", "top_5_accuracy", "precision", "recall"]
 
 # Production Training Configuration
 training:
-  epochs: 50  # Production epochs
+  epochs: 30  # Production epochs
   debug_epochs: 3   # Reduced debug epochs
   use_mixed_precision: true
   use_tpu: false 
