@@ -65,19 +65,19 @@ def export_model_to_tflite(config: dict):
             logger.error(f"Model save directory not found: {model_dir}")
             raise FileNotFoundError(f"Model save directory missing: {model_dir}")
 
-        h5_files = [
+        model_files = [
             f for f in os.listdir(model_dir) 
-            if f.endswith('.h5') and os.path.isfile(os.path.join(model_dir, f))
+            if (f.endswith('.h5') or f.endswith('.keras')) and os.path.isfile(os.path.join(model_dir, f))
         ]
 
-        if not h5_files:
-            logger.error(f"No .h5 model files found in directory: {model_dir}")
-            raise FileNotFoundError(f"No .h5 Keras model files found in {model_dir}")
+        if not model_files:
+            logger.error(f"No .h5 or .keras model files found in directory: {model_dir}")
+            raise FileNotFoundError(f"No .h5 or .keras Keras model files found in {model_dir}")
 
         # Prefer files with "final" in their name (case-insensitive)
-        final_files = [f for f in h5_files if "final" in f.lower()]
+        final_files = [f for f in model_files if "final" in f.lower()]
         
-        selected_file_list = final_files if final_files else h5_files
+        selected_file_list = final_files if final_files else model_files
         
         # Get the most recently modified file from the selected list
         try:
@@ -88,8 +88,8 @@ def export_model_to_tflite(config: dict):
             keras_model_path = os.path.join(model_dir, latest_model_file)
             if final_files and latest_model_file in final_files:
                 logger.info(f"Found 'final' model. Using latest: {latest_model_file} from {model_dir}")
-            elif h5_files: # Ensure we have some h5 files before logging this path
-                logger.info(f"No 'final' model found or specified one missing. Using latest .h5 model: {latest_model_file} from {model_dir}")
+            elif model_files: # Ensure we have some model files before logging this path
+                logger.info(f"No 'final' model found or specified one missing. Using latest model: {latest_model_file} from {model_dir}")
         except ValueError: # Should not happen if h5_files is not empty
              logger.error(f"Could not determine latest model file in {model_dir} from list: {selected_file_list}")
              raise FileNotFoundError(f"Could not determine latest model file in {model_dir}")

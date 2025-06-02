@@ -378,7 +378,7 @@ def load_classification_data(
             # Handle relative paths
             if relative_path.startswith(str(base_image_dir)):
                 relative_path = str(Path(relative_path).relative_to(base_image_dir))
-            full_image_path = base_image_dir / relative_path
+        full_image_path = base_image_dir / relative_path
         
         if not full_image_path.exists():
             logger.warning(f"Image file not found: {full_image_path}. Skipping.")
