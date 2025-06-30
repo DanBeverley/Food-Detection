@@ -35,11 +35,58 @@ camera_intrinsics:
     fy: 525.0   
     cx: 319.5   # (640 / 2 - 0.5)
     cy: 239.5   # (480 / 2 - 0.5)
+  "1280x720":
+    width: 1280
+    height: 720
+    fx: 960.0   # HD resolution scaling
+    fy: 960.0
+    cx: 639.5   # (1280 / 2 - 0.5)
+    cy: 359.5   # (720 / 2 - 0.5)
+  "1440x1920":
+    width: 1440
+    height: 1920
+    fx: 1181.25
+    fy: 1181.25
+    cx: 719.5   # (1440 / 2 - 0.5)
+    cy: 959.5   # (1920 / 2 - 0.5)
 
 volume_estimation:
-  default_intrinsics_key: "default" 
+  default_intrinsics_key: "default"
+  processing_params:
+    depth_scale: 1000.0           # Depth values in mm
+    depth_trunc_m: 3.0            # Truncate depth beyond 3 meters
+    project_valid_depth_only: true
+    downsample_voxel_size_m: 0.005  # 5mm voxel size for downsampling
+    outlier_removal_nb_neighbors: 20
+    outlier_removal_std_ratio: 2.0
+    volume_voxel_size_m: 0.005    # 5mm voxel size for volume calculation
 
 volume_params:
   min_depth_m: 0.1
   max_depth_m: 1.5 
   depth_scale_factor: 1000.0
+
+# Centralized path configuration for modularity
+paths:
+  # Config file paths
+  classification_config: "models/classification/config.yaml"
+  segmentation_config: "models/segmentation/config.yaml"
+  pipeline_config: "config_pipeline.yaml"
+  
+  # Script paths
+  prepare_classification_script: "scripts/prepare_classification_dataset.py"
+  prepare_segmentation_script: "scripts/prepare_segmentation_metadata.py"
+  train_classification_script: "models/classification/train.py"
+  train_segmentation_script: "models/segmentation/train.py"
+  export_classification_tflite_script: "models/classification/export_tflite.py"
+  export_segmentation_tflite_script: "models/segmentation/export_tflite.py"
+  
+  # Model directories
+  classification_model_dir: "trained_models/classification"
+  segmentation_model_dir: "trained_models/segmentation"
+  classification_export_dir: "trained_models/classification/exported"
+  segmentation_export_dir: "trained_models/segmentation/exported"
+  
+  # Data directories
+  classification_meta_dir: "data/classification"
+  segmentation_meta_dir: "data/segmentation"
