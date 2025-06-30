@@ -15,27 +15,39 @@ from volume_helpers.volume_estimator import estimate_volume_from_depth
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Configuration Paths ---
-# These might be better managed or passed as arguments if they vary often
-CLASSIFICATION_CONFIG_PATH = "models/classification/config.yaml"
-SEGMENTATION_CONFIG_PATH = "models/segmentation/config.yaml"
-PIPELINE_CONFIG_PATH = "config_pipeline.yaml"
+# Load paths from config for better modularity
+def _load_pipeline_config():
+    """Load pipeline configuration with paths."""
+    pipeline_config_path = "config_pipeline.yaml"
+    try:
+        with open(pipeline_config_path, 'r') as f:
+            return yaml.safe_load(f)
+    except Exception as e:
+        logger.error(f"Failed to load pipeline config {pipeline_config_path}: {e}")
+        return {}
 
-# --- Script Paths (relative to project root) ---
-PREPARE_CLASSIFICATION_SCRIPT = "scripts/prepare_classification_dataset.py"
-PREPARE_SEGMENTATION_SCRIPT = "scripts/prepare_segmentation_metadata.py"
-TRAIN_CLASSIFICATION_SCRIPT = "models/classification/train.py"
-TRAIN_SEGMENTATION_SCRIPT = "models/segmentation/train.py"
-EXPORT_CLASSIFICATION_TFLITE_SCRIPT = "models/classification/export_tflite.py"
-EXPORT_SEGMENTATION_TFLITE_SCRIPT = "models/segmentation/export_tflite.py"
+# Load paths from config
+_pipeline_config = _load_pipeline_config()
+_paths_config = _pipeline_config.get('paths', {})
 
-# --- Default Output Dirs (relative to project root) ---
-CLASSIFICATION_MODEL_DIR = "trained_models/classification"
-SEGMENTATION_MODEL_DIR = "trained_models/segmentation"
-CLASSIFICATION_TFLITE_EXPORT_DIR = os.path.join(CLASSIFICATION_MODEL_DIR, "exported") # Default, can be overridden by config
-SEGMENTATION_TFLITE_EXPORT_DIR = os.path.join(SEGMENTATION_MODEL_DIR, "exported") # Default, can be overridden by config
-DEFAULT_CLASSIFICATION_META_OUTPUT_DIR = "data/classification"
-DEFAULT_SEGMENTATION_META_OUTPUT_DIR = "data/segmentation"
+# Paths from config (with fallbacks for robustness)
+CLASSIFICATION_CONFIG_PATH = _paths_config.get('classification_config', "models/classification/config.yaml")
+SEGMENTATION_CONFIG_PATH = _paths_config.get('segmentation_config', "models/segmentation/config.yaml")
+PIPELINE_CONFIG_PATH = _paths_config.get('pipeline_config', "config_pipeline.yaml")
+
+PREPARE_CLASSIFICATION_SCRIPT = _paths_config.get('prepare_classification_script', "scripts/prepare_classification_dataset.py")
+PREPARE_SEGMENTATION_SCRIPT = _paths_config.get('prepare_segmentation_script', "scripts/prepare_segmentation_metadata.py")
+TRAIN_CLASSIFICATION_SCRIPT = _paths_config.get('train_classification_script', "models/classification/train.py")
+TRAIN_SEGMENTATION_SCRIPT = _paths_config.get('train_segmentation_script', "models/segmentation/train.py")
+EXPORT_CLASSIFICATION_TFLITE_SCRIPT = _paths_config.get('export_classification_tflite_script', "models/classification/export_tflite.py")
+EXPORT_SEGMENTATION_TFLITE_SCRIPT = _paths_config.get('export_segmentation_tflite_script', "models/segmentation/export_tflite.py")
+
+CLASSIFICATION_MODEL_DIR = _paths_config.get('classification_model_dir', "trained_models/classification")
+SEGMENTATION_MODEL_DIR = _paths_config.get('segmentation_model_dir', "trained_models/segmentation")
+CLASSIFICATION_TFLITE_EXPORT_DIR = _paths_config.get('classification_export_dir', os.path.join(CLASSIFICATION_MODEL_DIR, "exported"))
+SEGMENTATION_TFLITE_EXPORT_DIR = _paths_config.get('segmentation_export_dir', os.path.join(SEGMENTATION_MODEL_DIR, "exported"))
+DEFAULT_CLASSIFICATION_META_OUTPUT_DIR = _paths_config.get('classification_meta_dir', "data/classification")
+DEFAULT_SEGMENTATION_META_OUTPUT_DIR = _paths_config.get('segmentation_meta_dir', "data/segmentation")
 
 def run_script(script_path, config_path=None, project_root='.', extra_args=None):
     """Helper function to run a Python script using subprocess."""

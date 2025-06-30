@@ -56,6 +56,131 @@ def load_pipeline_config(config_path: str) -> dict:
         logging.error(f"Error reading or parsing pipeline configuration {config_path}: {e}")
         raise
 
+# Helper functions for analyze_food_item
+
+def _load_input_data(image_path: str, depth_map_path: str | None, image_basename: str) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Load and validate input image and depth map."""
+    timing = {}
+    error_messages = []
+    
+    try:
+        t0_inputs = time.time()
+        # Load image first to get dimensions for dummy depth map if needed
+        image = cv2.imread(image_path)
+        if image is None:
+            logging.error(f"Image: {image_basename} - Failed to load input image: {image_path}")
+            error_messages.append("Failed to load input image.")
+            raise ValueError("Failed to load input image")
+        logging.debug(f"Image: {image_basename} - Loaded image, shape: {image.shape}") 
+
+        # Attempt to load depth map
+        depth_map = None
+        if depth_map_path and os.path.exists(depth_map_path):
+            try:
+                if depth_map_path.lower().endswith('.npy'):
+                    depth_map = np.load(depth_map_path)
+                    logging.debug(f"Image: {image_basename} - Loaded .npy depth map from {depth_map_path}, shape: {depth_map.shape if depth_map is not None else 'None'}")
+                else: 
+                    depth_map = cv2.imread(depth_map_path, cv2.IMREAD_GRAYSCALE)
+                    logging.debug(f"Image: {image_basename} - Loaded image-based depth map from {depth_map_path}, shape: {depth_map.shape if depth_map is not None else 'None'}")
+
+                if depth_map is None: 
+                    logging.warning(f"Image: {image_basename} - Failed to load depth map from existing file {depth_map_path}. Will use default.")
+            except Exception as e:
+                logging.warning(f"Image: {image_basename} - Error loading depth map {depth_map_path}: {e}. Will use default.")
+                depth_map = None 
+
+        if depth_map is None: 
+            logging.warning(
+                f"Image: {image_basename} - Depth map at '{depth_map_path}' not found or failed to load. "
+                f"Using a default dummy depth map (all pixels at 1m depth, matching image size {image.shape[0]}x{image.shape[1]})."
+            )
+            depth_map = np.ones((image.shape[0], image.shape[1]), dtype=np.uint16) * 1000 
+
+        # Basic validation for the final depth_map (either loaded or dummy)
+        if not isinstance(depth_map, np.ndarray) or depth_map.ndim != 2:
+             logging.error(f"Image: {image_basename} - Final depth map is not a 2D NumPy array. Cannot proceed.")
+             error_messages.append("Invalid final depth map.")
+             raise ValueError("Invalid final depth map")
+        logging.info(f"Image: {image_basename} - Using depth map of shape: {depth_map.shape}") 
+        timing['load_inputs'] = time.time() - t0_inputs
+        
+        return image, depth_map, {'timing': timing, 'error_messages': error_messages}
+        
+    except Exception as e: 
+        logging.error(f"Image: {image_basename} - Critical error during input data loading: {e}", exc_info=True)
+        error_messages.append(f"Critical input loading error: {e}")
+        raise
+
+def _perform_segmentation(image: np.ndarray, config: dict, mask_path: str | None, 
+                         image_basename: str, save_steps: bool, output_dir: str | None) -> tuple[np.ndarray | None, str, dict]:
+    """Perform food segmentation."""
+    timing = {}
+    error_messages = []
+    
+    segmentation_mask = None
+    segmentation_source = "unknown"
+    t0_seg_overall = time.time()
+    
+    try:
+        if mask_path and os.path.exists(mask_path):
+            # Load pre-computed mask
+            segmentation_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            if segmentation_mask is not None:
+                segmentation_source = "provided"
+                logging.info(f"Image: {image_basename} - Using provided segmentation mask from: {mask_path}")
+            else:
+                logging.warning(f"Image: {image_basename} - Failed to load provided mask from {mask_path}. Running inference.")
+        
+        if segmentation_mask is None:
+            # Run segmentation inference
+            t0_seg = time.time()
+            model_params = config.get('model_params', {})
+            input_size = tuple(model_params.get('segmentation_input_size', [256, 256]))
+            threshold = model_params.get('segmentation_threshold', 0.5)
+            segmentation_tflite_path = config.get('models', {}).get('segmentation_tflite')
+            
+            if not segmentation_tflite_path:
+                logging.error(f"Image: {image_basename} - No segmentation TFLite model path specified in config.")
+                error_messages.append("No segmentation model path in config.")
+                raise ValueError("No segmentation model path")
+            
+            project_root = _get_project_root()
+            if not os.path.isabs(segmentation_tflite_path):
+                segmentation_tflite_path = os.path.join(project_root, segmentation_tflite_path)
+            
+            if not os.path.exists(segmentation_tflite_path):
+                logging.error(f"Image: {image_basename} - Segmentation TFLite model not found: {segmentation_tflite_path}")
+                error_messages.append(f"Segmentation model not found: {segmentation_tflite_path}")
+                raise FileNotFoundError(f"Segmentation model not found: {segmentation_tflite_path}")
+            
+            # Load model and run inference
+            model, input_details, output_details = load_segmentation_model(segmentation_tflite_path)
+            segmentation_mask, predicted_prob = run_segmentation_inference(
+                model, input_details, output_details, image, input_size, threshold
+            )
+            segmentation_source = "inference"
+            timing['segmentation_inference'] = time.time() - t0_seg
+            logging.info(f"Image: {image_basename} - Segmentation inference completed in {timing['segmentation_inference']:.2f}s")
+            
+            # Save segmentation mask if enabled
+            if save_steps and output_dir and segmentation_mask is not None:
+                mask_filename = f"{os.path.splitext(image_basename)[0]}_segmentation_mask.png"
+                mask_path_save = os.path.join(output_dir, mask_filename)
+                try:
+                    cv2.imwrite(mask_path_save, segmentation_mask)
+                    logging.info(f"Image: {image_basename} - Segmentation mask saved to: {mask_path_save}")
+                except Exception as e:
+                    logging.warning(f"Image: {image_basename} - Failed to save segmentation mask: {e}")
+        
+        timing['segmentation_total'] = time.time() - t0_seg_overall
+        return segmentation_mask, segmentation_source, {'timing': timing, 'error_messages': error_messages}
+        
+    except Exception as e:
+        logging.error(f"Image: {image_basename} - Error during segmentation: {e}", exc_info=True)
+        error_messages.append(f"Segmentation error: {e}")
+        raise
+
 # Core Analysis Function
 
 def analyze_food_item(
@@ -150,65 +275,44 @@ def analyze_food_item(
         logging.warning("save_steps is True, but no output_dir provided. Will not save intermediate steps.")
         save_steps = False
 
-    #1. Load Input Data
+    # 1. Load Input Data
     try:
-        t0_inputs = time.time()
-        # Load image first to get dimensions for dummy depth map if needed
-        image = cv2.imread(image_path)
-        if image is None:
-            logging.error(f"Image: {image_basename} - Failed to load input image: {image_path}")
-            results['error_messages'].append("Failed to load input image.")
-            return results # Critical failure
-        logging.debug(f"Image: {image_basename} - Loaded image, shape: {image.shape}") 
-
-        # Attempt to load depth map
-        depth_map = None
+        image, depth_map, load_data_results = _load_input_data(image_path, depth_map_path, image_basename)
+        results['timing'].update(load_data_results['timing'])
+        results['error_messages'].extend(load_data_results['error_messages'])
+        
+        # Log depth map info
         if depth_map_path and os.path.exists(depth_map_path):
-            try:
-                if depth_map_path.lower().endswith('.npy'):
-                    depth_map = np.load(depth_map_path)
-                    logging.debug(f"Image: {image_basename} - Loaded .npy depth map from {depth_map_path}, shape: {depth_map.shape if depth_map is not None else 'None'}")
-                else: 
-                    depth_map = cv2.imread(depth_map_path, cv2.IMREAD_GRAYSCALE)
-                    logging.debug(f"Image: {image_basename} - Loaded image-based depth map from {depth_map_path}, shape: {depth_map.shape if depth_map is not None else 'None'}")
-
-                if depth_map is None: 
-                    logging.warning(f"Image: {image_basename} - Failed to load depth map from existing file {depth_map_path}. Will use default.")
-            except Exception as e:
-                logging.warning(f"Image: {image_basename} - Error loading depth map {depth_map_path}: {e}. Will use default.")
-                depth_map = None 
-
-        if depth_map is None: 
-            logging.warning(
-                f"Image: {image_basename} - Depth map at '{depth_map_path}' not found or failed to load. "
-                f"Using a default dummy depth map (all pixels at 1m depth, matching image size {image.shape[0]}x{image.shape[1]})."
-            )
-            depth_map = np.ones((image.shape[0], image.shape[1]), dtype=np.uint16) * 1000 
-
-        # Basic validation for the final depth_map (either loaded or dummy)
-        if not isinstance(depth_map, np.ndarray) or depth_map.ndim != 2:
-             logging.error(f"Image: {image_basename} - Final depth map is not a 2D NumPy array. Cannot proceed.")
-             results['error_messages'].append("Invalid final depth map.")
-             return results # Critical failure
-        logging.info(f"Image: {image_basename} - Using depth map of shape: {depth_map.shape}") 
-        results['timing']['load_inputs'] = time.time() - t0_inputs
-    except Exception as e: 
-        logging.error(f"Image: {image_basename} - Critical error during input data loading: {e}", exc_info=True)
-        results['error_messages'].append(f"Critical input loading error: {e}")
+            logging.debug(f"Image: {image_basename} - Depth map loaded with shape: {depth_map.shape}, min_val: {depth_map.min()}, max_val: {depth_map.max()}")
+        else:
+            logging.info(f"Image: {image_basename} - No depth map path provided or file not found.")
+    except Exception:
         return results
 
-    # 2. Load Depth Map (if provided)
-    if depth_map_path and os.path.exists(depth_map_path):
-        logging.debug(f"Image: {image_basename} - Depth map loaded with shape: {depth_map.shape}, min_val: {depth_map.min()}, max_val: {depth_map.max()}")
-    else:
-        logging.info(f"Image: {image_basename} - No depth map path provided or file not found.")
+    # 2. Food Segmentation
+    try:
+        segmentation_mask, segmentation_source, seg_results = _perform_segmentation(
+            image, config, mask_path, image_basename, save_steps, output_dir
+        )
+        results['timing'].update(seg_results['timing'])
+        results['error_messages'].extend(seg_results['error_messages'])
+        
+        # Store segmentation results
+        if segmentation_mask is not None:
+            results['segmentation_mask_shape'] = segmentation_mask.shape
+            results['segmentation_pixels'] = np.count_nonzero(segmentation_mask) if segmentation_mask is not None else 0
+        else:
+            results['segmentation_mask_shape'] = None
+            results['segmentation_pixels'] = 0
+            
+        logging.info(f"Image: {image_basename} - Segmentation complete. Source: {segmentation_source}, Final Mask Shape: {results['segmentation_mask_shape']}")
+    except Exception as e:
+        logging.error(f"Image: {image_basename} - Segmentation failed: {e}")
+        results['error_messages'].append(f"Segmentation failed: {e}")
+        segmentation_mask = None
+        segmentation_source = "failed"
 
-    # 3. Food Segmentation
-    segmentation_mask = None
-    segmentation_source = "unknown" # Initialize segmentation source
-    t0_seg_overall = time.time()
-
-    if mask_path and os.path.exists(mask_path):
+    # 3. Food Classification
         t0_seg_mask_load = time.time()
         try:
             loaded_mask_gray = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
@@ -471,7 +575,8 @@ def analyze_food_item(
             t0_vol_depth_voxel = time.time()
             try:
                 # Prepare volume estimation config, merging defaults with overrides
-                vol_est_params = volume_estimation_config if volume_estimation_config is not None else {}
+                # Use volume processing params from pipeline config for better modularity
+                vol_est_params = volume_estimation_config if volume_estimation_config is not None else config.get('volume_estimation', {}).get('processing_params', {})
                 
                 # Determine debug_output_path for estimate_volume_from_depth
                 debug_output_path_volume = None
