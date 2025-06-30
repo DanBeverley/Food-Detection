@@ -141,8 +141,12 @@ def mixup(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_cl
     shuffled_images = tf.gather(batch_images, shuffled_indices)
     shuffled_labels_one_hot = tf.gather(labels_one_hot, shuffled_indices)
 
-    mixed_images = lambda_img * batch_images + (1.0 - lambda_img) * shuffled_images
-    mixed_labels = lambda_lbl * labels_one_hot + (1.0 - lambda_lbl) * shuffled_labels_one_hot
+    # Cast to ensure dtype compatibility with mixed precision
+    one_val = tf.cast(1.0, dtype=batch_images.dtype)
+    mixed_images = lambda_img * batch_images + (one_val - lambda_img) * shuffled_images
+    
+    one_val_lbl = tf.cast(1.0, dtype=labels_one_hot.dtype)
+    mixed_labels = lambda_lbl * labels_one_hot + (one_val_lbl - lambda_lbl) * shuffled_labels_one_hot
     return mixed_images, mixed_labels
 
 @tf.function
@@ -166,7 +170,7 @@ def cutmix(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_c
     shuffled_images = tf.gather(batch_images, shuffled_indices)
     shuffled_labels_one_hot = tf.gather(labels_one_hot, shuffled_indices)
 
-    cut_ratio = tf.sqrt(1.0 - lambda_val) 
+    cut_ratio = tf.sqrt(tf.cast(1.0, dtype=tf.float32) - lambda_val) 
     cut_h = tf.cast(cut_ratio * tf.cast(image_h, dtype=tf.float32), dtype=tf.int32)
     cut_w = tf.cast(cut_ratio * tf.cast(image_w, dtype=tf.float32), dtype=tf.int32)
 
@@ -189,13 +193,16 @@ def cutmix(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_c
     mask_center_shape = [cut_h, cut_w, 1] # For broadcasting with channels
     padding = [[bby1, image_h - bby2], [bbx1, image_w - bbx2], [0, 0]] # Pad for channels dim too
     
-    mask_center = tf.zeros(mask_center_shape, dtype=tf.float32)
-    mask = tf.pad(mask_center, padding, "CONSTANT", constant_values=1.0) # Pad with 1s
+    mask_center = tf.zeros(mask_center_shape, dtype=batch_images.dtype)
+    mask = tf.pad(mask_center, padding, "CONSTANT", constant_values=tf.cast(1.0, dtype=batch_images.dtype)) # Pad with 1s
 
     # Apply mask to images
     # Mask has 1s where original image should be, 0s where patch from shuffled image should be
-    cutmix_images = batch_images * mask + shuffled_images * (1.0 - mask)
-    mixed_labels = lambda_val * labels_one_hot + (1.0 - lambda_val) * shuffled_labels_one_hot
+    one_val = tf.cast(1.0, dtype=batch_images.dtype)
+    cutmix_images = batch_images * mask + shuffled_images * (one_val - mask)
+    
+    one_val_lbl = tf.cast(1.0, dtype=labels_one_hot.dtype)
+    mixed_labels = lambda_val * labels_one_hot + (one_val_lbl - lambda_val) * shuffled_labels_one_hot
     return cutmix_images, mixed_labels
 
 # Custom augmentation layers for overfitting prevention
