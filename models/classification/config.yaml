@@ -84,7 +84,7 @@ model:
     pooling: "GlobalAveragePooling2D" 
     dense_layers: 
       - units: 512  # Increased for production
-    dropout: 0.5 
+        dropout: 0.5 
         batch_norm: true
         l2_regularization: 0.001
       - units: 256  # Increased for production
