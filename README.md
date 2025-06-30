@@ -4,7 +4,7 @@ A comprehensive Python-based pipeline for food detection, volume estimation, and
 
 ## Current Status: Production-Ready Pipeline
 
-**Latest Update (January 2025)**: Complete end-to-end food analysis pipeline with optimized codebase and resolved training compatibility issues.
+**Latest Update (June 2025)**: Complete end-to-end food analysis pipeline with optimized codebase and resolved training compatibility issues.
 
 ### Completed Features
 - **Food Segmentation**: U-Net with EfficientNet backbone (256×256, TFLite optimized)
@@ -180,7 +180,7 @@ results = analyze_food_item(
 
 ## Recent Improvements
 
-### Code Optimization (January 2025)
+### Code Optimization (June 2025)
 - **Fixed mixed precision training compatibility** - Resolved dtype conflicts in augmentation
 - **Centralized configuration** - Moved hardcoded values to config files
 - **Cleaned codebase** - Removed redundant files and improved modularity
