@@ -20,7 +20,7 @@ MASK_SUFFIX = "_mask"
 
 def create_segmentation_metadata(source_rgbd_base_dir_path: str, 
                                  output_metadata_dir_path: str, 
-                                 source_point_cloud_base_dir_path: str):
+                                 source_point_cloud_base_dir_path: str = None):
     """
     Scans a source directory for image-mask-depth-pointcloud tuples based on a nested structure
     and generates a metadata.json file containing absolute paths to these items.
@@ -45,12 +45,16 @@ def create_segmentation_metadata(source_rgbd_base_dir_path: str,
     """
     source_dir = Path(source_rgbd_base_dir_path)
     output_meta_dir = Path(output_metadata_dir_path)
-    source_pc_base_dir = Path(source_point_cloud_base_dir_path)
+    source_pc_base_dir = Path(source_point_cloud_base_dir_path) if source_point_cloud_base_dir_path else None
     metadata_file_path = output_meta_dir / "metadata.json"
 
     if not source_dir.is_dir():
         logging.error(f"Source directory not found: {source_dir}")
         return
+    
+    if source_pc_base_dir and not source_pc_base_dir.is_dir():
+        logging.warning(f"Point cloud directory not found: {source_pc_base_dir}. Point cloud paths will be set to null.")
+        source_pc_base_dir = None
 
     os.makedirs(output_meta_dir, exist_ok=True)
 
@@ -84,14 +88,15 @@ def create_segmentation_metadata(source_rgbd_base_dir_path: str,
             original_folder = instance_folder / ORIGINAL_IMAGE_FOLDER_NAME
             mask_folder = instance_folder / SEGMENTATION_MASK_FOLDER_NAME
             depth_folder = instance_folder / DEPTH_MAP_FOLDER_NAME 
-            current_pc_instance_dir = source_pc_base_dir / class_name / instance_name
+            # Handle optional point cloud directory
+            current_pc_instance_dir = source_pc_base_dir / class_name / instance_name if source_pc_base_dir else None
 
             if not original_folder.is_dir():
                 logging.warning(f"  Class '{class_name}', Instance '{instance_name}': Missing '{ORIGINAL_IMAGE_FOLDER_NAME}' folder. Skipping instance.")
                 continue
             
             instance_point_cloud_path_str = None
-            if current_pc_instance_dir.is_dir():
+            if current_pc_instance_dir and current_pc_instance_dir.is_dir():
                 found_pc_file_for_instance = False
                 for item in current_pc_instance_dir.iterdir():
                     if item.is_file() and item.name.lower().endswith("_sampled_1.ply"):
@@ -103,8 +108,10 @@ def create_segmentation_metadata(source_rgbd_base_dir_path: str,
                 if not found_pc_file_for_instance:
                     # Log if no file ending with _sampled_1.ply was found in the directory
                     logging.warning(f"  Point cloud file ending with '_sampled_1.ply' not found in {current_pc_instance_dir} for instance '{instance_name}'. Point clouds will be null for this instance.")
-            else:
+            elif current_pc_instance_dir:
                 logging.warning(f"  Point cloud data directory not found at '{current_pc_instance_dir}'. Point clouds will be null for instance '{instance_name}'.")
+            else:
+                logging.debug(f"  Point cloud processing disabled. Point clouds will be null for instance '{instance_name}'.")
 
             # Masks, depth folders check (original logic)
             if not mask_folder.is_dir():
@@ -195,9 +202,10 @@ if __name__ == '__main__':
                         help=f"Root directory of the original dataset (e.g., E:/_MetaFood3D_new_RGBD_videos/RGBD_videos). Expected structure: source_dir/<ClassName>/<InstanceName>/{ORIGINAL_IMAGE_FOLDER_NAME}/<image_files>, and corresponding files in .../{SEGMENTATION_MASK_FOLDER_NAME}/, .../{DEPTH_MAP_FOLDER_NAME}/")
     parser.add_argument('--output_metadata_dir', type=str, required=True,
                         help="Directory where 'metadata.json' will be saved (e.g., data/MetaFood3D_RGBD_segmentation). Relative paths are resolved from project root.")
-    parser.add_argument('--source_point_cloud_dir', type=str, required=True,
+    parser.add_argument('--source_point_cloud_dir', type=str, required=False, default=None,
                         help="Base directory for point cloud files (e.g., E:/_MetaFood3D_new_Point_cloud/Point_cloud/4096). "
-                             "Expected structure: <source_point_cloud_dir>/<ClassName>/<InstanceName>/<DerivedPCFileName>.ply")
+                             "Expected structure: <source_point_cloud_dir>/<ClassName>/<InstanceName>/<DerivedPCFileName>.ply. "
+                             "Optional - if not provided, point cloud paths will be set to null.")
 
     args = parser.parse_args()
 
