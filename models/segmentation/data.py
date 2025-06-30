@@ -230,8 +230,8 @@ def _apply_segmentation_augmentations_impl(
         contrast_factor_lower, contrast_factor_upper = contrast_config
     else:
         # Fallback to old format
-    contrast_factor_lower = aug_config_dict.get("contrast_range_lower", 1.0)
-    contrast_factor_upper = aug_config_dict.get("contrast_range_upper", 1.0)
+        contrast_factor_lower = aug_config_dict.get("contrast_range_lower", 1.0)
+        contrast_factor_upper = aug_config_dict.get("contrast_range_upper", 1.0)
     
     if contrast_factor_lower < contrast_factor_upper : # Check if contrast is enabled
          rgb_image_after_geom = tf.image.random_contrast(rgb_image_after_geom, lower=contrast_factor_lower, upper=contrast_factor_upper)
@@ -586,14 +586,14 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         # Create path tuples for tf.data.Dataset
         # (rgb_path, depth_path, pc_path, mask_path)
         path_tuples = list(zip(all_rgb_paths, all_depth_paths, all_pc_paths, all_mask_paths))
-        labels_tf = tf.constant(all_labels, dtype=tf.int32) # Dummy labels for splitting
+        labels_np = np.array(all_labels, dtype=np.int32) # Use numpy array for scikit-learn compatibility
 
         indices = list(range(len(path_tuples)))
-        train_indices, val_test_indices = train_test_split(indices, train_size=split_ratios['train'], random_state=random_seed, stratify=labels_tf if len(set(all_labels)) > 1 else None)
+        train_indices, val_test_indices = train_test_split(indices, train_size=split_ratios['train'], random_state=random_seed, stratify=labels_np if len(set(all_labels)) > 1 else None)
         
         # Calculate the proportion of val set within the val_test_indices subset
         val_prop_in_remainder = split_ratios['val'] / (split_ratios['val'] + split_ratios['test'])
-        val_indices, test_indices = train_test_split(val_test_indices, train_size=val_prop_in_remainder, random_state=random_seed, stratify=labels_tf[val_test_indices] if len(set(all_labels)) > 1 else None)
+        val_indices, test_indices = train_test_split(val_test_indices, train_size=val_prop_in_remainder, random_state=random_seed, stratify=labels_np[val_test_indices] if len(set(all_labels)) > 1 else None)
 
         train_paths = [path_tuples[i] for i in train_indices]
         val_paths = [path_tuples[i] for i in val_indices]
