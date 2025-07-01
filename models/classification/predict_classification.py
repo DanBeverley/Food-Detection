@@ -7,7 +7,10 @@ from PIL import Image
 import logging
 from pathlib import Path
 import json
-from .data import _get_preprocess_fn
+try:
+    from .data import _get_preprocess_fn
+except ImportError:
+    from data import _get_preprocess_fn
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
