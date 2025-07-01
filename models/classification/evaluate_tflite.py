@@ -6,7 +6,10 @@ import numpy as np
 import yaml
 import json
 
-from data import load_classification_data, _get_project_root, _get_preprocess_fn # Assuming _get_preprocess_fn is in data.py
+try:
+    from .data import load_classification_data, _get_project_root, _get_preprocess_fn
+except ImportError:
+    from data import load_classification_data, _get_project_root, _get_preprocess_fn
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

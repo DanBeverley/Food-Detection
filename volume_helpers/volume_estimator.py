@@ -11,36 +11,8 @@ logger = logging.getLogger(__name__)
 # these would need to be adjusted. Without official intrinsics from the dataset,
 # volume estimation will have inherent inaccuracies.
 
-# Example for a ~640x480 sensor (common for older depth sensors)
-CAMERA_INTRINSICS_640_480 = {
-    "width": 640,
-    "height": 480,
-    "fx": 525.0,  # Focal length x
-    "fy": 525.0,  # Focal length y
-    "cx": 319.5,  # Principal point x (width / 2 - 0.5)
-    "cy": 239.5   # Principal point y (height / 2 - 0.5)
-}
-
-# Example for a ~1280x720 sensor (HD resolution)
-CAMERA_INTRINSICS_1280_720 = {
-    "width": 1280,
-    "height": 720,
-    "fx": 960.0,  # Scaled approx from 640x480 (fx_hd = fx_sd * width_hd/width_sd)
-    "fy": 960.0,  # Scaled approx from 640x480
-    "cx": 639.5,  # width / 2 - 0.5
-    "cy": 359.5   # height / 2 - 0.5
-}
-
-CAMERA_INTRINSICS_1440_1920 = {
-    "width": 1440,
-    "height": 1920,
-    "fx": 1181.25,
-    "fy": 1181.25, 
-    "cx": 719.5,
-    "cy": 959.5
-}
-
-DEFAULT_CAMERA_INTRINSICS = CAMERA_INTRINSICS_1440_1920
+# Camera intrinsics are now loaded from config files for better modularity
+# This eliminates hardcoded camera parameters and improves robustness
 
 def create_point_cloud_from_depth_mask(
     depth_map: np.ndarray,
@@ -250,16 +222,16 @@ def estimate_volume_from_depth(
     Returns:
         float: Estimated volume in cubic centimeters (cm^3). Returns 0.0 if fails.
     """
-    cfg = { # Default configuration for the entire process
-        "depth_scale": 1000.0, # Assuming input depth_map is in mm
+    # Use volume processing params from pipeline config for better modularity
+    cfg = config if config else {
+        "depth_scale": 1000.0,
         "depth_trunc_m": 3.0,
         "project_valid_depth_only": True,
-        "downsample_voxel_size_m": 0.005, 
+        "downsample_voxel_size_m": 0.005,
         "outlier_removal_nb_neighbors": 20,
         "outlier_removal_std_ratio": 2.0,
-        "volume_voxel_size_m": 0.005 
+        "volume_voxel_size_m": 0.005
     }
-    if config: cfg.update(config)
 
     # --- Intrinsics Debug Logging --- 
     logger.info(f"VOLUME_ESTIMATOR_DEBUG: Received camera_intrinsics_key: '{camera_intrinsics_key}'")

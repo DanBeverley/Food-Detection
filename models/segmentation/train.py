@@ -53,7 +53,12 @@ def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_ba
         # RGB Input
         if 'rgb_input' in inputs_dict:
             rgb = inputs_dict['rgb_input']
-            logger.info(f"  rgb_input: Shape={rgb.shape}, Dtype={rgb.dtype}, Min={tf.reduce_min(rgb).numpy()}, Max={tf.reduce_max(rgb).numpy()}")
+            try:
+                min_val = tf.reduce_min(rgb).numpy()
+                max_val = tf.reduce_max(rgb).numpy()
+                logger.info(f"  rgb_input: Shape={rgb.shape}, Dtype={rgb.dtype}, Min={min_val}, Max={max_val}")
+            except Exception as e:
+                logger.warning(f"  rgb_input: Shape={rgb.shape}, Dtype={rgb.dtype}, Stats unavailable: {e}")
         else:
             logger.warning("  rgb_input not found in batch.")
 
@@ -61,7 +66,12 @@ def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_ba
         if use_depth:
             if 'depth_input' in inputs_dict:
                 depth = inputs_dict['depth_input']
-                logger.info(f"  depth_input: Shape={depth.shape}, Dtype={depth.dtype}, Min={tf.reduce_min(depth).numpy()}, Max={tf.reduce_max(depth).numpy()}")
+                try:
+                    min_val = tf.reduce_min(depth).numpy()
+                    max_val = tf.reduce_max(depth).numpy()
+                    logger.info(f"  depth_input: Shape={depth.shape}, Dtype={depth.dtype}, Min={min_val}, Max={max_val}")
+                except Exception as e:
+                    logger.warning(f"  depth_input: Shape={depth.shape}, Dtype={depth.dtype}, Stats unavailable: {e}")
             else:
                 logger.warning("  depth_input is expected (use_depth_map=True) but not found in batch.")
         
@@ -69,14 +79,25 @@ def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_ba
         if use_pc:
             if 'pc_input' in inputs_dict:
                 pc = inputs_dict['pc_input']
-                logger.info(f"  pc_input: Shape={pc.shape}, Dtype={pc.dtype}, Min={tf.reduce_min(pc).numpy()}, Max={tf.reduce_max(pc).numpy()}")
+                try:
+                    min_val = tf.reduce_min(pc).numpy()
+                    max_val = tf.reduce_max(pc).numpy()
+                    logger.info(f"  pc_input: Shape={pc.shape}, Dtype={pc.dtype}, Min={min_val}, Max={max_val}")
+                except Exception as e:
+                    logger.warning(f"  pc_input: Shape={pc.shape}, Dtype={pc.dtype}, Stats unavailable: {e}")
             else:
                 logger.warning("  pc_input is expected (use_point_cloud=True) but not found in batch.")
 
         # Mask Tensor
-        logger.info(f"  mask_tensor: Shape={mask_tensor.shape}, Dtype={mask_tensor.dtype}, Min={tf.reduce_min(mask_tensor).numpy()}, Max={tf.reduce_max(mask_tensor).numpy()}")
-        unique_values, _ = tf.unique(tf.reshape(mask_tensor, [-1]))
-        logger.info(f"  mask_tensor: Unique values={unique_values.numpy()}")
+        try:
+            min_val = tf.reduce_min(mask_tensor).numpy()
+            max_val = tf.reduce_max(mask_tensor).numpy()
+            logger.info(f"  mask_tensor: Shape={mask_tensor.shape}, Dtype={mask_tensor.dtype}, Min={min_val}, Max={max_val}")
+            unique_values, _ = tf.unique(tf.reshape(mask_tensor, [-1]))
+            unique_np = unique_values.numpy()
+            logger.info(f"  mask_tensor: Unique values={unique_np}")
+        except Exception as e:
+            logger.warning(f"  mask_tensor: Shape={mask_tensor.shape}, Dtype={mask_tensor.dtype}, Stats unavailable: {e}")
         
 def build_decoder_block(input_tensor, skip_feature_tensor, num_filters, kernel_size=(3,3), strides=(2,2), upsampling_type='conv_transpose', kernel_initializer='he_normal', block_name=''):
     if upsampling_type == 'conv_transpose':

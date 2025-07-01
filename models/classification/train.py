@@ -717,13 +717,24 @@ def main(args):
             logger.info("DEBUG MODE: debug_max_total_samples not set in config, loading all available samples.")
 
     # Load data using the function from data.py
-    train_ds, val_ds, test_ds, num_train_samples, num_val_samples, num_test_samples, class_names, num_classes = load_classification_data(
+    logger.info("Loading classification data...")
+    data_result = load_classification_data(
         config=config, 
         max_samples_to_load=max_samples_for_loader
     )
     
+    if data_result is None:
+        logger.error("load_classification_data returned None. Exiting.")
+        return
+    
+    train_ds, val_ds, test_ds, num_train_samples, num_val_samples, num_test_samples, class_names, num_classes = data_result
+    
     if num_train_samples == 0:
-        logger.error("No training samples loaded. Exiting.")
+        logger.error("No training samples loaded. This typically means:")
+        logger.error("1. Dataset images are not accessible at the expected paths")
+        logger.error("2. Metadata contains only Windows absolute paths (E:, C:, etc.)")
+        logger.error("3. Dataset needs to be uploaded to Kaggle input directory")
+        logger.error("4. Metadata file paths need to be updated for the current environment")
         return
 
     logger.info(f"Number of training samples: {num_train_samples}")
@@ -768,16 +779,25 @@ def main(args):
 
     # Add data pipeline validation
     logger.info(f"Expected total batches per epoch: {steps_per_epoch_val}")
-    logger.info(f"Training dataset cardinality: {tf.data.experimental.cardinality(train_ds).numpy()}")
     
-    # Verify dataset can provide enough batches
-    if train_ds:
+    # Check if train_ds is None before trying to access its attributes
+    if train_ds is None:
+        logger.error("Training dataset is None. Cannot proceed with training.")
+        return
+    
+    try:
         dataset_cardinality = tf.data.experimental.cardinality(train_ds).numpy()
+        logger.info(f"Training dataset cardinality: {dataset_cardinality}")
+        
+        # Verify dataset can provide enough batches
         if dataset_cardinality != -1 and dataset_cardinality < steps_per_epoch_val:
             logger.warning(f"Dataset cardinality ({dataset_cardinality}) is less than expected steps_per_epoch ({steps_per_epoch_val}). This may cause the 'ran out of data' warning.")
             # Option 1: Use dataset cardinality as steps_per_epoch
             steps_per_epoch_val = dataset_cardinality
             logger.info(f"Adjusted steps_per_epoch to dataset cardinality: {steps_per_epoch_val}")
+    except Exception as e:
+        logger.error(f"Error accessing training dataset cardinality: {e}")
+        logger.warning("Proceeding without cardinality validation.")
 
     history = train_model(
         model=model, 

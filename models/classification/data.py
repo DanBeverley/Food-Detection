@@ -141,8 +141,12 @@ def mixup(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_cl
     shuffled_images = tf.gather(batch_images, shuffled_indices)
     shuffled_labels_one_hot = tf.gather(labels_one_hot, shuffled_indices)
 
-    mixed_images = lambda_img * batch_images + (1.0 - lambda_img) * shuffled_images
-    mixed_labels = lambda_lbl * labels_one_hot + (1.0 - lambda_lbl) * shuffled_labels_one_hot
+    # Cast to ensure dtype compatibility with mixed precision
+    one_val = tf.cast(1.0, dtype=batch_images.dtype)
+    mixed_images = lambda_img * batch_images + (one_val - lambda_img) * shuffled_images
+    
+    one_val_lbl = tf.cast(1.0, dtype=labels_one_hot.dtype)
+    mixed_labels = lambda_lbl * labels_one_hot + (one_val_lbl - lambda_lbl) * shuffled_labels_one_hot
     return mixed_images, mixed_labels
 
 @tf.function
@@ -166,7 +170,7 @@ def cutmix(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_c
     shuffled_images = tf.gather(batch_images, shuffled_indices)
     shuffled_labels_one_hot = tf.gather(labels_one_hot, shuffled_indices)
 
-    cut_ratio = tf.sqrt(1.0 - lambda_val) 
+    cut_ratio = tf.sqrt(tf.cast(1.0, dtype=tf.float32) - lambda_val) 
     cut_h = tf.cast(cut_ratio * tf.cast(image_h, dtype=tf.float32), dtype=tf.int32)
     cut_w = tf.cast(cut_ratio * tf.cast(image_w, dtype=tf.float32), dtype=tf.int32)
 
@@ -189,13 +193,16 @@ def cutmix(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_c
     mask_center_shape = [cut_h, cut_w, 1] # For broadcasting with channels
     padding = [[bby1, image_h - bby2], [bbx1, image_w - bbx2], [0, 0]] # Pad for channels dim too
     
-    mask_center = tf.zeros(mask_center_shape, dtype=tf.float32)
-    mask = tf.pad(mask_center, padding, "CONSTANT", constant_values=1.0) # Pad with 1s
+    mask_center = tf.zeros(mask_center_shape, dtype=batch_images.dtype)
+    mask = tf.pad(mask_center, padding, "CONSTANT", constant_values=tf.cast(1.0, dtype=batch_images.dtype)) # Pad with 1s
 
     # Apply mask to images
     # Mask has 1s where original image should be, 0s where patch from shuffled image should be
-    cutmix_images = batch_images * mask + shuffled_images * (1.0 - mask)
-    mixed_labels = lambda_val * labels_one_hot + (1.0 - lambda_val) * shuffled_labels_one_hot
+    one_val = tf.cast(1.0, dtype=batch_images.dtype)
+    cutmix_images = batch_images * mask + shuffled_images * (one_val - mask)
+    
+    one_val_lbl = tf.cast(1.0, dtype=labels_one_hot.dtype)
+    mixed_labels = lambda_val * labels_one_hot + (one_val_lbl - lambda_val) * shuffled_labels_one_hot
     return cutmix_images, mixed_labels
 
 # Custom augmentation layers for overfitting prevention
@@ -353,6 +360,10 @@ def load_classification_data(
     all_image_paths = []
     all_labels = [] 
     label_to_index_map = {v: k for k, v in index_to_label_map.items()}
+    
+    # Track skipped items for debugging
+    skipped_count = 0
+    windows_path_count = 0
 
     logger.info("Collecting image paths and labels from metadata...")
     # Handle both list format and dict format for metadata
@@ -370,29 +381,54 @@ def load_classification_data(
             logger.warning(f"Skipping item due to missing path or label: {item}")
             continue
         
-        # Handle absolute paths from the dataset
-        if relative_path.startswith('E:'):
-            # Use the absolute path directly
+        # Handle different path formats (Windows absolute, relative, etc.)
+        if relative_path.startswith(('E:', 'C:', 'D:', 'F:')):
+            # Count Windows paths for debugging
+            windows_path_count += 1
+            if windows_path_count <= 3:  # Log first few for debugging
+                logger.debug(f"Found Windows absolute path: {relative_path}")
+            # Skip absolute Windows paths - likely from original dataset creation
+            # In Kaggle/cloud environments, we expect data to be in input directories
+            skipped_count += 1
+            continue
+        elif relative_path.startswith('/kaggle/input/'):
+            # Direct Kaggle input path
             full_image_path = Path(relative_path)
+        elif relative_path.startswith('input/'):
+            # Relative Kaggle input path
+            full_image_path = Path('/kaggle') / relative_path
         else:
-            # Handle relative paths
+            # Handle relative paths from project root
             if relative_path.startswith(str(base_image_dir)):
                 relative_path = str(Path(relative_path).relative_to(base_image_dir))
-        full_image_path = base_image_dir / relative_path
+            full_image_path = base_image_dir / relative_path
         
         if not full_image_path.exists():
             logger.warning(f"Image file not found: {full_image_path}. Skipping.")
+            skipped_count += 1
             continue
 
         if label_name not in label_to_index_map:
             logger.error(f"Label '{label_name}' from metadata not found in label_map {label_map_path}. Skipping image {full_image_path}.")
+            skipped_count += 1
             continue
         
         all_image_paths.append(str(full_image_path))
         all_labels.append(label_to_index_map[label_name])
 
+    # Log processing results
+    logger.info(f"Metadata processing complete:")
+    logger.info(f"  - Total items processed: {len(metadata_items)}")
+    logger.info(f"  - Windows paths skipped: {windows_path_count}")
+    logger.info(f"  - Total items skipped: {skipped_count}")
+    logger.info(f"  - Valid images found: {len(all_image_paths)}")
+
     if not all_image_paths:
         logger.error("No valid image paths found after processing metadata.")
+        logger.error("This typically means:")
+        logger.error("1. All paths in metadata are Windows absolute paths (E:, C:, etc.)")
+        logger.error("2. Expected data is not in /kaggle/input/ or other accessible locations")
+        logger.error("3. Dataset needs to be uploaded to Kaggle or paths need to be updated")
         return None, None, None, 0, 0, 0, class_names, num_classes
     
     logger.info(f"Collected {len(all_image_paths)} total image paths with labels.")
@@ -588,9 +624,27 @@ def load_classification_data(
     val_dataset = configure_dataset(val_paths, val_labels, shuffle_ds=data_config.get('shuffle_validation_data', True), augment_ds=augment_val, is_training_set_flag=False)
     test_dataset = configure_dataset(test_paths, test_labels, shuffle_ds=False, augment_ds=False, is_training_set_flag=False)
 
-    if train_dataset: logger.info(f"Training dataset: {tf.data.experimental.cardinality(train_dataset).numpy()} batches.")
-    if val_dataset: logger.info(f"Validation dataset: {tf.data.experimental.cardinality(val_dataset).numpy()} batches.")
-    if test_dataset: logger.info(f"Test dataset: {tf.data.experimental.cardinality(test_dataset).numpy()} batches.")
+    # Log dataset cardinalities with error handling
+    if train_dataset:
+        try:
+            train_card = tf.data.experimental.cardinality(train_dataset).numpy()
+            logger.info(f"Training dataset: {train_card} batches.")
+        except Exception as e:
+            logger.warning(f"Could not determine training dataset cardinality: {e}")
+    
+    if val_dataset:
+        try:
+            val_card = tf.data.experimental.cardinality(val_dataset).numpy()
+            logger.info(f"Validation dataset: {val_card} batches.")
+        except Exception as e:
+            logger.warning(f"Could not determine validation dataset cardinality: {e}")
+    
+    if test_dataset:
+        try:
+            test_card = tf.data.experimental.cardinality(test_dataset).numpy()
+            logger.info(f"Test dataset: {test_card} batches.")
+        except Exception as e:
+            logger.warning(f"Could not determine test dataset cardinality: {e}")
 
     return (
         train_dataset, val_dataset, test_dataset, 

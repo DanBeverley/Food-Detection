@@ -198,9 +198,10 @@ def export_model_to_tflite(config: dict):
         logger.error(f"Failed to write TFLite model file: {e}")
         raise RuntimeError("Failed to save TFLite model.") from e
 
-    # Copy Label Map 
+    # Copy Label Map from data directory (where it's generated during training)
     label_map_filename = paths_config.get('label_map_filename', 'label_map.json')
-    source_label_map_path = os.path.join(model_dir, label_map_filename)
+    label_map_dir = paths_config.get('label_map_dir', 'data/classification')
+    source_label_map_path = os.path.join(project_root, label_map_dir, label_map_filename)
     dest_label_map_path = os.path.join(tflite_dir, label_map_filename)
 
     if os.path.exists(source_label_map_path):
