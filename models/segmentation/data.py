@@ -243,8 +243,8 @@ def _apply_segmentation_augmentations_impl(
         saturation_factor_lower, saturation_factor_upper = saturation_config
     else:
         # Fallback to old format
-    saturation_factor_lower = aug_config_dict.get("saturation_range_lower", 1.0)
-    saturation_factor_upper = aug_config_dict.get("saturation_range_upper", 1.0)
+        saturation_factor_lower = aug_config_dict.get("saturation_range_lower", 1.0)
+        saturation_factor_upper = aug_config_dict.get("saturation_range_upper", 1.0)
     
     if saturation_factor_lower < saturation_factor_upper:
         rgb_image_after_geom = tf.image.random_saturation(rgb_image_after_geom, lower=saturation_factor_lower, upper=saturation_factor_upper)
