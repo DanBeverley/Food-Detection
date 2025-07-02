@@ -132,7 +132,7 @@ metrics: ["accuracy", "top_5_accuracy", "precision", "recall"]
 
 # Production Training Configuration
 training:
-  epochs: 30  # Production epochs
+  epochs: 15  # Optimized epochs for faster training
   debug_epochs: 3   # Reduced debug epochs
   use_mixed_precision: true
   use_tpu: false 
@@ -158,7 +158,7 @@ training:
       enabled: true
       monitor: "val_loss"
       mode: "min"
-      patience: 15
+      patience: 8
       restore_best_weights: true
       min_delta: 0.001
       
@@ -167,7 +167,7 @@ training:
       monitor: "val_loss" 
       mode: "min" 
       factor: 0.5
-      patience: 8
+      patience: 5
       min_lr: 0.000001
       cooldown: 5
       

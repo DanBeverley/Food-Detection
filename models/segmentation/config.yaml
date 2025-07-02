@@ -141,7 +141,7 @@ loss:
 
 # Debug Training Configuration
 training:
-  epochs: 30  # Full training epochs
+  epochs: 20  # Optimized epochs for faster training
   debug_epochs: 3  # Fast debug epochs
   debug_mode: false  # Disabled for production training
   use_mixed_precision: true
@@ -187,7 +187,7 @@ training:
       enabled: true
       monitor: "val_binary_iou"
       mode: "max"
-      patience: 15  # Production patience
+      patience: 10  # Optimized patience
       restore_best_weights: true
       min_delta: 0.001
 
@@ -196,7 +196,7 @@ training:
       monitor: "val_binary_iou"
       mode: "max"
       factor: 0.5
-      patience: 8  # Production patience
+      patience: 6  # Optimized patience
       min_lr: 0.00001
       cooldown: 3
 
