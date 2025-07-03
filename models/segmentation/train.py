@@ -11,7 +11,11 @@ import logging
 import tensorflow as tf
 
 # Configure TensorFlow for TPU compatibility
-tf.config.experimental.enable_tensor_float_32(False)  # Disable TF32 for TPU compatibility
+try:
+    tf.config.experimental.enable_tensor_float_32(False)  # Disable TF32 for TPU compatibility
+except AttributeError:
+    # TF32 control not available in this TensorFlow version
+    pass
 from pathlib import Path
 from datetime import datetime
 import traceback
