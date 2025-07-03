@@ -106,16 +106,16 @@ model:
 # Production Optimizer Configuration
 optimizer:
   name: "AdamW"
-  learning_rate: 0.002  # Scaled for distributed training
+  learning_rate: 0.01  # Increased to escape plateau
   weight_decay: 0.01
-  clipnorm: 5.0  # Increased to allow larger gradients
+  clipnorm: 10.0  # Further increased for plateau escape
   
   # Learning rate scheduling - enabled for production
   schedule:
     enabled: true
     type: "cosine_decay_restarts"
-    initial_learning_rate: 0.002
-    first_decay_steps: 2000
+    initial_learning_rate: 0.01
+    first_decay_steps: 1000
     t_mul: 2.0
     m_mul: 1.0
     alpha: 0.00001
@@ -166,10 +166,10 @@ training:
       enabled: true
       monitor: "val_loss" 
       mode: "min" 
-      factor: 0.2
-      patience: 5
-      min_lr: 0.0000001
-      cooldown: 3
+      factor: 0.5
+      patience: 3
+      min_lr: 0.001
+      cooldown: 2
       
     tensorboard:
       enabled: true
