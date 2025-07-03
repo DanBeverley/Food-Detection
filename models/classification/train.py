@@ -107,13 +107,42 @@ def initialize_strategy() -> tf.distribute.Strategy:
         logger.info(f"Using default strategy: {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
         return strategy
     
+    # CRITICAL: Check Kaggle TPU environment first
+    logger.info("🔍 CHECKING TPU AVAILABILITY...")
+    
+    # Check if running on Kaggle TPU
+    import os
+    tpu_address = os.environ.get('TPU_NAME', None)
+    
+    # Try alternative TPU environment variables
+    if not tpu_address:
+        tpu_address = os.environ.get('COLAB_TPU_ADDR', None)
+    if not tpu_address:
+        # Check if we're on Kaggle by looking for specific env vars
+        if 'KAGGLE_USER_SECRETS_TOKEN' in os.environ:
+            # On Kaggle, try standard TPU names
+            tpu_address = 'local'  # Try Kaggle's default
+    
+    logger.info(f"Environment TPU_NAME: {tpu_address}")
+    logger.info(f"Available environment variables: {[k for k in os.environ.keys() if 'TPU' in k.upper()]}")
+    
+    # Check if TPU is available via different methods
     try:
-        # First, try to detect TPU without connecting
-        tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver()
-        logger.info(f'TPU detected: {tpu_resolver.master()}')
+        # Method 1: Try with explicit TPU name first
+        if tpu_address:
+            logger.info(f"🔄 Attempting TPU connection with explicit name: {tpu_address}")
+            tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver(tpu=tpu_address)
+        else:
+            # Method 2: Try automatic detection
+            logger.info("🔄 Attempting automatic TPU detection")
+            tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver()
+        
+        logger.info(f'✅ TPU detected via resolver: {tpu_resolver.master()}')
         
         # Connect to cluster and initialize TPU system
+        logger.info("🔄 Connecting to TPU cluster...")
         tf.config.experimental_connect_to_cluster(tpu_resolver)
+        logger.info("🔄 Initializing TPU system...")
         tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
         
         # Create TPU strategy after successful initialization
@@ -128,18 +157,45 @@ def initialize_strategy() -> tf.distribute.Strategy:
         return strategy
         
     except ValueError as e:
-        logger.info(f"TPU not found or error connecting: {e}. Checking for GPUs.")
+        logger.error(f"❌ TPU not found via resolver: {e}")
+        logger.info("🔄 Trying alternative TPU detection methods...")
+        
+        # Method 2: Try manual TPU address
+        if tpu_address:
+            try:
+                logger.info(f"🔄 Trying manual TPU connection to: {tpu_address}")
+                tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver(tpu=tpu_address)
+                tf.config.experimental_connect_to_cluster(tpu_resolver)
+                tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
+                strategy = tf.distribute.TPUStrategy(tpu_resolver)
+                logger.info(f"✅ TPU STRATEGY ACTIVE (manual): {strategy.num_replicas_in_sync} replicas")
+                return strategy
+            except Exception as e2:
+                logger.error(f"❌ Manual TPU connection failed: {e2}")
+        
+        logger.info("🔄 TPU not available, checking for GPUs...")
+        
     except Exception as e:
-        logger.error(f"An unexpected error occurred during TPU initialization: {e}. Checking for GPUs.")
+        logger.error(f"❌ Unexpected error during TPU initialization: {e}")
+        logger.info("🔄 Falling back to GPU/CPU detection...")
 
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
-        logger.info(f"Found GPUs: {gpus}")
-        tf.config.experimental.set_visible_devices(gpus[0], 'GPU')
-        tf.config.experimental.set_memory_growth(gpus[0], True)
-        logger.info(f"Restricted TensorFlow to use GPU: {gpus[0].name} and enabled memory growth.")
-        strategy = tf.distribute.get_strategy()
-        logger.info(f"Using default strategy (CPU or single GPU): {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
+        logger.info(f"🔍 Found GPUs: {gpus}")
+        
+        # Configure all GPUs for memory growth
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        
+        if len(gpus) > 1:
+            # Multi-GPU strategy
+            strategy = tf.distribute.MirroredStrategy()
+            logger.info(f"✅ MULTI-GPU STRATEGY: {len(gpus)} GPUs, {strategy.num_replicas_in_sync} replicas")
+        else:
+            # Single GPU
+            strategy = tf.distribute.get_strategy()
+            logger.info(f"✅ SINGLE GPU STRATEGY: {gpus[0].name}")
+        
         return strategy
     else:
         logger.warning("No GPUs found by TensorFlow. Training will use CPU.")
