@@ -25,31 +25,66 @@ class DebugCallback(tf.keras.callbacks.Callback):
         
     def on_train_batch_end(self, batch, logs=None):
         self.batch_count += 1
-        if self.batch_count % 100 == 0:  # Log every 100 batches
+        if self.batch_count % 50 == 0:  # Log every 50 batches for more frequent monitoring
             # Check if loss is changing
             current_loss = logs.get('loss', 0)
-            logger.info(f"DEBUG Batch {self.batch_count}: Loss={current_loss:.6f}")
+            current_acc = logs.get('categorical_accuracy', 0)
+            logger.info(f"DEBUG Batch {self.batch_count}: Loss={current_loss:.6f}, Acc={current_acc:.4f}")
             
-            # Check gradient norms
+            # CRITICAL: Check if loss is stuck at specific value
+            if abs(current_loss - 4.6286) < 0.001:
+                logger.error(f"CRITICAL: Loss stuck at {current_loss:.6f} - investigating...")
+                
+                # Check optimizer learning rate
+                try:
+                    lr = self.model.optimizer.learning_rate
+                    if hasattr(lr, 'numpy'):
+                        lr_val = lr.numpy()
+                    else:
+                        lr_val = lr
+                    logger.error(f"CRITICAL: Current LR = {lr_val}")
+                    
+                    if lr_val < 1e-6:
+                        logger.error("CRITICAL: Learning rate collapsed!")
+                except:
+                    pass
+            
+            # Check gradient norms and detect anomalies
             try:
                 total_norm = 0
                 param_count = 0
+                nan_count = 0
+                
                 for weight in self.model.trainable_weights:
-                    if weight.shape:  # Skip empty weights
+                    if weight.shape:
                         param_count += tf.size(weight)
-                        # Simple gradient check - if all weights are identical across batches,
-                        # gradients might not be flowing
                         weight_norm = tf.norm(weight)
-                        total_norm += weight_norm
                         
-                if param_count > 0:
+                        # Check for NaN/Inf
+                        if tf.math.is_nan(weight_norm) or tf.math.is_inf(weight_norm):
+                            nan_count += 1
+                            logger.error(f"CRITICAL: NaN/Inf detected in weight: {weight.name}")
+                        else:
+                            total_norm += weight_norm
+                        
+                if nan_count > 0:
+                    logger.error(f"CRITICAL: {nan_count} weights have NaN/Inf values!")
+                        
+                if param_count > 0 and nan_count == 0:
                     avg_weight_norm = total_norm / len(self.model.trainable_weights)
-                    logger.info(f"DEBUG Batch {self.batch_count}: Avg weight norm={avg_weight_norm:.6f}, Trainable weights={len(self.model.trainable_weights)}")
-                else:
-                    logger.error("DEBUG: No trainable weights found!")
+                    logger.info(f"DEBUG Batch {self.batch_count}: Avg weight norm={avg_weight_norm:.6f}")
                     
+                    # Track if weights are changing
+                    if not hasattr(self, 'prev_weight_norm'):
+                        self.prev_weight_norm = avg_weight_norm
+                    else:
+                        weight_change = abs(avg_weight_norm - self.prev_weight_norm)
+                        if weight_change < 1e-8:
+                            logger.error(f"CRITICAL: Weights not changing! Change={weight_change:.10f}")
+                        self.prev_weight_norm = avg_weight_norm
+                        
             except Exception as e:
-                logger.warning(f"DEBUG: Could not compute weight norms: {e}")
+                logger.error(f"CRITICAL: Error in weight analysis: {e}")
 
 from typing import Dict, Tuple, Any, List, Optional
 
@@ -568,6 +603,18 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         outputs_identical = tf.reduce_all(tf.equal(dummy_output, dummy_output2))
         logger.info(f"DEBUG: Identical outputs on repeated calls: {outputs_identical}")
         
+        # CRITICAL: Check optimizer learning rate
+        actual_lr = model.optimizer.learning_rate
+        if hasattr(actual_lr, 'numpy'):
+            actual_lr_value = actual_lr.numpy()
+        else:
+            actual_lr_value = actual_lr
+        logger.info(f"DEBUG: Optimizer actual learning rate: {actual_lr_value}")
+        logger.info(f"DEBUG: Optimizer type: {type(model.optimizer).__name__}")
+        
+        if actual_lr_value < 1e-8:
+            logger.error(f"CRITICAL: Learning rate is too small: {actual_lr_value}")
+        
     except Exception as e:
         logger.error(f"DEBUG: Forward pass failed: {e}")
         return
@@ -788,7 +835,19 @@ def train_model(model: models.Model,
             logger.info(f"DEBUG: Batch {sample_count} - Input shape: {batch_inputs.shape if hasattr(batch_inputs, 'shape') else 'dict'}")
             logger.info(f"DEBUG: Batch {sample_count} - Label shape: {batch_labels.shape}")
             logger.info(f"DEBUG: Batch {sample_count} - Label sample: {batch_labels[0][:5]}")
-            logger.info(f"DEBUG: Batch {sample_count} - Label unique values: {len(tf.unique(tf.argmax(batch_labels, axis=1))[0])}")
+            label_classes = tf.argmax(batch_labels, axis=1)
+            unique_labels = tf.unique(label_classes)[0]
+            logger.info(f"DEBUG: Batch {sample_count} - Label unique values: {len(unique_labels)} out of {batch_labels.shape[0]} samples")
+            logger.info(f"DEBUG: Batch {sample_count} - Label class distribution: {unique_labels.numpy()}")
+            
+            # CRITICAL: Check if all labels are the same
+            if len(unique_labels) == 1:
+                logger.error(f"CRITICAL: ALL LABELS IN BATCH {sample_count} ARE IDENTICAL! Class: {unique_labels[0].numpy()}")
+                logger.error("This explains the stuck loss - model predicts same class always")
+            
+            # Check label sum (should vary between batches)
+            label_sum = tf.reduce_sum(label_classes)
+            logger.info(f"DEBUG: Batch {sample_count} - Label sum: {label_sum.numpy()}")
             logger.info(f"DEBUG: Batch {sample_count} - Hash: {batch_hash}")
         
         if len(set(batch_hashes)) == 1:
