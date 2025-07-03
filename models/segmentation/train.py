@@ -1,9 +1,17 @@
 print("TRAIN.PY TOP LEVEL PRINT STATEMENT EXECUTING NOW") # CASCADE_DIAGNOSTIC_PRINT
+
+# TPU-specific environment configuration
+os.environ['TPU_LOAD_LIBRARY'] = '0'  # Prevent TPU library conflicts
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'  # Reduce TensorFlow logging
+
 import os
 import sys
 import yaml
 import logging
 import tensorflow as tf
+
+# Configure TensorFlow for TPU compatibility
+tf.config.experimental.enable_tensor_float_32(False)  # Disable TF32 for TPU compatibility
 from pathlib import Path
 from datetime import datetime
 import traceback
@@ -20,6 +28,87 @@ from data import load_segmentation_data # Use relative import
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+def set_mixed_precision_policy(config: dict, strategy: tf.distribute.Strategy):
+    """Set mixed precision policy based on hardware and config."""
+    training_config = config.get('training', {})
+    if training_config.get('use_mixed_precision', False):
+        policy_name = ''
+        if isinstance(strategy, tf.distribute.TPUStrategy):
+            policy_name = 'mixed_bfloat16'
+            logger.info("TPU detected, using 'mixed_bfloat16' for mixed precision.")
+        else:
+            gpu_compatible = False
+            try:
+                gpus = tf.config.experimental.list_physical_devices('GPU')
+                if gpus:
+                    details = tf.config.experimental.get_device_details(gpus[0])
+                    if details.get('compute_capability', (0,0))[0] >= 7:
+                        gpu_compatible = True
+            except Exception as e:
+                logger.warning(f"Could not get GPU details for mixed precision check: {e}")
+
+            if gpu_compatible:
+                policy_name = 'mixed_float16'
+                logger.info("Compatible GPU detected, using 'mixed_float16' for mixed precision.")
+            else:
+                logger.warning("Mixed precision enabled in config, but no compatible GPU (Compute Capability >= 7.0) or TPU found. Mixed precision will not be used effectively for GPU.")
+                return
+
+        if policy_name:
+            logger.info(f"Setting mixed precision policy to '{policy_name}'.")
+            try:
+                from tensorflow.keras import mixed_precision
+                policy = mixed_precision.Policy(policy_name)
+                mixed_precision.set_global_policy(policy)
+                logger.info(f"Mixed precision policy set. Compute dtype: {policy.compute_dtype}, Variable dtype: {policy.variable_dtype}")
+            except Exception as e:
+                logger.warning(f"Could not set mixed precision policy: {e}")
+    else:
+        logger.info("Mixed precision training not enabled in config.")
+
+def initialize_strategy() -> tf.distribute.Strategy:
+    """Initialize distributed strategy for TPU, GPU, or CPU."""
+    try:
+        # First, try to detect TPU without connecting
+        tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver()
+        logger.info(f'TPU detected: {tpu_resolver.master()}')
+        
+        # Connect to cluster and initialize TPU system
+        tf.config.experimental_connect_to_cluster(tpu_resolver)
+        tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
+        
+        # Create TPU strategy after successful initialization
+        strategy = tf.distribute.TPUStrategy(tpu_resolver)
+        logger.info(f"TPU strategy initialized with {strategy.num_replicas_in_sync} replicas.")
+        
+        # Set memory growth for TPU
+        tf.config.experimental.set_synchronous_execution(True)
+        
+        return strategy
+        
+    except ValueError as e:
+        logger.info(f"TPU not found or error connecting: {e}. Checking for GPUs.")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during TPU initialization: {e}. Checking for GPUs.")
+
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        logger.info(f"Found GPUs: {gpus}")
+        try:
+            tf.config.experimental.set_visible_devices(gpus[0], 'GPU')
+            tf.config.experimental.set_memory_growth(gpus[0], True)
+            logger.info(f"Restricted TensorFlow to use GPU: {gpus[0].name} and enabled memory growth.")
+        except RuntimeError as e:
+            logger.warning(f"Could not configure GPU memory growth: {e}")
+        strategy = tf.distribute.get_strategy()
+        logger.info(f"Using default strategy (CPU or single GPU): {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
+        return strategy
+    else:
+        logger.warning("No GPUs found by TensorFlow. Training will use CPU.")
+        strategy = tf.distribute.get_strategy()
+        logger.info(f"Using default strategy (CPU): {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
+        return strategy
 
 # Path to the specific config file for segmentation training
 SEGMENTATION_CONFIG_PATH = os.path.join(_get_project_root(), "models", "segmentation", "config.yaml")
@@ -518,6 +607,10 @@ def combined_loss(y_true, y_pred, bce_weight=0.5, dice_weight=0.3, focal_weight=
 def main():
     project_root = _get_project_root()
     
+    # Initialize distributed strategy first
+    strategy = initialize_strategy()
+    logger.info(f"Training will use strategy: {strategy.__class__.__name__}")
+    
     parser = argparse.ArgumentParser(description="Train a segmentation model.")
     parser.add_argument('--config', type=str, default=str(project_root / 'models' / 'segmentation' / 'config.yaml'), help='Path to the configuration YAML file.')
     parser.add_argument('--debug', action='store_true', help='Run in debug mode (overrides some config settings for quick testing).')
@@ -526,6 +619,9 @@ def main():
     config = load_config(args.config)
     training_cfg = config.get('training', {})
     data_cfg = config.get('data', {})
+
+    # Set mixed precision policy
+    set_mixed_precision_policy(config, strategy)
 
     # --- Determine if debug mode is active --- 
     # Priority: CLI --debug flag > config.yaml training.debug_mode
@@ -587,121 +683,123 @@ def main():
     loss_cfg = config.get('loss', {})           # Corrected: Get from root config
     metrics_cfg = training_cfg.get('metrics', ['accuracy'])
     
-    # Define model
-    # Use num_classes obtained from load_segmentation_data which should be consistent with data_cfg['num_classes']
-    model = unet_model(output_channels=num_classes, image_size=tuple(data_cfg.get('image_size')[:2]), model_config=config.get('model', {}), data_config=data_cfg)
+    # Create model and optimizer within strategy scope for TPU/distributed training
+    with strategy.scope():
+        # Define model
+        # Use num_classes obtained from load_segmentation_data which should be consistent with data_cfg['num_classes']
+        model = unet_model(output_channels=num_classes, image_size=tuple(data_cfg.get('image_size')[:2]), model_config=config.get('model', {}), data_config=data_cfg)
 
-    # Enhanced Optimizer Configuration
-    learning_rate = optimizer_cfg.get('learning_rate', 1e-4)
-    optimizer_name = optimizer_cfg.get('name', 'Adam').lower()
-    weight_decay = optimizer_cfg.get('weight_decay', 0.01)
-    clipnorm = optimizer_cfg.get('clipnorm', None)
+        # Enhanced Optimizer Configuration
+        learning_rate = optimizer_cfg.get('learning_rate', 1e-4)
+        optimizer_name = optimizer_cfg.get('name', 'Adam').lower()
+        weight_decay = optimizer_cfg.get('weight_decay', 0.01)
+        clipnorm = optimizer_cfg.get('clipnorm', None)
 
-    if optimizer_name == 'adam':
-        optimizer = tf.keras.optimizers.Adam(
-            learning_rate=learning_rate,
-            clipnorm=clipnorm
-        )
-    elif optimizer_name == 'adamw':
-        optimizer = tf.keras.optimizers.AdamW(
-            learning_rate=learning_rate,
-            weight_decay=weight_decay,
-            clipnorm=clipnorm
-        )
-    elif optimizer_name == 'sgd':
-        momentum = optimizer_cfg.get('momentum', 0.9)
-        optimizer = tf.keras.optimizers.SGD(
-            learning_rate=learning_rate, 
-            momentum=momentum,
-            clipnorm=clipnorm
-        )
-    else:
-        logger.warning(f"Unsupported optimizer: {optimizer_name}. Defaulting to AdamW.")
-        optimizer = tf.keras.optimizers.AdamW(
-            learning_rate=learning_rate,
-            weight_decay=weight_decay,
-            clipnorm=clipnorm
-        )
-
-    logger.info(f"Using optimizer: {optimizer_name} with learning_rate={learning_rate}, weight_decay={weight_decay}")
-
-    # Enhanced Loss Function Configuration
-    loss_fn_name = loss_cfg.get('name', 'binary_crossentropy').lower()
-    
-    if loss_fn_name == 'binary_crossentropy': 
-        model_final_activation = config.get('model', {}).get('activation', 'sigmoid')
-        label_smoothing = loss_cfg.get('label_smoothing', 0.0)
-        loss_function = tf.keras.losses.BinaryCrossentropy(
-            from_logits=(model_final_activation != 'sigmoid'),
-            label_smoothing=label_smoothing
-        )
-    elif loss_fn_name == 'dice_loss':
-        smooth = loss_cfg.get('smooth', 1.0)
-        loss_function = lambda y_true, y_pred: dice_loss(y_true, y_pred, smooth=smooth)
-    elif loss_fn_name == 'focal_loss':
-        alpha = loss_cfg.get('alpha', 0.25)
-        gamma = loss_cfg.get('gamma', 2.0)
-        loss_function = lambda y_true, y_pred: focal_loss(y_true, y_pred, alpha=alpha, gamma=gamma)
-    elif loss_fn_name == 'combined_loss':
-        # Get individual loss weights and parameters
-        bce_config = loss_cfg.get('binary_crossentropy', {})
-        dice_config = loss_cfg.get('dice_loss', {})
-        focal_config = loss_cfg.get('focal_loss', {})
-        
-        bce_weight = bce_config.get('weight', 0.5)
-        dice_weight = dice_config.get('weight', 0.3)
-        focal_weight = focal_config.get('weight', 0.2)
-        label_smoothing = bce_config.get('label_smoothing', 0.1)
-        smooth = dice_config.get('smooth', 1.0)
-        alpha = focal_config.get('alpha', 0.25)
-        gamma = focal_config.get('gamma', 2.0)
-        
-        loss_function = lambda y_true, y_pred: combined_loss(
-            y_true, y_pred, 
-            bce_weight=bce_weight, 
-            dice_weight=dice_weight, 
-            focal_weight=focal_weight,
-            label_smoothing=label_smoothing,
-            smooth=smooth,
-            alpha=alpha,
-            gamma=gamma
-        )
-        logger.info(f"Using combined loss: BCE({bce_weight}) + Dice({dice_weight}) + Focal({focal_weight})")
-    else:
-        logger.warning(f"Unsupported loss function: {loss_fn_name}. Defaulting to binary crossentropy.")
-        loss_function = tf.keras.losses.BinaryCrossentropy(from_logits=False)
-
-    # Enhanced Metrics Configuration
-    metrics_list = []
-    for m_name in metrics_cfg:
-        m_name_lower = m_name.lower()
-        if m_name_lower == 'accuracy' or m_name_lower == 'binary_accuracy':
-            metrics_list.append('binary_accuracy')
-        elif m_name_lower == 'binary_iou':
-            metrics_list.append(BinaryIoU(threshold=0.5, name='binary_iou'))
-        elif m_name_lower == 'dice_coefficient':
-            metrics_list.append(DiceCoefficient(threshold=0.5, name='dice_coefficient'))
-        elif m_name_lower == 'precision':
-            metrics_list.append(tf.keras.metrics.Precision(name='precision'))
-        elif m_name_lower == 'recall':
-            metrics_list.append(tf.keras.metrics.Recall(name='recall'))
-        elif m_name_lower == 'f1_score':
-            # F1 score can be computed from precision and recall
-            metrics_list.append(tf.keras.metrics.Precision(name='precision_for_f1'))
-            metrics_list.append(tf.keras.metrics.Recall(name='recall_for_f1'))
-        elif m_name_lower == 'mean_iou':
-            # Keep for backward compatibility but warn about binary IoU being better
-            num_classes_metric = config.get('model', {}).get('num_classes_for_metric', 2)
-            metrics_list.append(tf.keras.metrics.MeanIoU(num_classes=num_classes_metric, name='mean_iou'))
-            logger.warning("Using MeanIoU metric. Consider using 'binary_iou' for binary segmentation.")
+        if optimizer_name == 'adam':
+            optimizer = tf.keras.optimizers.Adam(
+                learning_rate=learning_rate,
+                clipnorm=clipnorm
+            )
+        elif optimizer_name == 'adamw':
+            optimizer = tf.keras.optimizers.AdamW(
+                learning_rate=learning_rate,
+                weight_decay=weight_decay,
+                clipnorm=clipnorm
+            )
+        elif optimizer_name == 'sgd':
+            momentum = optimizer_cfg.get('momentum', 0.9)
+            optimizer = tf.keras.optimizers.SGD(
+                learning_rate=learning_rate, 
+                momentum=momentum,
+                clipnorm=clipnorm
+            )
         else:
-            logger.warning(f"Unsupported metric '{m_name}' specified in config. Skipping.")
+            logger.warning(f"Unsupported optimizer: {optimizer_name}. Defaulting to AdamW.")
+            optimizer = tf.keras.optimizers.AdamW(
+                learning_rate=learning_rate,
+                weight_decay=weight_decay,
+                clipnorm=clipnorm
+            )
 
-    logger.info(f"Using metrics: {[m.name if hasattr(m, 'name') else str(m) for m in metrics_list]}")
+        logger.info(f"Using optimizer: {optimizer_name} with learning_rate={learning_rate}, weight_decay={weight_decay}")
 
-    model.compile(optimizer=optimizer,
-                  loss=loss_function,
-                  metrics=metrics_list)
+        # Enhanced Loss Function Configuration
+        loss_fn_name = loss_cfg.get('name', 'binary_crossentropy').lower()
+        
+        if loss_fn_name == 'binary_crossentropy': 
+            model_final_activation = config.get('model', {}).get('activation', 'sigmoid')
+            label_smoothing = loss_cfg.get('label_smoothing', 0.0)
+            loss_function = tf.keras.losses.BinaryCrossentropy(
+                from_logits=(model_final_activation != 'sigmoid'),
+                label_smoothing=label_smoothing
+            )
+        elif loss_fn_name == 'dice_loss':
+            smooth = loss_cfg.get('smooth', 1.0)
+            loss_function = lambda y_true, y_pred: dice_loss(y_true, y_pred, smooth=smooth)
+        elif loss_fn_name == 'focal_loss':
+            alpha = loss_cfg.get('alpha', 0.25)
+            gamma = loss_cfg.get('gamma', 2.0)
+            loss_function = lambda y_true, y_pred: focal_loss(y_true, y_pred, alpha=alpha, gamma=gamma)
+        elif loss_fn_name == 'combined_loss':
+            # Get individual loss weights and parameters
+            bce_config = loss_cfg.get('binary_crossentropy', {})
+            dice_config = loss_cfg.get('dice_loss', {})
+            focal_config = loss_cfg.get('focal_loss', {})
+            
+            bce_weight = bce_config.get('weight', 0.5)
+            dice_weight = dice_config.get('weight', 0.3)
+            focal_weight = focal_config.get('weight', 0.2)
+            label_smoothing = bce_config.get('label_smoothing', 0.1)
+            smooth = dice_config.get('smooth', 1.0)
+            alpha = focal_config.get('alpha', 0.25)
+            gamma = focal_config.get('gamma', 2.0)
+            
+            loss_function = lambda y_true, y_pred: combined_loss(
+                y_true, y_pred, 
+                bce_weight=bce_weight, 
+                dice_weight=dice_weight, 
+                focal_weight=focal_weight,
+                label_smoothing=label_smoothing,
+                smooth=smooth,
+                alpha=alpha,
+                gamma=gamma
+            )
+            logger.info(f"Using combined loss: BCE({bce_weight}) + Dice({dice_weight}) + Focal({focal_weight})")
+        else:
+            logger.warning(f"Unsupported loss function: {loss_fn_name}. Defaulting to binary crossentropy.")
+            loss_function = tf.keras.losses.BinaryCrossentropy(from_logits=False)
+
+        # Enhanced Metrics Configuration
+        metrics_list = []
+        for m_name in metrics_cfg:
+            m_name_lower = m_name.lower()
+            if m_name_lower == 'accuracy' or m_name_lower == 'binary_accuracy':
+                metrics_list.append('binary_accuracy')
+            elif m_name_lower == 'binary_iou':
+                metrics_list.append(BinaryIoU(threshold=0.5, name='binary_iou'))
+            elif m_name_lower == 'dice_coefficient':
+                metrics_list.append(DiceCoefficient(threshold=0.5, name='dice_coefficient'))
+            elif m_name_lower == 'precision':
+                metrics_list.append(tf.keras.metrics.Precision(name='precision'))
+            elif m_name_lower == 'recall':
+                metrics_list.append(tf.keras.metrics.Recall(name='recall'))
+            elif m_name_lower == 'f1_score':
+                # F1 score can be computed from precision and recall
+                metrics_list.append(tf.keras.metrics.Precision(name='precision_for_f1'))
+                metrics_list.append(tf.keras.metrics.Recall(name='recall_for_f1'))
+            elif m_name_lower == 'mean_iou':
+                # Keep for backward compatibility but warn about binary IoU being better
+                num_classes_metric = config.get('model', {}).get('num_classes_for_metric', 2)
+                metrics_list.append(tf.keras.metrics.MeanIoU(num_classes=num_classes_metric, name='mean_iou'))
+                logger.warning("Using MeanIoU metric. Consider using 'binary_iou' for binary segmentation.")
+            else:
+                logger.warning(f"Unsupported metric '{m_name}' specified in config. Skipping.")
+
+        logger.info(f"Using metrics: {[m.name if hasattr(m, 'name') else str(m) for m in metrics_list]}")
+
+        model.compile(optimizer=optimizer,
+                      loss=loss_function,
+                      metrics=metrics_list)
 
     model.summary(print_fn=logger.info)
 
