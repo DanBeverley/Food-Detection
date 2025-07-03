@@ -9,6 +9,10 @@ import traceback
 from datetime import datetime
 from pathlib import Path # Added import
 
+# TPU-specific imports and configuration
+os.environ['TPU_LOAD_LIBRARY'] = '0'  # Prevent TPU library conflicts
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'  # Reduce TensorFlow logging
+
 import tensorflow as tf
 from tensorflow.keras import models, layers, optimizers, losses, callbacks, applications, metrics
 from tensorflow.keras.applications import mobilenet_v2, mobilenet_v3, efficientnet_v2, convnext
@@ -16,18 +20,30 @@ from tensorflow.keras import mixed_precision
 
 from typing import Dict, Tuple, Any, List, Optional
 
+# Configure TensorFlow for TPU compatibility
+tf.config.experimental.enable_tensor_float_32(False)  # Disable TF32 for TPU compatibility
+
 logger = logging.getLogger(__name__)
 
 def initialize_strategy() -> tf.distribute.Strategy:
     try:
-        tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver.connect()
-        if tpu_resolver:
-            logger.info(f'Running on TPU: {tpu_resolver.master()}')
-            tf.config.experimental_connect_to_cluster(tpu_resolver)
-            tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
-            strategy = tf.distribute.TPUStrategy(tpu_resolver)
-            logger.info(f"TPU strategy initialized with {strategy.num_replicas_in_sync} replicas.")
-            return strategy
+        # First, try to detect TPU without connecting
+        tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver()
+        logger.info(f'TPU detected: {tpu_resolver.master()}')
+        
+        # Connect to cluster and initialize TPU system
+        tf.config.experimental_connect_to_cluster(tpu_resolver)
+        tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
+        
+        # Create TPU strategy after successful initialization
+        strategy = tf.distribute.TPUStrategy(tpu_resolver)
+        logger.info(f"TPU strategy initialized with {strategy.num_replicas_in_sync} replicas.")
+        
+        # Set memory growth for TPU
+        tf.config.experimental.set_synchronous_execution(True)
+        
+        return strategy
+        
     except ValueError as e:
         logger.info(f"TPU not found or error connecting: {e}. Checking for GPUs.")
     except Exception as e:
