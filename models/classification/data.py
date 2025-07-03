@@ -387,10 +387,34 @@ def load_classification_data(
             windows_path_count += 1
             if windows_path_count <= 3:  # Log first few for debugging
                 logger.debug(f"Found Windows absolute path: {relative_path}")
-            # Skip absolute Windows paths - likely from original dataset creation
-            # In Kaggle/cloud environments, we expect data to be in input directories
-            skipped_count += 1
-            continue
+            
+            # Convert Windows absolute path to Kaggle input path
+            # E:\_MetaFood3D_new_RGBD_videos\RGBD_videos\... -> /kaggle/input/metafood3d-dataset/RGBD_videos/...
+            if 'RGBD_videos' in relative_path:
+                path_parts = relative_path.split('\\')
+                rgbd_index = next((i for i, part in enumerate(path_parts) if 'RGBD_videos' in part), -1)
+                if rgbd_index >= 0:
+                    kaggle_path_parts = path_parts[rgbd_index:]
+                    # Try multiple possible Kaggle dataset names
+                    possible_paths = [
+                        Path('/kaggle/input/metafood3d-dataset') / '/'.join(kaggle_path_parts),
+                        Path('/kaggle/input/metafood3d-rgbd') / '/'.join(kaggle_path_parts),
+                        Path('/kaggle/input/metafood3d') / '/'.join(kaggle_path_parts),
+                        Path('/kaggle/working/Food-Detection/data/raw') / '/'.join(kaggle_path_parts)
+                    ]
+                    
+                    # Use the first path (will be verified later during actual loading)
+                    full_image_path = possible_paths[0]
+                    if windows_path_count <= 3:
+                        logger.info(f"Converting Windows path: {relative_path} -> {full_image_path}")
+                else:
+                    logger.warning(f"Could not convert Windows path to Kaggle path: {relative_path}")
+                    skipped_count += 1
+                    continue
+            else:
+                logger.warning(f"Unexpected Windows path format: {relative_path}")
+                skipped_count += 1
+                continue
         elif relative_path.startswith('/kaggle/input/'):
             # Direct Kaggle input path
             full_image_path = Path(relative_path)
