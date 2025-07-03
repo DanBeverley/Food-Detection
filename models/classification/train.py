@@ -18,6 +18,39 @@ from tensorflow.keras import models, layers, optimizers, losses, callbacks, appl
 from tensorflow.keras.applications import mobilenet_v2, mobilenet_v3, efficientnet_v2, convnext
 from tensorflow.keras import mixed_precision
 
+class DebugCallback(tf.keras.callbacks.Callback):
+    def __init__(self):
+        super().__init__()
+        self.batch_count = 0
+        
+    def on_train_batch_end(self, batch, logs=None):
+        self.batch_count += 1
+        if self.batch_count % 100 == 0:  # Log every 100 batches
+            # Check if loss is changing
+            current_loss = logs.get('loss', 0)
+            logger.info(f"DEBUG Batch {self.batch_count}: Loss={current_loss:.6f}")
+            
+            # Check gradient norms
+            try:
+                total_norm = 0
+                param_count = 0
+                for weight in self.model.trainable_weights:
+                    if weight.shape:  # Skip empty weights
+                        param_count += tf.size(weight)
+                        # Simple gradient check - if all weights are identical across batches,
+                        # gradients might not be flowing
+                        weight_norm = tf.norm(weight)
+                        total_norm += weight_norm
+                        
+                if param_count > 0:
+                    avg_weight_norm = total_norm / len(self.model.trainable_weights)
+                    logger.info(f"DEBUG Batch {self.batch_count}: Avg weight norm={avg_weight_norm:.6f}, Trainable weights={len(self.model.trainable_weights)}")
+                else:
+                    logger.error("DEBUG: No trainable weights found!")
+                    
+            except Exception as e:
+                logger.warning(f"DEBUG: Could not compute weight norms: {e}")
+
 from typing import Dict, Tuple, Any, List, Optional
 
 # Configure TensorFlow for TPU compatibility
@@ -509,6 +542,34 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     
     logger.info(f"Model compiled with optimizer: {optimizer_name}, loss: {loss_function_name}, metrics: {[m.name if hasattr(m, 'name') else str(m) for m in compiled_metrics]}.")
     
+    # DEBUG: Check trainable parameters
+    total_params = model.count_params()
+    trainable_params = sum([tf.keras.backend.count_params(w) for w in model.trainable_weights])
+    logger.info(f"DEBUG: Total parameters: {total_params:,}")
+    logger.info(f"DEBUG: Trainable parameters: {trainable_params:,}")
+    logger.info(f"DEBUG: Frozen parameters: {total_params - trainable_params:,}")
+    
+    if trainable_params == 0:
+        logger.error("CRITICAL: Model has 0 trainable parameters! All layers are frozen!")
+        return
+    
+    # DEBUG: Test forward pass with dummy data
+    logger.info("DEBUG: Testing forward pass with dummy data...")
+    try:
+        dummy_batch = tf.random.normal((2, 224, 224, 3))
+        dummy_output = model(dummy_batch, training=False)
+        logger.info(f"DEBUG: Forward pass successful. Output shape: {dummy_output.shape}")
+        logger.info(f"DEBUG: Output sample: {dummy_output[0][:5]}")
+        
+        # Check if output is always the same (indicating frozen model)
+        dummy_output2 = model(dummy_batch, training=False)
+        outputs_identical = tf.reduce_all(tf.equal(dummy_output, dummy_output2))
+        logger.info(f"DEBUG: Identical outputs on repeated calls: {outputs_identical}")
+        
+    except Exception as e:
+        logger.error(f"DEBUG: Forward pass failed: {e}")
+        return
+    
     # Optionally print model summary
     if model_cfg.get('print_summary', True):
         model.summary(print_fn=logger.info)
@@ -610,6 +671,11 @@ def train_model(model: models.Model,
     callbacks = []
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     
+    # Add debug callback to monitor gradient flow
+    debug_callback = DebugCallback()
+    callbacks.append(debug_callback)
+    logger.info("Added debug callback to monitor gradient flow")
+    
     # Model Checkpoint
     checkpoint_dir_rel = paths_cfg.get('checkpoint_dir', f'trained_models/classification/checkpoints_{timestamp}')
     checkpoint_dir = project_root / checkpoint_dir_rel
@@ -702,6 +768,34 @@ def train_model(model: models.Model,
     else:
         logger.info("No initial weights path specified. Training from scratch or with backbone's pre-trained weights.")
 
+
+    # DEBUG: Inspect training data before fit
+    logger.info("DEBUG: Inspecting training data samples...")
+    try:
+        sample_count = 0
+        batch_hashes = []
+        for batch_inputs, batch_labels in train_dataset.take(3):
+            sample_count += 1
+            # Compute hash of batch to detect repetition
+            if isinstance(batch_inputs, dict):
+                batch_hash = hash(str(batch_inputs['rgb_input'].numpy().mean()))
+            else:
+                batch_hash = hash(str(batch_inputs.numpy().mean()))
+            batch_hashes.append(batch_hash)
+            
+            logger.info(f"DEBUG: Batch {sample_count} - Input shape: {batch_inputs.shape if hasattr(batch_inputs, 'shape') else 'dict'}")
+            logger.info(f"DEBUG: Batch {sample_count} - Label shape: {batch_labels.shape}")
+            logger.info(f"DEBUG: Batch {sample_count} - Label sample: {batch_labels[0][:5]}")
+            logger.info(f"DEBUG: Batch {sample_count} - Label unique values: {len(tf.unique(tf.argmax(batch_labels, axis=1))[0])}")
+            logger.info(f"DEBUG: Batch {sample_count} - Hash: {batch_hash}")
+        
+        if len(set(batch_hashes)) == 1:
+            logger.error("CRITICAL: All batches have identical hashes! Data pipeline is stuck!")
+        else:
+            logger.info("DEBUG: Batches have different hashes - data pipeline seems OK")
+            
+    except Exception as e:
+        logger.error(f"DEBUG: Error inspecting training data: {e}")
 
     logger.info("Starting model.fit()...")
     history = model.fit(
