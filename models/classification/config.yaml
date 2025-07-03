@@ -1,7 +1,7 @@
 data:
   metadata_path: "data/classification/metadata.json" 
   image_size: [224, 224] 
-  batch_size: 128  # Increased for TPU v3-8 optimization
+  batch_size: 32  # Reduced for stable distributed training
   split_ratio: 0.2
   debug_max_total_samples: null # Disabled for production - use all samples
 
@@ -77,7 +77,7 @@ model:
   architecture: "MobileNetV3Small" 
   use_pretrained_weights: true 
   fine_tune: true 
-  fine_tune_layers: 25  # Increased for better feature learning
+  fine_tune_layers: -1  # Unfreeze ALL layers (-1 means all)
 
   # Production Classification Head with Regularization
   classification_head:
@@ -86,12 +86,12 @@ model:
       - units: 512  # Increased for production
         dropout: 0.5 
         batch_norm: true
-        l2_regularization: 0.001
+        l2_regularization: 0.0001
       - units: 256  # Increased for production
         dropout: 0.4
         batch_norm: true
-        l2_regularization: 0.001
-    dropout_rate: 0.6
+        l2_regularization: 0.0001
+    dropout_rate: 0.3
     activation: "relu" 
     final_activation: "softmax"
     
@@ -106,15 +106,15 @@ model:
 # Production Optimizer Configuration
 optimizer:
   name: "AdamW"
-  learning_rate: 0.0001  # Lower for stable fine-tuning
+  learning_rate: 0.002  # Scaled for distributed training
   weight_decay: 0.01
-  clipnorm: 1.0
+  clipnorm: 5.0  # Increased to allow larger gradients
   
   # Learning rate scheduling - enabled for production
   schedule:
     enabled: true
     type: "cosine_decay_restarts"
-    initial_learning_rate: 0.0001
+    initial_learning_rate: 0.002
     first_decay_steps: 2000
     t_mul: 2.0
     m_mul: 1.0
@@ -134,7 +134,7 @@ metrics: ["accuracy", "top_5_accuracy", "precision", "recall"]
 training:
   epochs: 30  # Increased for better convergence
   debug_epochs: 3   # Reduced debug epochs
-  use_mixed_precision: true
+  use_mixed_precision: false  # Disabled for debugging distributed training
   use_tpu: true  # Enabled for TPU v3-8 training 
   
   # Class weights for imbalanced datasets

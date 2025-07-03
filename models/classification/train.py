@@ -30,6 +30,15 @@ except AttributeError:
 logger = logging.getLogger(__name__)
 
 def initialize_strategy() -> tf.distribute.Strategy:
+    # FORCE SINGLE DEVICE TRAINING FOR DEBUGGING
+    force_single_device = True  # Set to False to re-enable distributed training
+    
+    if force_single_device:
+        logger.info("FORCED SINGLE DEVICE MODE - Using default strategy only")
+        strategy = tf.distribute.get_strategy()
+        logger.info(f"Using default strategy: {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
+        return strategy
+    
     try:
         # First, try to detect TPU without connecting
         tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver()
@@ -195,12 +204,20 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     rgb_base_model = base_model_class(include_top=False, input_shape=rgb_input_shape, weights=weights)
     
     rgb_base_model.trainable = fine_tune_rgb
-    if fine_tune_rgb and fine_tune_layers_rgb > 0:
-        for layer in rgb_base_model.layers[:-fine_tune_layers_rgb]:
-            layer.trainable = False
-        for layer in rgb_base_model.layers[-fine_tune_layers_rgb:]:
+    if fine_tune_rgb and fine_tune_layers_rgb == -1:
+        # Unfreeze ALL layers
+        logger.info(f"RGB Fine-tuning: Unfreezing ALL layers of {architecture}.")
+        for layer in rgb_base_model.layers:
             layer.trainable = True
-        logger.info(f"RGB Fine-tuning: Unfreezing the top {fine_tune_layers_rgb} layers of {architecture}.")
+    elif fine_tune_rgb and fine_tune_layers_rgb > 0:
+        # Unfreeze only top N layers
+        total_layers = len(rgb_base_model.layers)
+        actual_layers_to_unfreeze = min(fine_tune_layers_rgb, total_layers)
+        for layer in rgb_base_model.layers[:-actual_layers_to_unfreeze]:
+            layer.trainable = False
+        for layer in rgb_base_model.layers[-actual_layers_to_unfreeze:]:
+            layer.trainable = True
+        logger.info(f"RGB Fine-tuning: Unfreezing the top {actual_layers_to_unfreeze}/{total_layers} layers of {architecture}.")
     elif fine_tune_rgb:
         logger.info(f"RGB Fine-tuning: Unfreezing all layers of {architecture}.")
         for layer in rgb_base_model.layers:
@@ -209,6 +226,11 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         logger.info(f"RGB Feature Extraction: Freezing all layers of {architecture}.")
         for layer in rgb_base_model.layers:
             layer.trainable = False
+    
+    # Debug: Count trainable parameters
+    trainable_count = sum([1 for layer in rgb_base_model.layers if layer.trainable])
+    total_count = len(rgb_base_model.layers)
+    logger.info(f"RGB backbone: {trainable_count}/{total_count} layers are trainable")
 
     rgb_features_map = rgb_base_model(preprocessed_rgb)
 
