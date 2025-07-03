@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 
 def initialize_strategy() -> tf.distribute.Strategy:
     # FORCE SINGLE DEVICE TRAINING FOR DEBUGGING
-    force_single_device = True  # Set to False to re-enable distributed training
+    force_single_device = False  # FIXED: Re-enable TPU training
     
     if force_single_device:
         logger.info("FORCED SINGLE DEVICE MODE - Using default strategy only")
@@ -83,7 +83,9 @@ def initialize_strategy() -> tf.distribute.Strategy:
         
         # Create TPU strategy after successful initialization
         strategy = tf.distribute.TPUStrategy(tpu_resolver)
-        logger.info(f"TPU strategy initialized with {strategy.num_replicas_in_sync} replicas.")
+        logger.info(f"✅ TPU STRATEGY ACTIVE: {strategy.num_replicas_in_sync} replicas detected")
+        logger.info(f"✅ TPU CORES: {strategy.num_replicas_in_sync} cores will be used")
+        logger.info(f"✅ EFFECTIVE BATCH SIZE: {64 * strategy.num_replicas_in_sync} (batch_size × cores)")
         
         # Set memory growth for TPU
         tf.config.experimental.set_synchronous_execution(True)

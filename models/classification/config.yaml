@@ -1,7 +1,7 @@
 data:
   metadata_path: "data/classification/metadata.json" 
   image_size: [224, 224] 
-  batch_size: 32  # Reduced for stable distributed training
+  batch_size: 64  # Optimized for TPU v3-8 (8 cores)
   split_ratio: 0.2
   debug_max_total_samples: null # Disabled for production - use all samples
 
