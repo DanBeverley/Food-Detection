@@ -115,7 +115,7 @@ const Sidebar = () => {
           </div>
         </motion.div>
 
-        {/* Daily Summary */}
+        {/* Getting Started Status */}
         <motion.div
           className="mb-6 p-4 rounded-xl bg-background-medium/50 border border-secondary-800/50"
           initial={{ opacity: 0, scale: 0.9 }}
@@ -123,12 +123,12 @@ const Sidebar = () => {
           transition={{ delay: 0.3 }}
         >
           <div className="text-center">
-            <p className="text-2xl font-bold text-primary-400">1,847</p>
-            <p className="text-xs text-text-muted">Calories Today</p>
+            <p className="text-2xl font-bold text-primary-400">0</p>
+            <p className="text-xs text-text-muted">Meals Logged</p>
             <div className="mt-2 w-full bg-secondary-800 rounded-full h-2">
-              <div className="bg-gradient-to-r from-primary-500 to-primary-400 h-2 rounded-full" style={{width: '74%'}}></div>
+              <div className="bg-gradient-to-r from-primary-500 to-primary-400 h-2 rounded-full" style={{width: '0%'}}></div>
             </div>
-            <p className="text-xs text-text-muted mt-1">74% of daily goal</p>
+            <p className="text-xs text-text-muted mt-1">Start your journey</p>
           </div>
         </motion.div>
 

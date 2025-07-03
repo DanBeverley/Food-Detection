@@ -1,26 +1,26 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import {
   UserIcon,
   Cog6ToothIcon,
-  BellIcon,
-  ShieldCheckIcon,
   CameraIcon,
-  PencilIcon,
-  ChartBarIcon,
   ScaleIcon,
   HeartIcon,
-  CalculatorIcon
+  CalculatorIcon,
+  FireIcon,
+  TrophyIcon
 } from '@heroicons/react/24/outline';
 
 const Profile = () => {
   const [activeSection, setActiveSection] = useState('profile');
+  
+  // Empty state for new user
   const [userProfile, setUserProfile] = useState({
-    name: 'Alex Johnson',
-    email: 'alex.johnson@email.com',
-    age: 28,
-    height: 70, // inches
-    weight: 165.2,
+    name: '',
+    email: '',
+    age: '',
+    height: '', // inches
+    weight: '',
     activityLevel: 'moderately_active',
     goal: 'lose_weight',
     weeklyGoal: 1, // pounds per week
@@ -30,26 +30,32 @@ const Profile = () => {
   const [notifications, setNotifications] = useState({
     mealReminders: true,
     goalAchievements: true,
-    weeklyReports: true,
-    marketingEmails: false
+    weeklyReports: false
   });
 
   const [privacy, setPrivacy] = useState({
     profileVisibility: 'private',
     shareProgress: false,
-    dataCollection: true
+    dataCollection: false
   });
 
-  // Calculate BMI and daily calorie needs
-  const heightInMeters = (userProfile.height * 2.54) / 100;
-  const weightInKg = userProfile.weight * 0.453592;
-  const bmi = weightInKg / (heightInMeters * heightInMeters);
-  
-  const calculateCalories = () => {
+  // Debounced update function to prevent excessive re-renders
+  const updateProfile = useCallback((field, value) => {
+    setUserProfile(prev => ({ ...prev, [field]: value }));
+  }, []);
+
+  // Calculate BMI and daily calorie needs only if data exists
+  const calculateMetrics = () => {
+    if (!userProfile.height || !userProfile.weight || !userProfile.age) {
+      return { bmi: null, calories: null };
+    }
+
+    const heightInMeters = (parseFloat(userProfile.height) * 2.54) / 100;
+    const weightInKg = parseFloat(userProfile.weight) * 0.453592;
+    const bmi = weightInKg / (heightInMeters * heightInMeters);
+    
     // Harris-Benedict Equation (simplified for demo)
-    let bmr;
-    // Assuming male for demo - in real app, would have gender field
-    bmr = 88.362 + (13.397 * weightInKg) + (4.799 * (userProfile.height * 2.54)) - (5.677 * userProfile.age);
+    let bmr = 88.362 + (13.397 * weightInKg) + (4.799 * (parseFloat(userProfile.height) * 2.54)) - (5.677 * parseFloat(userProfile.age));
     
     const activityMultipliers = {
       sedentary: 1.2,
@@ -62,365 +68,317 @@ const Profile = () => {
     const tdee = bmr * activityMultipliers[userProfile.activityLevel];
     
     // Adjust for goal
+    let calories = tdee;
     if (userProfile.goal === 'lose_weight') {
-      return Math.round(tdee - (userProfile.weeklyGoal * 500)); // 500 cal deficit per lb
+      calories = tdee - (userProfile.weeklyGoal * 500);
     } else if (userProfile.goal === 'gain_weight') {
-      return Math.round(tdee + 500);
+      calories = tdee + 500;
     }
-    return Math.round(tdee);
+    
+    return { bmi: bmi.toFixed(1), calories: Math.round(calories) };
   };
 
-  const ProfileSection = () => (
-    <div className="space-y-6">
-      {/* Profile Picture and Basic Info */}
-      <motion.div
-        className="card"
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-      >
-        <div className="flex items-center space-x-6">
-          <div className="relative">
-            <div className="w-24 h-24 bg-gradient-to-br from-primary-500 to-primary-600 rounded-full flex items-center justify-center">
-              {userProfile.profilePicture ? (
-                <img 
-                  src={userProfile.profilePicture} 
-                  alt="Profile" 
-                  className="w-24 h-24 rounded-full object-cover"
-                />
-              ) : (
-                <UserIcon className="w-12 h-12 text-white" />
-              )}
-            </div>
-            <button className="absolute -bottom-2 -right-2 p-2 bg-primary-500 rounded-full hover:bg-primary-600 transition-colors">
-              <CameraIcon className="w-4 h-4 text-white" />
-            </button>
-          </div>
-          
-          <div className="flex-1">
-            <h2 className="text-2xl font-bold text-text-primary">{userProfile.name}</h2>
-            <p className="text-text-muted">{userProfile.email}</p>
-            <div className="mt-2 flex items-center space-x-4 text-sm text-text-muted">
-              <span>Age: {userProfile.age}</span>
-              <span>Height: {Math.floor(userProfile.height / 12)}'{userProfile.height % 12}"</span>
-              <span>Weight: {userProfile.weight} lbs</span>
-            </div>
-          </div>
-          
-          <button className="button-secondary">
-            <PencilIcon className="w-4 h-4 mr-2" />
-            Edit Profile
-          </button>
-        </div>
-      </motion.div>
+  const { bmi, calories } = calculateMetrics();
 
-      {/* Health Metrics */}
-      <motion.div
-        className="card"
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.1 }}
-      >
-        <h3 className="text-lg font-semibold text-text-primary mb-4">Health Metrics</h3>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="text-center p-4 bg-background-medium/30 rounded-lg">
-            <CalculatorIcon className="w-8 h-8 text-blue-400 mx-auto mb-2" />
-            <p className="text-2xl font-bold text-text-primary">{bmi.toFixed(1)}</p>
-            <p className="text-sm text-text-muted">BMI</p>
-            <p className="text-xs text-text-muted mt-1">
-              {bmi < 18.5 ? 'Underweight' : 
-               bmi < 25 ? 'Normal' : 
-               bmi < 30 ? 'Overweight' : 'Obese'}
-            </p>
-          </div>
-          
-          <div className="text-center p-4 bg-background-medium/30 rounded-lg">
-            <HeartIcon className="w-8 h-8 text-red-400 mx-auto mb-2" />
-            <p className="text-2xl font-bold text-text-primary">{calculateCalories()}</p>
-            <p className="text-sm text-text-muted">Daily Calories</p>
-            <p className="text-xs text-text-muted mt-1">Recommended intake</p>
-          </div>
-          
-          <div className="text-center p-4 bg-background-medium/30 rounded-lg">
-            <ScaleIcon className="w-8 h-8 text-green-400 mx-auto mb-2" />
-            <p className="text-2xl font-bold text-text-primary">{userProfile.weeklyGoal}</p>
-            <p className="text-sm text-text-muted">lbs/week</p>
-            <p className="text-xs text-text-muted mt-1">Weight goal</p>
-          </div>
-        </div>
-      </motion.div>
-
-      {/* Personal Information Form */}
-      <motion.div
-        className="card"
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.2 }}
-      >
-        <h3 className="text-lg font-semibold text-text-primary mb-6">Personal Information</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">Full Name</label>
-            <input
-              type="text"
-              value={userProfile.name}
-              onChange={(e) => setUserProfile({...userProfile, name: e.target.value})}
-              className="input-field w-full"
-            />
-          </div>
-          
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">Email</label>
-            <input
-              type="email"
-              value={userProfile.email}
-              onChange={(e) => setUserProfile({...userProfile, email: e.target.value})}
-              className="input-field w-full"
-            />
-          </div>
-          
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">Age</label>
-            <input
-              type="number"
-              value={userProfile.age}
-              onChange={(e) => setUserProfile({...userProfile, age: parseInt(e.target.value)})}
-              className="input-field w-full"
-            />
-          </div>
-          
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">Height (inches)</label>
-            <input
-              type="number"
-              value={userProfile.height}
-              onChange={(e) => setUserProfile({...userProfile, height: parseInt(e.target.value)})}
-              className="input-field w-full"
-            />
-          </div>
-          
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">Current Weight (lbs)</label>
-            <input
-              type="number"
-              step="0.1"
-              value={userProfile.weight}
-              onChange={(e) => setUserProfile({...userProfile, weight: parseFloat(e.target.value)})}
-              className="input-field w-full"
-            />
-          </div>
-          
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">Weekly Goal (lbs)</label>
-            <select
-              value={userProfile.weeklyGoal}
-              onChange={(e) => setUserProfile({...userProfile, weeklyGoal: parseFloat(e.target.value)})}
-              className="input-field w-full"
-            >
-              <option value={0.5}>Lose 0.5 lbs/week</option>
-              <option value={1}>Lose 1 lb/week</option>
-              <option value={1.5}>Lose 1.5 lbs/week</option>
-              <option value={2}>Lose 2 lbs/week</option>
-              <option value={0}>Maintain weight</option>
-              <option value={-0.5}>Gain 0.5 lbs/week</option>
-              <option value={-1}>Gain 1 lb/week</option>
-            </select>
-          </div>
-        </div>
-      </motion.div>
-
-      {/* Activity Level */}
-      <motion.div
-        className="card"
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.3 }}
-      >
-        <h3 className="text-lg font-semibold text-text-primary mb-6">Activity Level</h3>
-        <div className="space-y-3">
-          {[
-            { value: 'sedentary', label: 'Sedentary', desc: 'Little or no exercise' },
-            { value: 'lightly_active', label: 'Lightly Active', desc: 'Light exercise 1-3 days/week' },
-            { value: 'moderately_active', label: 'Moderately Active', desc: 'Moderate exercise 3-5 days/week' },
-            { value: 'very_active', label: 'Very Active', desc: 'Hard exercise 6-7 days/week' },
-            { value: 'extremely_active', label: 'Extremely Active', desc: 'Very hard exercise, physical job' }
-          ].map((activity) => (
-            <label key={activity.value} className="flex items-center space-x-3 p-3 rounded-lg hover:bg-background-medium/30 transition-colors cursor-pointer">
-              <input
-                type="radio"
-                name="activityLevel"
-                value={activity.value}
-                checked={userProfile.activityLevel === activity.value}
-                onChange={(e) => setUserProfile({...userProfile, activityLevel: e.target.value})}
-                className="w-4 h-4 text-primary-600 bg-background-light border-secondary-600 focus:ring-primary-500 focus:ring-2"
-              />
-              <div>
-                <p className="font-medium text-text-primary">{activity.label}</p>
-                <p className="text-sm text-text-muted">{activity.desc}</p>
-              </div>
-            </label>
-          ))}
-        </div>
-      </motion.div>
-    </div>
+  const EmptyProfileState = () => (
+    <motion.div
+      className="text-center py-16"
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+    >
+      <div className="w-24 h-24 bg-gradient-to-br from-primary-500 to-secondary-500 rounded-full flex items-center justify-center mx-auto mb-6">
+        <UserIcon className="w-12 h-12 text-white" />
+      </div>
+      <h3 className="text-2xl font-bold text-text-primary mb-4">Complete your profile</h3>
+      <p className="text-text-muted mb-8 max-w-md mx-auto">
+        Add your basic information to get personalized calorie recommendations and track your health journey.
+      </p>
+    </motion.div>
   );
 
-  const SettingsSection = () => (
-    <div className="space-y-6">
-      {/* Notifications */}
-      <motion.div
-        className="card"
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-      >
-        <h3 className="text-lg font-semibold text-text-primary mb-6">Notifications</h3>
-        <div className="space-y-4">
-          {Object.entries(notifications).map(([key, value]) => (
-            <div key={key} className="flex items-center justify-between">
-              <div>
-                <p className="font-medium text-text-primary">
-                  {key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase())}
-                </p>
-                <p className="text-sm text-text-muted">
-                  {key === 'mealReminders' && 'Get reminded to log your meals'}
-                  {key === 'goalAchievements' && 'Celebrate when you reach your goals'}
-                  {key === 'weeklyReports' && 'Receive weekly progress summaries'}
-                  {key === 'marketingEmails' && 'Updates about new features and tips'}
-                </p>
-              </div>
-              <motion.button
-                className={`relative w-12 h-6 rounded-full transition-colors ${
-                  value ? 'bg-primary-500' : 'bg-secondary-700'
-                }`}
-                onClick={() => setNotifications({...notifications, [key]: !value})}
-                whileTap={{ scale: 0.95 }}
-              >
-                <motion.div
-                  className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-md"
-                  animate={{ x: value ? 24 : 4 }}
-                  transition={{ type: "spring", stiffness: 300, damping: 30 }}
-                />
-              </motion.button>
-            </div>
-          ))}
-        </div>
-      </motion.div>
+  const ProfileSection = () => {
+    const hasBasicInfo = userProfile.name || userProfile.email || userProfile.age || userProfile.height || userProfile.weight;
 
-      {/* Privacy */}
-      <motion.div
-        className="card"
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.1 }}
-      >
-        <h3 className="text-lg font-semibold text-text-primary mb-6">Privacy & Data</h3>
-        <div className="space-y-6">
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-3">Profile Visibility</label>
-            <div className="space-y-2">
-              {[
-                { value: 'public', label: 'Public', desc: 'Anyone can see your profile' },
-                { value: 'friends', label: 'Friends Only', desc: 'Only your friends can see your profile' },
-                { value: 'private', label: 'Private', desc: 'Only you can see your profile' }
-              ].map((option) => (
-                <label key={option.value} className="flex items-center space-x-3 p-3 rounded-lg hover:bg-background-medium/30 transition-colors cursor-pointer">
-                  <input
-                    type="radio"
-                    name="profileVisibility"
-                    value={option.value}
-                    checked={privacy.profileVisibility === option.value}
-                    onChange={(e) => setPrivacy({...privacy, profileVisibility: e.target.value})}
-                    className="w-4 h-4 text-primary-600 bg-background-light border-secondary-600 focus:ring-primary-500 focus:ring-2"
+    if (!hasBasicInfo) {
+      return <EmptyProfileState />;
+    }
+
+    return (
+      <div className="space-y-6">
+        {/* Profile Picture and Basic Info */}
+        <motion.div
+          className="card"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+        >
+          <div className="flex items-center space-x-6">
+            <div className="relative">
+              <div className="w-24 h-24 bg-gradient-to-br from-primary-500 to-primary-600 rounded-full flex items-center justify-center">
+                {userProfile.profilePicture ? (
+                  <img 
+                    src={userProfile.profilePicture} 
+                    alt="Profile" 
+                    className="w-24 h-24 rounded-full object-cover"
                   />
-                  <div>
-                    <p className="font-medium text-text-primary">{option.label}</p>
-                    <p className="text-sm text-text-muted">{option.desc}</p>
-                  </div>
-                </label>
-              ))}
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="font-medium text-text-primary">Share Progress</p>
-                <p className="text-sm text-text-muted">Allow others to see your fitness progress</p>
+                ) : (
+                  <UserIcon className="w-12 h-12 text-white" />
+                )}
               </div>
-              <motion.button
-                className={`relative w-12 h-6 rounded-full transition-colors ${
-                  privacy.shareProgress ? 'bg-primary-500' : 'bg-secondary-700'
-                }`}
-                onClick={() => setPrivacy({...privacy, shareProgress: !privacy.shareProgress})}
-                whileTap={{ scale: 0.95 }}
-              >
-                <motion.div
-                  className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-md"
-                  animate={{ x: privacy.shareProgress ? 24 : 4 }}
-                  transition={{ type: "spring", stiffness: 300, damping: 30 }}
-                />
-              </motion.button>
+              <button className="absolute -bottom-2 -right-2 p-2 bg-primary-500 rounded-full hover:bg-primary-600 transition-colors">
+                <CameraIcon className="w-4 h-4 text-white" />
+              </button>
             </div>
-
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="font-medium text-text-primary">Data Collection</p>
-                <p className="text-sm text-text-muted">Help improve our service with anonymous usage data</p>
+            
+            <div className="flex-1">
+              <h2 className="text-2xl font-bold text-text-primary">
+                {userProfile.name || 'Your Name'}
+              </h2>
+              <p className="text-text-muted">{userProfile.email || 'your.email@example.com'}</p>
+              <div className="mt-2 flex items-center space-x-4 text-sm text-text-muted">
+                {userProfile.age && <span>Age: {userProfile.age}</span>}
+                {userProfile.height && (
+                  <span>Height: {Math.floor(userProfile.height / 12)}'{userProfile.height % 12}"</span>
+                )}
+                {userProfile.weight && <span>Weight: {userProfile.weight} lbs</span>}
               </div>
-              <motion.button
-                className={`relative w-12 h-6 rounded-full transition-colors ${
-                  privacy.dataCollection ? 'bg-primary-500' : 'bg-secondary-700'
-                }`}
-                onClick={() => setPrivacy({...privacy, dataCollection: !privacy.dataCollection})}
-                whileTap={{ scale: 0.95 }}
-              >
-                <motion.div
-                  className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-md"
-                  animate={{ x: privacy.dataCollection ? 24 : 4 }}
-                  transition={{ type: "spring", stiffness: 300, damping: 30 }}
-                />
-              </motion.button>
             </div>
           </div>
-        </div>
-      </motion.div>
+        </motion.div>
 
-      {/* Advanced Features */}
-      <motion.div
-        className="card"
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.2 }}
-      >
-        <h3 className="text-lg font-semibold text-text-primary mb-6">Advanced Features</h3>
-        <div className="space-y-4">
-          <div className="p-4 border border-secondary-800/30 rounded-lg">
-            <h4 className="font-medium text-text-primary mb-2">Custom Model Training</h4>
-            <p className="text-sm text-text-muted mb-4">
-              Train your own food recognition model with your specific dietary needs
-            </p>
-            <button className="button-secondary text-sm">
-              Enable Advanced Features
-            </button>
-          </div>
-          
-          <div className="p-4 border border-secondary-800/30 rounded-lg">
-            <h4 className="font-medium text-text-primary mb-2">API Access</h4>
-            <p className="text-sm text-text-muted mb-4">
-              Integrate NutriScan with your existing fitness apps and devices
-            </p>
-            <button className="button-secondary text-sm">
-              Generate API Key
-            </button>
-          </div>
+        {/* Health Metrics */}
+        {(bmi || calories) && (
+          <motion.div
+            className="card"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.1 }}
+          >
+            <h3 className="text-lg font-semibold text-text-primary mb-4">Health Metrics</h3>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="text-center p-4 bg-background-medium/30 rounded-lg">
+                <CalculatorIcon className="w-8 h-8 text-secondary-400 mx-auto mb-2" />
+                <p className="text-2xl font-bold text-text-primary">{bmi || '--'}</p>
+                <p className="text-sm text-text-muted">BMI</p>
+                {bmi && (
+                  <p className="text-xs text-text-muted mt-1">
+                    {parseFloat(bmi) < 18.5 ? 'Underweight' : 
+                     parseFloat(bmi) < 25 ? 'Normal' : 
+                     parseFloat(bmi) < 30 ? 'Overweight' : 'Obese'}
+                  </p>
+                )}
+              </div>
+              
+              <div className="text-center p-4 bg-background-medium/30 rounded-lg">
+                <FireIcon className="w-8 h-8 text-primary-400 mx-auto mb-2" />
+                <p className="text-2xl font-bold text-text-primary">{calories || '--'}</p>
+                <p className="text-sm text-text-muted">Daily Calories</p>
+                <p className="text-xs text-text-muted mt-1">Recommended intake</p>
+              </div>
+              
+              <div className="text-center p-4 bg-background-medium/30 rounded-lg">
+                <TrophyIcon className="w-8 h-8 text-secondary-400 mx-auto mb-2" />
+                <p className="text-2xl font-bold text-text-primary">{userProfile.weeklyGoal}</p>
+                <p className="text-sm text-text-muted">lbs/week</p>
+                <p className="text-xs text-text-muted mt-1">Weight goal</p>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </div>
+    );
+  };
+
+  const PersonalInfoForm = () => (
+    <motion.div
+      className="card"
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.2 }}
+    >
+      <h3 className="text-lg font-semibold text-text-primary mb-6">Personal Information</h3>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-2">Full Name</label>
+          <input
+            type="text"
+            value={userProfile.name}
+            onChange={(e) => updateProfile('name', e.target.value)}
+            className="input-field w-full"
+            placeholder="Enter your full name"
+          />
         </div>
-      </motion.div>
-    </div>
+        
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-2">Email</label>
+          <input
+            type="email"
+            value={userProfile.email}
+            onChange={(e) => updateProfile('email', e.target.value)}
+            className="input-field w-full"
+            placeholder="Enter your email"
+          />
+        </div>
+        
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-2">Age</label>
+          <input
+            type="number"
+            value={userProfile.age}
+            onChange={(e) => updateProfile('age', e.target.value)}
+            className="input-field w-full"
+            placeholder="Enter your age"
+          />
+        </div>
+        
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-2">Height (inches)</label>
+          <input
+            type="number"
+            value={userProfile.height}
+            onChange={(e) => updateProfile('height', e.target.value)}
+            className="input-field w-full"
+            placeholder="Enter height in inches"
+          />
+        </div>
+        
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-2">Weight (lbs)</label>
+          <input
+            type="number"
+            step="0.1"
+            value={userProfile.weight}
+            onChange={(e) => updateProfile('weight', e.target.value)}
+            className="input-field w-full"
+            placeholder="Enter current weight"
+          />
+        </div>
+        
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-2">Activity Level</label>
+          <select
+            value={userProfile.activityLevel}
+            onChange={(e) => updateProfile('activityLevel', e.target.value)}
+            className="input-field w-full"
+          >
+            <option value="sedentary">Sedentary (desk job)</option>
+            <option value="lightly_active">Lightly Active (light exercise)</option>
+            <option value="moderately_active">Moderately Active (moderate exercise)</option>
+            <option value="very_active">Very Active (hard exercise)</option>
+            <option value="extremely_active">Extremely Active (very hard exercise)</option>
+          </select>
+        </div>
+        
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-2">Goal</label>
+          <select
+            value={userProfile.goal}
+            onChange={(e) => updateProfile('goal', e.target.value)}
+            className="input-field w-full"
+          >
+            <option value="lose_weight">Lose Weight</option>
+            <option value="maintain_weight">Maintain Weight</option>
+            <option value="gain_weight">Gain Weight</option>
+          </select>
+        </div>
+        
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-2">Weekly Goal (lbs)</label>
+          <select
+            value={userProfile.weeklyGoal}
+            onChange={(e) => updateProfile('weeklyGoal', parseFloat(e.target.value))}
+            className="input-field w-full"
+          >
+            <option value={0.5}>0.5 lbs/week (slow)</option>
+            <option value={1}>1 lb/week (moderate)</option>
+            <option value={1.5}>1.5 lbs/week (fast)</option>
+            <option value={2}>2 lbs/week (aggressive)</option>
+          </select>
+        </div>
+      </div>
+    </motion.div>
   );
 
-  const sections = [
-    { id: 'profile', name: 'Profile', icon: UserIcon },
-    { id: 'settings', name: 'Settings', icon: Cog6ToothIcon }
-  ];
+  const NotificationSettings = () => (
+    <motion.div
+      className="card"
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+    >
+      <h3 className="text-lg font-semibold text-text-primary mb-6">Notification Preferences</h3>
+      <div className="space-y-4">
+        {Object.entries(notifications).map(([key, value]) => (
+          <div key={key} className="flex items-center justify-between">
+            <div>
+              <p className="text-text-primary font-medium">
+                {key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase())}
+              </p>
+              <p className="text-sm text-text-muted">
+                {key === 'mealReminders' && 'Get reminders to log your meals'}
+                {key === 'goalAchievements' && 'Celebrate when you reach your goals'}
+                {key === 'weeklyReports' && 'Weekly progress summaries'}
+              </p>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={value}
+                onChange={(e) => setNotifications(prev => ({ ...prev, [key]: e.target.checked }))}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-secondary-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-500"></div>
+            </label>
+          </div>
+        ))}
+      </div>
+    </motion.div>
+  );
+
+  const PrivacySettings = () => (
+    <motion.div
+      className="card"
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+    >
+      <h3 className="text-lg font-semibold text-text-primary mb-6">Privacy Settings</h3>
+      <div className="space-y-4">
+        {Object.entries(privacy).map(([key, value]) => (
+          <div key={key} className="flex items-center justify-between">
+            <div>
+              <p className="text-text-primary font-medium">
+                {key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase())}
+              </p>
+              <p className="text-sm text-text-muted">
+                {key === 'profileVisibility' && 'Control who can see your profile'}
+                {key === 'shareProgress' && 'Allow sharing progress with friends'}
+                {key === 'dataCollection' && 'Help improve our AI with anonymous data'}
+              </p>
+            </div>
+            {key === 'profileVisibility' ? (
+              <select
+                value={value}
+                onChange={(e) => setPrivacy(prev => ({ ...prev, [key]: e.target.value }))}
+                className="input-field text-sm"
+              >
+                <option value="private">Private</option>
+                <option value="friends">Friends Only</option>
+                <option value="public">Public</option>
+              </select>
+            ) : (
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={value}
+                  onChange={(e) => setPrivacy(prev => ({ ...prev, [key]: e.target.checked }))}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-secondary-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-500"></div>
+              </label>
+            )}
+          </div>
+        ))}
+      </div>
+    </motion.div>
+  );
 
   return (
     <motion.div
@@ -430,57 +388,56 @@ const Profile = () => {
       transition={{ duration: 0.5 }}
     >
       {/* Header */}
-      <div>
-        <h1 className="text-4xl font-bold text-text-primary mb-2">Profile & Settings ⚙️</h1>
-        <p className="text-text-muted">Manage your account and personalize your experience</p>
-      </div>
-
-      {/* Section Tabs */}
       <motion.div
-        className="flex space-x-1 bg-background-medium/30 rounded-xl p-1"
-        initial={{ opacity: 0, y: 20 }}
+        className="flex flex-col md:flex-row md:items-center justify-between gap-4"
+        initial={{ opacity: 0, y: -20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.1 }}
       >
-        {sections.map((section) => (
+        <div>
+          <h1 className="text-3xl font-bold text-text-primary">Profile & Settings</h1>
+          <p className="text-text-muted">Manage your account and preferences</p>
+        </div>
+      </motion.div>
+
+      {/* Tab Navigation */}
+      <motion.div
+        className="flex flex-wrap gap-4"
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.2 }}
+      >
+        {[
+          { id: 'profile', label: 'Profile', icon: UserIcon },
+          { id: 'notifications', label: 'Notifications', icon: Cog6ToothIcon },
+          { id: 'privacy', label: 'Privacy', icon: Cog6ToothIcon }
+        ].map((tab) => (
           <button
-            key={section.id}
-            onClick={() => setActiveSection(section.id)}
-            className={`flex items-center space-x-2 flex-1 px-4 py-3 rounded-lg text-sm font-medium transition-all ${
-              activeSection === section.id
-                ? 'bg-primary-500 text-white shadow-lg'
-                : 'text-text-muted hover:text-text-primary hover:bg-secondary-800/50'
+            key={tab.id}
+            onClick={() => setActiveSection(tab.id)}
+            className={`flex items-center space-x-3 px-6 py-3 rounded-xl font-medium transition-all duration-300 ${
+              activeSection === tab.id
+                ? 'bg-primary-500/20 text-primary-400 border border-primary-500/30'
+                : 'text-text-muted hover:text-text-primary hover:bg-background-medium/50'
             }`}
           >
-            <section.icon className="w-4 h-4" />
-            <span>{section.name}</span>
+            <tab.icon className="w-5 h-5" />
+            <span>{tab.label}</span>
           </button>
         ))}
       </motion.div>
 
-      {/* Content */}
-      <motion.div
-        key={activeSection}
-        initial={{ opacity: 0, x: 20 }}
-        animate={{ opacity: 1, x: 0 }}
-        exit={{ opacity: 0, x: -20 }}
-        transition={{ duration: 0.3 }}
-      >
-        {activeSection === 'profile' && <ProfileSection />}
-        {activeSection === 'settings' && <SettingsSection />}
-      </motion.div>
-
-      {/* Save Button */}
-      <motion.div
-        className="flex justify-end pt-6 border-t border-secondary-800/30"
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.5 }}
-      >
-        <button className="button-primary">
-          Save Changes
-        </button>
-      </motion.div>
+      {/* Tab Content */}
+      <div className="space-y-6">
+        {activeSection === 'profile' && (
+          <>
+            <ProfileSection />
+            <PersonalInfoForm />
+          </>
+        )}
+        {activeSection === 'notifications' && <NotificationSettings />}
+        {activeSection === 'privacy' && <PrivacySettings />}
+      </div>
     </motion.div>
   );
 };

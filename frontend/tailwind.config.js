@@ -6,30 +6,30 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        // Custom color palette: Orange-ish yellow (less saturated), black, grey
+        // Custom color palette: Deep blue and teal for health/fitness theme
         primary: {
-          50: '#fef7ed',
-          100: '#fdedd3',
-          200: '#fbd8a5',
-          300: '#f8bd6d',
-          400: '#f59432',
-          500: '#f37316',  // Main orange-ish yellow (less saturated)
-          600: '#e4550c',
-          700: '#bd3a0c',
-          800: '#962f12',
-          900: '#7a2712',
+          50: '#ecfdf5',
+          100: '#d1fae5',
+          200: '#a7f3d0',
+          300: '#6ee7b7',
+          400: '#34d399',
+          500: '#10b981',  // Main teal
+          600: '#059669',
+          700: '#047857',
+          800: '#065f46',
+          900: '#064e3b',
         },
         secondary: {
-          50: '#f8fafc',
-          100: '#f1f5f9',
-          200: '#e2e8f0',
-          300: '#cbd5e1',
-          400: '#94a3b8',
-          500: '#64748b',  // Main grey
-          600: '#475569',
-          700: '#334155',
-          800: '#1e293b',
-          900: '#0f172a',  // Dark grey/black
+          50: '#f0f9ff',
+          100: '#e0f2fe',
+          200: '#bae6fd',
+          300: '#7dd3fc',
+          400: '#38bdf8',
+          500: '#0ea5e9',  // Main blue
+          600: '#0284c7',
+          700: '#0369a1',
+          800: '#075985',
+          900: '#0c4a6e',  // Deep blue
         },
         accent: {
           amber: '#f59e0b',
@@ -37,9 +37,9 @@ module.exports = {
           yellow: '#eab308',
         },
         background: {
-          dark: '#0a0a0a',     // Deep black
-          medium: '#1a1a1a',   // Medium black
-          light: '#2a2a2a',    // Light black/dark grey
+          dark: '#0f172a',     // Deep navy
+          medium: '#1e293b',   // Medium navy
+          light: '#334155',    // Light navy/dark slate
         },
         text: {
           primary: '#ffffff',   // White text
@@ -76,8 +76,8 @@ module.exports = {
         xs: '2px',
       },
       boxShadow: {
-        'glow': '0 0 20px rgba(243, 115, 22, 0.3)',
-        'glow-lg': '0 0 40px rgba(243, 115, 22, 0.4)',
+        'glow': '0 0 20px rgba(16, 185, 129, 0.3)',
+        'glow-lg': '0 0 40px rgba(16, 185, 129, 0.4)',
       }
     },
   },
