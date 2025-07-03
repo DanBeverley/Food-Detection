@@ -254,7 +254,7 @@ paths:
 
 # Export Configuration
 export:
-  keras_model_filename: "unet_segmentation_final_20250521-121802.h5" # Specify which .h5 model to load
+  # keras_model_filename: "unet_segmentation_final_20250521-121802.h5" # Let script auto-discover available models
   tflite_filename: "segmentation_model_final.tflite"
 
   quantization:
