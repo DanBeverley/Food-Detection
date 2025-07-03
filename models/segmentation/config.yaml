@@ -1,6 +1,6 @@
 data:
   image_size: [256, 256]  
-  batch_size: 32  
+  batch_size: 64  # Optimized for TPU v3-8  
   split_ratios:
     train: 0.7
     val: 0.15
@@ -145,7 +145,7 @@ training:
   debug_epochs: 3  # Fast debug epochs
   debug_mode: false  # Disabled for production training
   use_mixed_precision: true
-  use_tpu: false
+  use_tpu: true  # Enabled for TPU v3-8 training
   
   # Production IoU metric configuration
   metrics: ["binary_accuracy", "binary_iou", "dice_coefficient", "precision", "recall"] 
