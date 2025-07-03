@@ -389,22 +389,17 @@ def load_classification_data(
                 logger.debug(f"Found Windows absolute path: {relative_path}")
             
             # Convert Windows absolute path to Kaggle input path
-            # E:\_MetaFood3D_new_RGBD_videos\RGBD_videos\... -> /kaggle/input/metafood3d-dataset/RGBD_videos/...
+            # E:\_MetaFood3D_new_RGBD_videos\RGBD_videos\Food\food_1\original\0.jpg -> 
+            # /kaggle/input/metafood3d/_MetaFood3D_new_RGBD_videos/RGBD_videos/Food/food_1/original/0.jpg
             if 'RGBD_videos' in relative_path:
                 path_parts = relative_path.split('\\')
                 rgbd_index = next((i for i, part in enumerate(path_parts) if 'RGBD_videos' in part), -1)
                 if rgbd_index >= 0:
+                    # Take everything from RGBD_videos onwards
                     kaggle_path_parts = path_parts[rgbd_index:]
-                    # Try multiple possible Kaggle dataset names
-                    possible_paths = [
-                        Path('/kaggle/input/metafood3d-dataset') / '/'.join(kaggle_path_parts),
-                        Path('/kaggle/input/metafood3d-rgbd') / '/'.join(kaggle_path_parts),
-                        Path('/kaggle/input/metafood3d') / '/'.join(kaggle_path_parts),
-                        Path('/kaggle/working/Food-Detection/data/raw') / '/'.join(kaggle_path_parts)
-                    ]
-                    
-                    # Use the first path (will be verified later during actual loading)
-                    full_image_path = possible_paths[0]
+                    kaggle_path_str = '/'.join(kaggle_path_parts)
+                    # Use the exact Kaggle path structure
+                    full_image_path = Path('/kaggle/input/metafood3d/_MetaFood3D_new_RGBD_videos') / kaggle_path_str
                     if windows_path_count <= 3:
                         logger.info(f"Converting Windows path: {relative_path} -> {full_image_path}")
                 else:
