@@ -112,6 +112,15 @@ def initialize_strategy() -> tf.distribute.Strategy:
     
     # Check if running on Kaggle TPU
     import os
+    
+    # RESET TensorFlow session for subprocess compatibility
+    logger.info("🔄 Resetting TensorFlow session for subprocess...")
+    try:
+        tf.keras.backend.clear_session()
+        logger.info("✅ TensorFlow session cleared")
+    except Exception as e:
+        logger.warning(f"Could not clear TF session: {e}")
+    
     tpu_address = os.environ.get('TPU_NAME', None)
     
     # Try alternative TPU environment variables
@@ -126,9 +135,23 @@ def initialize_strategy() -> tf.distribute.Strategy:
     logger.info(f"Environment TPU_NAME: {tpu_address}")
     logger.info(f"Available environment variables: {[k for k in os.environ.keys() if 'TPU' in k.upper()]}")
     
+    # Add physical device check before TPU initialization
+    logger.info("🔄 Checking physical devices...")
+    try:
+        physical_devices = tf.config.list_physical_devices()
+        tpu_devices = [d for d in physical_devices if d.device_type == 'TPU']
+        logger.info(f"Physical TPU devices found: {len(tpu_devices)}")
+        for device in tpu_devices:
+            logger.info(f"  {device.name} ({device.device_type})")
+        
+        if not tpu_devices:
+            logger.warning("No physical TPU devices found before initialization")
+    except Exception as e:
+        logger.warning(f"Could not list physical devices: {e}")
+    
     # Check if TPU is available via different methods
     try:
-        logger.info("🔄 Using Approach 2: Local TPU (confirmed working)")
+        logger.info("🔄 Using EXACT SAME approach as working diagnostic")
         tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver('local')
         
         logger.info(f'✅ TPU detected via resolver: {tpu_resolver.master()}')
@@ -137,24 +160,29 @@ def initialize_strategy() -> tf.distribute.Strategy:
         logger.info("🔄 Connecting to TPU cluster...")
         tf.config.experimental_connect_to_cluster(tpu_resolver)
         
-        logger.info("🔄 Checking TPU devices before initialization...")
-        try:
-            tpu_devices = tf.config.experimental.list_logical_devices('TPU')
-            logger.info(f"Found TPU devices: {tpu_devices}")
-        except:
-            logger.warning("Could not list TPU devices before initialization")
-        
         logger.info("🔄 Initializing TPU system...")
         tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
         
-        logger.info("🔄 Checking TPU devices after initialization...")
+        logger.info("🔄 Checking TPU system info...")
         try:
-            tpu_devices = tf.config.experimental.list_logical_devices('TPU')
-            logger.info(f"TPU devices after init: {tpu_devices}")
-            if not tpu_devices:
-                raise RuntimeError("No TPU devices found after initialization")
+            # Check if TPU system was initialized successfully
+            topology = tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
+            logger.info(f"TPU topology: {topology}")
         except Exception as e:
-            logger.error(f"TPU device check failed: {e}")
+            logger.warning(f"Could not get TPU topology: {e}")
+        
+        logger.info("🔄 Checking physical devices...")
+        try:
+            physical_devices = tf.config.list_physical_devices()
+            tpu_devices = [d for d in physical_devices if d.device_type == 'TPU']
+            logger.info(f"Physical TPU devices found: {len(tpu_devices)}")
+            for device in tpu_devices:
+                logger.info(f"  {device.name} ({device.device_type})")
+            
+            if not tpu_devices:
+                raise RuntimeError("No physical TPU devices found")
+        except Exception as e:
+            logger.error(f"Physical device check failed: {e}")
             raise
         
         # Create TPU strategy after successful initialization
