@@ -1,4 +1,3 @@
-print("<<<<< EXECUTING LATEST train.py - TOP OF FILE >>>>>", flush=True)
 
 import yaml
 import argparse
@@ -25,66 +24,21 @@ class DebugCallback(tf.keras.callbacks.Callback):
         
     def on_train_batch_end(self, batch, logs=None):
         self.batch_count += 1
-        if self.batch_count % 50 == 0:  # Log every 50 batches for more frequent monitoring
-            # Check if loss is changing
+        if self.batch_count % 100 == 0:
             current_loss = logs.get('loss', 0)
             current_acc = logs.get('categorical_accuracy', 0)
-            logger.info(f"DEBUG Batch {self.batch_count}: Loss={current_loss:.6f}, Acc={current_acc:.4f}")
+            logger.info(f"Batch {self.batch_count}: Loss={current_loss:.4f}, Acc={current_acc:.4f}")
             
-            # CRITICAL: Check if loss is stuck at specific value
-            if abs(current_loss - 4.6286) < 0.001:
-                logger.error(f"CRITICAL: Loss stuck at {current_loss:.6f} - investigating...")
-                
-                # Check optimizer learning rate
-                try:
-                    lr = self.model.optimizer.learning_rate
-                    if hasattr(lr, 'numpy'):
-                        lr_val = lr.numpy()
-                    else:
-                        lr_val = lr
-                    logger.error(f"CRITICAL: Current LR = {lr_val}")
-                    
-                    if lr_val < 1e-6:
-                        logger.error("CRITICAL: Learning rate collapsed!")
-                except:
-                    pass
-            
-            # Check gradient norms and detect anomalies
+            # Check learning rate
             try:
-                total_norm = 0
-                param_count = 0
-                nan_count = 0
-                
-                for weight in self.model.trainable_weights:
-                    if weight.shape:
-                        param_count += tf.size(weight)
-                        weight_norm = tf.norm(weight)
-                        
-                        # Check for NaN/Inf
-                        if tf.math.is_nan(weight_norm) or tf.math.is_inf(weight_norm):
-                            nan_count += 1
-                            logger.error(f"CRITICAL: NaN/Inf detected in weight: {weight.name}")
-                        else:
-                            total_norm += weight_norm
-                        
-                if nan_count > 0:
-                    logger.error(f"CRITICAL: {nan_count} weights have NaN/Inf values!")
-                        
-                if param_count > 0 and nan_count == 0:
-                    avg_weight_norm = total_norm / len(self.model.trainable_weights)
-                    logger.info(f"DEBUG Batch {self.batch_count}: Avg weight norm={avg_weight_norm:.6f}")
-                    
-                    # Track if weights are changing
-                    if not hasattr(self, 'prev_weight_norm'):
-                        self.prev_weight_norm = avg_weight_norm
-                    else:
-                        weight_change = abs(avg_weight_norm - self.prev_weight_norm)
-                        if weight_change < 1e-8:
-                            logger.error(f"CRITICAL: Weights not changing! Change={weight_change:.10f}")
-                        self.prev_weight_norm = avg_weight_norm
-                        
-            except Exception as e:
-                logger.error(f"CRITICAL: Error in weight analysis: {e}")
+                lr = self.model.optimizer.learning_rate
+                if hasattr(lr, 'numpy'):
+                    lr_val = lr.numpy()
+                else:
+                    lr_val = lr
+                logger.info(f"Learning Rate: {lr_val}")
+            except:
+                pass
 
 from typing import Dict, Tuple, Any, List, Optional
 
@@ -98,150 +52,41 @@ except AttributeError:
 logger = logging.getLogger(__name__)
 
 def initialize_strategy() -> tf.distribute.Strategy:
-    # FORCE SINGLE DEVICE TRAINING FOR DEBUGGING
-    force_single_device = False  # TPU training re-enabled with working approach
-    
-    if force_single_device:
-        logger.info("FORCED SINGLE DEVICE MODE - Using default strategy only")
-        strategy = tf.distribute.get_strategy()
-        logger.info(f"Using default strategy: {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
-        return strategy
-    
-    # CRITICAL: Check Kaggle TPU environment first
-    logger.info("🔍 CHECKING TPU AVAILABILITY...")
-    
-    # Check if running on Kaggle TPU
     import os
     
-    # RESET TensorFlow session for subprocess compatibility
-    logger.info("🔄 Resetting TensorFlow session for subprocess...")
+    logger.info("Initializing distributed strategy...")
+    
+    # Clear TensorFlow session for subprocess compatibility
+    tf.keras.backend.clear_session()
+    
+    # Try TPU detection
     try:
-        tf.keras.backend.clear_session()
-        logger.info("✅ TensorFlow session cleared")
-    except Exception as e:
-        logger.warning(f"Could not clear TF session: {e}")
-    
-    tpu_address = os.environ.get('TPU_NAME', None)
-    
-    # Try alternative TPU environment variables
-    if not tpu_address:
-        tpu_address = os.environ.get('COLAB_TPU_ADDR', None)
-    if not tpu_address:
-        # Check if we're on Kaggle by looking for specific env vars
-        if 'KAGGLE_USER_SECRETS_TOKEN' in os.environ:
-            # On Kaggle, try standard TPU names
-            tpu_address = 'local'  # Try Kaggle's default
-    
-    logger.info(f"Environment TPU_NAME: {tpu_address}")
-    logger.info(f"Available environment variables: {[k for k in os.environ.keys() if 'TPU' in k.upper()]}")
-    
-    # Add physical device check before TPU initialization
-    logger.info("🔄 Checking physical devices...")
-    try:
-        physical_devices = tf.config.list_physical_devices()
-        tpu_devices = [d for d in physical_devices if d.device_type == 'TPU']
-        logger.info(f"Physical TPU devices found: {len(tpu_devices)}")
-        for device in tpu_devices:
-            logger.info(f"  {device.name} ({device.device_type})")
-        
-        if not tpu_devices:
-            logger.warning("No physical TPU devices found before initialization")
-    except Exception as e:
-        logger.warning(f"Could not list physical devices: {e}")
-    
-    # Check if TPU is available via different methods
-    try:
-        logger.info("🔄 Using EXACT SAME approach as working diagnostic")
-        tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver('local')
-        
-        logger.info(f'✅ TPU detected via resolver: {tpu_resolver.master()}')
-        
-        # Connect to cluster and initialize TPU system
-        logger.info("🔄 Connecting to TPU cluster...")
-        tf.config.experimental_connect_to_cluster(tpu_resolver)
-        
-        logger.info("🔄 Initializing TPU system...")
-        tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
-        
-        logger.info("🔄 Checking TPU system info...")
-        try:
-            # Check if TPU system was initialized successfully
-            topology = tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
-            logger.info(f"TPU topology: {topology}")
-        except Exception as e:
-            logger.warning(f"Could not get TPU topology: {e}")
-        
-        logger.info("🔄 Checking physical devices...")
-        try:
-            physical_devices = tf.config.list_physical_devices()
-            tpu_devices = [d for d in physical_devices if d.device_type == 'TPU']
-            logger.info(f"Physical TPU devices found: {len(tpu_devices)}")
-            for device in tpu_devices:
-                logger.info(f"  {device.name} ({device.device_type})")
-            
-            if not tpu_devices:
-                raise RuntimeError("No physical TPU devices found")
-        except Exception as e:
-            logger.error(f"Physical device check failed: {e}")
-            raise
-        
-        # Create TPU strategy after successful initialization
-        strategy = tf.distribute.TPUStrategy(tpu_resolver)
-        logger.info(f"✅ TPU STRATEGY ACTIVE: {strategy.num_replicas_in_sync} replicas detected")
-        logger.info(f"✅ TPU CORES: {strategy.num_replicas_in_sync} cores will be used")
-        logger.info(f"✅ EFFECTIVE BATCH SIZE: {64 * strategy.num_replicas_in_sync} (batch_size × cores)")
-        
-        # Set memory growth for TPU
-        tf.config.experimental.set_synchronous_execution(True)
-        
+        resolver = tf.distribute.cluster_resolver.TPUClusterResolver('local')
+        tf.config.experimental_connect_to_cluster(resolver)
+        tf.tpu.experimental.initialize_tpu_system(resolver)
+        strategy = tf.distribute.TPUStrategy(resolver)
+        logger.info(f"TPU strategy initialized with {strategy.num_replicas_in_sync} replicas")
         return strategy
-        
-    except ValueError as e:
-        logger.error(f"❌ TPU not found via resolver: {e}")
-        logger.info("🔄 Trying alternative TPU detection methods...")
-        
-        # Method 2: Try manual TPU address
-        if tpu_address:
-            try:
-                logger.info(f"🔄 Trying manual TPU connection to: {tpu_address}")
-                tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver(tpu=tpu_address)
-                tf.config.experimental_connect_to_cluster(tpu_resolver)
-                tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
-                strategy = tf.distribute.TPUStrategy(tpu_resolver)
-                logger.info(f"✅ TPU STRATEGY ACTIVE (manual): {strategy.num_replicas_in_sync} replicas")
-                return strategy
-            except Exception as e2:
-                logger.error(f"❌ Manual TPU connection failed: {e2}")
-        
-        logger.info("🔄 TPU not available, checking for GPUs...")
-        
     except Exception as e:
-        logger.error(f"❌ Unexpected error during TPU initialization: {e}")
-        logger.info("🔄 Falling back to GPU/CPU detection...")
+        logger.info(f"TPU initialization failed: {e}")
+    
+    # Fallback to GPU/CPU
 
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
-        logger.info(f"🔍 Found GPUs: {gpus}")
-        
-        # Configure all GPUs for memory growth
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
         
         if len(gpus) > 1:
-            # Multi-GPU strategy
             strategy = tf.distribute.MirroredStrategy()
-            logger.info(f"✅ MULTI-GPU STRATEGY: {len(gpus)} GPUs, {strategy.num_replicas_in_sync} replicas")
+            logger.info(f"Multi-GPU strategy: {len(gpus)} GPUs")
         else:
-            # Single GPU
             strategy = tf.distribute.get_strategy()
-            logger.info(f"✅ SINGLE GPU STRATEGY: {gpus[0].name}")
-        
+            logger.info(f"Single GPU strategy")
         return strategy
     else:
-        logger.warning("No GPUs found by TensorFlow. Training will use CPU.")
-        strategy = tf.distribute.get_strategy()
-        logger.info(f"Using default strategy (CPU): {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
-        return strategy
+        logger.info("Using CPU strategy")
+        return tf.distribute.get_strategy()
 
 def set_mixed_precision_policy(config: Dict, strategy: tf.distribute.Strategy):
     if config.get('training', {}).get('use_mixed_precision', False):
@@ -675,29 +520,27 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     
     logger.info(f"Model compiled with optimizer: {optimizer_name}, loss: {loss_function_name}, metrics: {[m.name if hasattr(m, 'name') else str(m) for m in compiled_metrics]}.")
     
-    # DEBUG: Check trainable parameters
+    # Check trainable parameters
     total_params = model.count_params()
     trainable_params = sum([tf.keras.backend.count_params(w) for w in model.trainable_weights])
-    logger.info(f"DEBUG: Total parameters: {total_params:,}")
-    logger.info(f"DEBUG: Trainable parameters: {trainable_params:,}")
-    logger.info(f"DEBUG: Frozen parameters: {total_params - trainable_params:,}")
+    logger.info(f"Total parameters: {total_params:,}")
+    logger.info(f"Trainable parameters: {trainable_params:,}")
     
     if trainable_params == 0:
-        logger.error("CRITICAL: Model has 0 trainable parameters! All layers are frozen!")
+        logger.error("Model has 0 trainable parameters - all layers are frozen")
         return
     
-    # DEBUG: Test forward pass with dummy data
-    logger.info("DEBUG: Testing forward pass with dummy data...")
+    # Test forward pass
+    logger.info("Testing forward pass...")
     try:
         dummy_batch = tf.random.normal((2, 224, 224, 3))
         dummy_output = model(dummy_batch, training=False)
-        logger.info(f"DEBUG: Forward pass successful. Output shape: {dummy_output.shape}")
-        logger.info(f"DEBUG: Output sample: {dummy_output[0][:5]}")
+        logger.info(f"Forward pass successful. Output shape: {dummy_output.shape}")
         
         # Check if output is always the same (indicating frozen model)
         dummy_output2 = model(dummy_batch, training=False)
         outputs_identical = tf.reduce_all(tf.equal(dummy_output, dummy_output2))
-        logger.info(f"DEBUG: Identical outputs on repeated calls: {outputs_identical}")
+        logger.info(f"Repeated calls identical: {outputs_identical}")
         
         # CRITICAL: Check optimizer learning rate
         actual_lr = model.optimizer.learning_rate
@@ -705,14 +548,13 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
             actual_lr_value = actual_lr.numpy()
         else:
             actual_lr_value = actual_lr
-        logger.info(f"DEBUG: Optimizer actual learning rate: {actual_lr_value}")
-        logger.info(f"DEBUG: Optimizer type: {type(model.optimizer).__name__}")
+        logger.info(f"Optimizer LR: {actual_lr_value}, Type: {type(model.optimizer).__name__}")
         
         if actual_lr_value < 1e-8:
             logger.error(f"CRITICAL: Learning rate is too small: {actual_lr_value}")
         
     except Exception as e:
-        logger.error(f"DEBUG: Forward pass failed: {e}")
+        logger.error(f"Forward pass failed: {e}")
         return
     
     # Optionally print model summary
@@ -914,8 +756,8 @@ def train_model(model: models.Model,
         logger.info("No initial weights path specified. Training from scratch or with backbone's pre-trained weights.")
 
 
-    # DEBUG: Inspect training data before fit
-    logger.info("DEBUG: Inspecting training data samples...")
+    # Inspect training data
+    logger.info("Inspecting training data samples...")
     try:
         sample_count = 0
         batch_hashes = []
@@ -928,31 +770,24 @@ def train_model(model: models.Model,
                 batch_hash = hash(str(batch_inputs.numpy().mean()))
             batch_hashes.append(batch_hash)
             
-            logger.info(f"DEBUG: Batch {sample_count} - Input shape: {batch_inputs.shape if hasattr(batch_inputs, 'shape') else 'dict'}")
-            logger.info(f"DEBUG: Batch {sample_count} - Label shape: {batch_labels.shape}")
-            logger.info(f"DEBUG: Batch {sample_count} - Label sample: {batch_labels[0][:5]}")
+            logger.info(f"Batch {sample_count} - Input: {batch_inputs.shape if hasattr(batch_inputs, 'shape') else 'dict'}, Labels: {batch_labels.shape}")
             label_classes = tf.argmax(batch_labels, axis=1)
             unique_labels = tf.unique(label_classes)[0]
-            logger.info(f"DEBUG: Batch {sample_count} - Label unique values: {len(unique_labels)} out of {batch_labels.shape[0]} samples")
-            logger.info(f"DEBUG: Batch {sample_count} - Label class distribution: {unique_labels.numpy()}")
+            logger.info(f"Batch {sample_count} - Label classes: {len(unique_labels)} unique")
             
-            # CRITICAL: Check if all labels are the same
             if len(unique_labels) == 1:
-                logger.error(f"CRITICAL: ALL LABELS IN BATCH {sample_count} ARE IDENTICAL! Class: {unique_labels[0].numpy()}")
-                logger.error("This explains the stuck loss - model predicts same class always")
+                logger.warning(f"All labels in batch {sample_count} are identical (class: {unique_labels[0].numpy()})")
             
-            # Check label sum (should vary between batches)
             label_sum = tf.reduce_sum(label_classes)
-            logger.info(f"DEBUG: Batch {sample_count} - Label sum: {label_sum.numpy()}")
-            logger.info(f"DEBUG: Batch {sample_count} - Hash: {batch_hash}")
+            logger.info(f"Batch {sample_count} - Label sum: {label_sum.numpy()}")
         
         if len(set(batch_hashes)) == 1:
-            logger.error("CRITICAL: All batches have identical hashes! Data pipeline is stuck!")
+            logger.error("All batches have identical hashes - data pipeline may be stuck")
         else:
-            logger.info("DEBUG: Batches have different hashes - data pipeline seems OK")
+            logger.info("Batches have different hashes - data pipeline OK")
             
     except Exception as e:
-        logger.error(f"DEBUG: Error inspecting training data: {e}")
+        logger.error(f"Error inspecting training data: {e}")
 
     logger.info("Starting model.fit()...")
     history = model.fit(
