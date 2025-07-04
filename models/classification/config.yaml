@@ -144,7 +144,7 @@ training:
   mixup_alpha: 0.4
   cutmix_alpha: 1.0
   
-  # Production callbacks configuration
+  # Minimal callbacks configuration for TPU mixed precision compatibility
   callbacks:
     model_checkpoint:
       enabled: true
@@ -155,7 +155,7 @@ training:
       filename_template: "model_epoch-{epoch:02d}_val_acc-{val_categorical_accuracy:.4f}.h5"
       
     early_stopping:
-      enabled: true
+      enabled: false  # Disabled for TPU mixed precision compatibility
       monitor: "val_loss"
       mode: "min"
       patience: 12
@@ -163,7 +163,7 @@ training:
       min_delta: 0.001
       
     reduce_lr_on_plateau:
-      enabled: false  # Disabled due to mixed precision compatibility
+      enabled: false  # Disabled for TPU mixed precision compatibility
       monitor: "val_loss" 
       mode: "min" 
       factor: 0.5
@@ -172,7 +172,7 @@ training:
       cooldown: 2
       
     tensorboard:
-      enabled: true
+      enabled: false  # Disabled for TPU mixed precision compatibility
       log_dir: "logs/classification/" 
       histogram_freq: 1
       write_graph: true
