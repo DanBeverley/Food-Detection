@@ -134,7 +134,7 @@ metrics: ["accuracy", "top_5_accuracy", "precision", "recall"]
 training:
   epochs: 30  # Increased for better convergence
   debug_epochs: 3   # Reduced debug epochs
-  use_mixed_precision: false  # Disabled for debugging distributed training
+  use_mixed_precision: true  # Required for TPU performance
   use_tpu: true  # Enabled for TPU v3-8 training 
   
   # Class weights for imbalanced datasets

@@ -1,9 +1,9 @@
 
+import os
+
 # TPU-specific environment configuration
 # Allow TPU library loading for universal compatibility
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'  # Reduce TensorFlow logging
-
-import os
 import sys
 import yaml
 import logging

@@ -86,12 +86,18 @@ def initialize_strategy() -> tf.distribute.Strategy:
     
     # Check for TPU environment variables first
     tpu_name = os.environ.get('TPU_NAME')
+    colab_tpu_addr = os.environ.get('COLAB_TPU_ADDR')
+    
     if tpu_name:
         logger.info(f"TPU_NAME environment variable found: {tpu_name}")
         resolver_address = tpu_name
+    elif colab_tpu_addr:
+        logger.info(f"COLAB_TPU_ADDR found: {colab_tpu_addr}")
+        resolver_address = colab_tpu_addr
     else:
-        resolver_address = 'local'
-        logger.info("TPU_NAME not found, trying 'local' resolver")
+        # For Kaggle TPU, try empty string first (standard approach)
+        resolver_address = ''
+        logger.info("No TPU environment variables found, trying empty string resolver for Kaggle TPU")
     
     # Try TPU detection with retry mechanism
     for attempt in range(3):
@@ -116,7 +122,18 @@ def initialize_strategy() -> tf.distribute.Strategy:
                 time.sleep(2)
     
     # If TPU fails, try alternative resolver addresses
-    if resolver_address == 'local':
+    if resolver_address == '':
+        try:
+            logger.info("Trying 'local' resolver as fallback")
+            resolver = tf.distribute.cluster_resolver.TPUClusterResolver('local')
+            tf.config.experimental_connect_to_cluster(resolver)
+            tf.tpu.experimental.initialize_tpu_system(resolver)
+            strategy = tf.distribute.TPUStrategy(resolver)
+            logger.info(f"TPU strategy initialized with fallback resolver: {strategy.num_replicas_in_sync} replicas")
+            return strategy
+        except Exception as e:
+            logger.info(f"TPU fallback initialization failed: {e}")
+    elif resolver_address == 'local':
         try:
             logger.info("Trying empty string resolver as fallback")
             resolver = tf.distribute.cluster_resolver.TPUClusterResolver('')
