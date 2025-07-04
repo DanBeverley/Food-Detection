@@ -689,11 +689,21 @@ def _get_metrics(metrics_cfg: List[str], num_classes: int, multilabel: bool, con
             compiled_metrics.append(metrics.CategoricalAccuracy(name='categorical_accuracy'))
             logger.info("Using CategoricalAccuracy metric (aliased from 'accuracy').")
         elif metric_name.lower() == 'top_5_accuracy':
-            compiled_metrics.append(metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy'))
-            logger.info("Using TopKCategoricalAccuracy metric for top_5_accuracy.")
+            # Skip TopK metrics when using mixed precision on TPU due to bfloat16 incompatibility
+            training_cfg = config.get('training', {})
+            if training_cfg.get('use_mixed_precision', False):
+                logger.warning("Skipping top_5_accuracy metric due to mixed precision incompatibility on TPU")
+            else:
+                compiled_metrics.append(metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy'))
+                logger.info("Using TopKCategoricalAccuracy metric for top_5_accuracy.")
         elif metric_name.lower() == 'top_3_accuracy':
-            compiled_metrics.append(metrics.TopKCategoricalAccuracy(k=3, name='top_3_accuracy'))
-            logger.info("Using TopKCategoricalAccuracy metric for top_3_accuracy.")
+            # Skip TopK metrics when using mixed precision on TPU due to bfloat16 incompatibility
+            training_cfg = config.get('training', {})
+            if training_cfg.get('use_mixed_precision', False):
+                logger.warning("Skipping top_3_accuracy metric due to mixed precision incompatibility on TPU")
+            else:
+                compiled_metrics.append(metrics.TopKCategoricalAccuracy(k=3, name='top_3_accuracy'))
+                logger.info("Using TopKCategoricalAccuracy metric for top_3_accuracy.")
         elif hasattr(metrics, metric_name):
             metric_class = getattr(metrics, metric_name)
             if callable(metric_class):
