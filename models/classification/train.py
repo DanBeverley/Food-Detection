@@ -513,6 +513,9 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         kernel_regularizer=output_regularizer,
         name='output_layer'
     )(x)
+    
+    # Cast to float32 for mixed precision compatibility with loss functions
+    outputs = tf.cast(outputs, tf.float32)
 
     # Determine model inputs
     if is_multimodal_enabled:
