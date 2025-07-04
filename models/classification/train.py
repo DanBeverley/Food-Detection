@@ -848,16 +848,17 @@ def train_model(model: models.Model,
         logger.error(f"Error inspecting training data: {e}")
 
     logger.info("Starting model.fit()...")
-    history = model.fit(
-        train_dataset,
-        epochs=epochs,  
-        validation_data=val_dataset,
-        callbacks=callbacks,
-        steps_per_epoch=steps_per_epoch, 
-        validation_steps=validation_steps, 
-        verbose=training_cfg.get('verbose', 1),
-        initial_epoch=initial_epoch
-    )
+    with strategy.scope():
+        history = model.fit(
+            train_dataset,
+            epochs=epochs,  
+            validation_data=val_dataset,
+            callbacks=callbacks,
+            steps_per_epoch=steps_per_epoch, 
+            validation_steps=validation_steps, 
+            verbose=training_cfg.get('verbose', 1),
+            initial_epoch=initial_epoch
+        )
     logger.info("model.fit() finished.")
 
     # Save the final model

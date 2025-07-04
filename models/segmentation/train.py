@@ -1,7 +1,6 @@
-print("TRAIN.PY TOP LEVEL PRINT STATEMENT EXECUTING NOW") # CASCADE_DIAGNOSTIC_PRINT
 
 # TPU-specific environment configuration
-os.environ['TPU_LOAD_LIBRARY'] = '0'  # Prevent TPU library conflicts
+# Allow TPU library loading for universal compatibility
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'  # Reduce TensorFlow logging
 
 import os
@@ -73,46 +72,75 @@ def set_mixed_precision_policy(config: dict, strategy: tf.distribute.Strategy):
 
 def initialize_strategy() -> tf.distribute.Strategy:
     """Initialize distributed strategy for TPU, GPU, or CPU."""
-    try:
-        # First, try to detect TPU without connecting
-        tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver()
-        logger.info(f'TPU detected: {tpu_resolver.master()}')
-        
-        # Connect to cluster and initialize TPU system
-        tf.config.experimental_connect_to_cluster(tpu_resolver)
-        tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
-        
-        # Create TPU strategy after successful initialization
-        strategy = tf.distribute.TPUStrategy(tpu_resolver)
-        logger.info(f"TPU strategy initialized with {strategy.num_replicas_in_sync} replicas.")
-        
-        # Set memory growth for TPU
-        tf.config.experimental.set_synchronous_execution(True)
-        
-        return strategy
-        
-    except ValueError as e:
-        logger.info(f"TPU not found or error connecting: {e}. Checking for GPUs.")
-    except Exception as e:
-        logger.error(f"An unexpected error occurred during TPU initialization: {e}. Checking for GPUs.")
-
+    import os
+    import time
+    
+    logger.info("Initializing distributed strategy...")
+    
+    # Clear TensorFlow session for subprocess compatibility
+    tf.keras.backend.clear_session()
+    
+    # Check for TPU environment variables first
+    tpu_name = os.environ.get('TPU_NAME')
+    if tpu_name:
+        logger.info(f"TPU_NAME environment variable found: {tpu_name}")
+        resolver_address = tpu_name
+    else:
+        resolver_address = 'local'
+        logger.info("TPU_NAME not found, trying 'local' resolver")
+    
+    # Try TPU detection with retry mechanism
+    for attempt in range(3):
+        try:
+            logger.info(f"TPU initialization attempt {attempt + 1}/3")
+            resolver = tf.distribute.cluster_resolver.TPUClusterResolver(resolver_address)
+            logger.info(f"TPU resolver created: {resolver}")
+            
+            tf.config.experimental_connect_to_cluster(resolver)
+            logger.info("Successfully connected to TPU cluster")
+            
+            tf.tpu.experimental.initialize_tpu_system(resolver)
+            logger.info("TPU system initialized")
+            
+            strategy = tf.distribute.TPUStrategy(resolver)
+            logger.info(f"TPU strategy initialized with {strategy.num_replicas_in_sync} replicas")
+            return strategy
+            
+        except Exception as e:
+            logger.info(f"TPU initialization attempt {attempt + 1} failed: {e}")
+            if attempt < 2:  # Don't sleep on last attempt
+                time.sleep(2)
+    
+    # If TPU fails, try alternative resolver addresses
+    if resolver_address == 'local':
+        try:
+            logger.info("Trying empty string resolver as fallback")
+            resolver = tf.distribute.cluster_resolver.TPUClusterResolver('')
+            tf.config.experimental_connect_to_cluster(resolver)
+            tf.tpu.experimental.initialize_tpu_system(resolver)
+            strategy = tf.distribute.TPUStrategy(resolver)
+            logger.info(f"TPU strategy initialized with fallback resolver: {strategy.num_replicas_in_sync} replicas")
+            return strategy
+        except Exception as e:
+            logger.info(f"TPU fallback initialization failed: {e}")
+    
+    # Fallback to GPU/CPU
+    logger.info("TPU initialization failed, falling back to GPU/CPU")
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
-        logger.info(f"Found GPUs: {gpus}")
-        try:
-            tf.config.experimental.set_visible_devices(gpus[0], 'GPU')
-            tf.config.experimental.set_memory_growth(gpus[0], True)
-            logger.info(f"Restricted TensorFlow to use GPU: {gpus[0].name} and enabled memory growth.")
-        except RuntimeError as e:
-            logger.warning(f"Could not configure GPU memory growth: {e}")
-        strategy = tf.distribute.get_strategy()
-        logger.info(f"Using default strategy (CPU or single GPU): {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        
+        if len(gpus) > 1:
+            strategy = tf.distribute.MirroredStrategy()
+            logger.info(f"Multi-GPU strategy: {len(gpus)} GPUs")
+        else:
+            strategy = tf.distribute.get_strategy()
+            logger.info(f"Single GPU strategy")
         return strategy
     else:
-        logger.warning("No GPUs found by TensorFlow. Training will use CPU.")
-        strategy = tf.distribute.get_strategy()
-        logger.info(f"Using default strategy (CPU): {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
-        return strategy
+        logger.info("Using CPU strategy")
+        return tf.distribute.get_strategy()
 
 # Path to the specific config file for segmentation training
 SEGMENTATION_CONFIG_PATH = os.path.join(_get_project_root(), "models", "segmentation", "config.yaml")
@@ -982,14 +1010,15 @@ def main():
             model.compile(optimizer=optimizer, loss=loss_function, metrics=metrics_list)
             logger.info(f"Cosine decay restarts learning rate schedule enabled")
 
-    model.fit(
-        train_dataset,
-        epochs=epochs,
-        validation_data=val_dataset,
-        callbacks=callbacks_list,
-        steps_per_epoch=steps_per_epoch,
-        validation_steps=validation_steps
-    )
+    with strategy.scope():
+        model.fit(
+            train_dataset,
+            epochs=epochs,
+            validation_data=val_dataset,
+            callbacks=callbacks_list,
+            steps_per_epoch=steps_per_epoch,
+            validation_steps=validation_steps
+        )
 
     logger.info("Training finished.")
 
