@@ -163,7 +163,7 @@ training:
       min_delta: 0.001
       
     reduce_lr_on_plateau:
-      enabled: true
+      enabled: false  # Disabled due to mixed precision compatibility
       monitor: "val_loss" 
       mode: "min" 
       factor: 0.5
