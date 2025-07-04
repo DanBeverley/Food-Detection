@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path # Added import
 
 # TPU-specific imports and configuration
-os.environ['TPU_LOAD_LIBRARY'] = '0'  # Prevent TPU library conflicts
+# Allow TPU library loading in subprocess context
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'  # Reduce TensorFlow logging
 
 import tensorflow as tf
@@ -51,27 +51,85 @@ except AttributeError:
 
 logger = logging.getLogger(__name__)
 
-def initialize_strategy() -> tf.distribute.Strategy:
+def diagnose_tpu_environment():
+    """Diagnose TPU environment and configuration"""
     import os
     
+    logger.info("=== TPU Environment Diagnostics ===")
+    
+    # Check environment variables
+    tpu_vars = ['TPU_NAME', 'TPU_LOAD_LIBRARY', 'COLAB_TPU_ADDR', 'KFAC_DEVICE']
+    for var in tpu_vars:
+        value = os.environ.get(var)
+        logger.info(f"{var}: {value}")
+    
+    # Check TensorFlow TPU devices
+    try:
+        tpu_devices = tf.config.experimental.list_physical_devices('TPU')
+        logger.info(f"TPU devices detected: {tpu_devices}")
+    except Exception as e:
+        logger.info(f"TPU device detection failed: {e}")
+    
+    logger.info("=== End TPU Diagnostics ===")
+
+def initialize_strategy() -> tf.distribute.Strategy:
+    import os
+    import time
+    
     logger.info("Initializing distributed strategy...")
+    
+    # Diagnose TPU environment first
+    diagnose_tpu_environment()
     
     # Clear TensorFlow session for subprocess compatibility
     tf.keras.backend.clear_session()
     
-    # Try TPU detection
-    try:
-        resolver = tf.distribute.cluster_resolver.TPUClusterResolver('local')
-        tf.config.experimental_connect_to_cluster(resolver)
-        tf.tpu.experimental.initialize_tpu_system(resolver)
-        strategy = tf.distribute.TPUStrategy(resolver)
-        logger.info(f"TPU strategy initialized with {strategy.num_replicas_in_sync} replicas")
-        return strategy
-    except Exception as e:
-        logger.info(f"TPU initialization failed: {e}")
+    # Check for TPU environment variables first
+    tpu_name = os.environ.get('TPU_NAME')
+    if tpu_name:
+        logger.info(f"TPU_NAME environment variable found: {tpu_name}")
+        resolver_address = tpu_name
+    else:
+        resolver_address = 'local'
+        logger.info("TPU_NAME not found, trying 'local' resolver")
+    
+    # Try TPU detection with retry mechanism
+    for attempt in range(3):
+        try:
+            logger.info(f"TPU initialization attempt {attempt + 1}/3")
+            resolver = tf.distribute.cluster_resolver.TPUClusterResolver(resolver_address)
+            logger.info(f"TPU resolver created: {resolver}")
+            
+            tf.config.experimental_connect_to_cluster(resolver)
+            logger.info("Successfully connected to TPU cluster")
+            
+            tf.tpu.experimental.initialize_tpu_system(resolver)
+            logger.info("TPU system initialized")
+            
+            strategy = tf.distribute.TPUStrategy(resolver)
+            logger.info(f"TPU strategy initialized with {strategy.num_replicas_in_sync} replicas")
+            return strategy
+            
+        except Exception as e:
+            logger.info(f"TPU initialization attempt {attempt + 1} failed: {e}")
+            if attempt < 2:  # Don't sleep on last attempt
+                time.sleep(2)
+    
+    # If TPU fails, try alternative resolver addresses
+    if resolver_address == 'local':
+        try:
+            logger.info("Trying empty string resolver as fallback")
+            resolver = tf.distribute.cluster_resolver.TPUClusterResolver('')
+            tf.config.experimental_connect_to_cluster(resolver)
+            tf.tpu.experimental.initialize_tpu_system(resolver)
+            strategy = tf.distribute.TPUStrategy(resolver)
+            logger.info(f"TPU strategy initialized with fallback resolver: {strategy.num_replicas_in_sync} replicas")
+            return strategy
+        except Exception as e:
+            logger.info(f"TPU fallback initialization failed: {e}")
     
     # Fallback to GPU/CPU
-
+    logger.info("TPU initialization failed, falling back to GPU/CPU")
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         for gpu in gpus:
@@ -820,7 +878,6 @@ def main(args):
     logger.info(f"Loaded configuration from: {args.config}")
 
     strategy = initialize_strategy()
-    set_mixed_precision_policy(config, strategy)
 
     data_cfg = config.get('data', {})
     training_cfg = config.get('training', {})
@@ -874,6 +931,9 @@ def main(args):
     index_to_label_map = {i: name for i, name in enumerate(class_names)}
 
     with strategy.scope():
+        # Set mixed precision policy within strategy scope
+        set_mixed_precision_policy(config, strategy)
+        
         model = build_model(num_classes=num_classes, config=config, learning_rate_to_use=training_cfg.get('learning_rate', 0.001))
     
     logger.info(f"Model built. Num classes: {num_classes}")
