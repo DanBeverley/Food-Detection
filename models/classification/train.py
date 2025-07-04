@@ -33,9 +33,9 @@ class DebugCallback(tf.keras.callbacks.Callback):
             try:
                 lr = self.model.optimizer.learning_rate
                 if hasattr(lr, 'numpy'):
-                    lr_val = lr.numpy()
+                    lr_val = float(lr.numpy())  # Cast to float for mixed precision compatibility
                 else:
-                    lr_val = lr
+                    lr_val = float(lr)
                 logger.info(f"Learning Rate: {lr_val}")
             except:
                 pass
@@ -1012,7 +1012,7 @@ def main(args):
         if dataset_cardinality != -1 and dataset_cardinality < steps_per_epoch_val:
             logger.warning(f"Dataset cardinality ({dataset_cardinality}) is less than expected steps_per_epoch ({steps_per_epoch_val}). This may cause the 'ran out of data' warning.")
             # Option 1: Use dataset cardinality as steps_per_epoch
-            steps_per_epoch_val = dataset_cardinality
+            steps_per_epoch_val = int(dataset_cardinality)  # Ensure it's an integer
             logger.info(f"Adjusted steps_per_epoch to dataset cardinality: {steps_per_epoch_val}")
     except Exception as e:
         logger.error(f"Error accessing training dataset cardinality: {e}")
