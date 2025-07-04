@@ -128,7 +128,7 @@ loss:
     from_logits: false
 
 # Metrics Configuration
-metrics: ["accuracy", "top_5_accuracy", "precision", "recall"] 
+metrics: ["accuracy", "precision", "recall"] 
 
 # Production Training Configuration
 training:
