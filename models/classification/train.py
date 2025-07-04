@@ -99,7 +99,7 @@ logger = logging.getLogger(__name__)
 
 def initialize_strategy() -> tf.distribute.Strategy:
     # FORCE SINGLE DEVICE TRAINING FOR DEBUGGING
-    force_single_device = False  # FIXED: Re-enable TPU training
+    force_single_device = False  # TPU training re-enabled with working approach
     
     if force_single_device:
         logger.info("FORCED SINGLE DEVICE MODE - Using default strategy only")
@@ -128,22 +128,34 @@ def initialize_strategy() -> tf.distribute.Strategy:
     
     # Check if TPU is available via different methods
     try:
-        # Method 1: Try with explicit TPU name first
-        if tpu_address:
-            logger.info(f"🔄 Attempting TPU connection with explicit name: {tpu_address}")
-            tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver(tpu=tpu_address)
-        else:
-            # Method 2: Try automatic detection
-            logger.info("🔄 Attempting automatic TPU detection")
-            tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver()
+        logger.info("🔄 Using Approach 2: Local TPU (confirmed working)")
+        tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver('local')
         
         logger.info(f'✅ TPU detected via resolver: {tpu_resolver.master()}')
         
         # Connect to cluster and initialize TPU system
         logger.info("🔄 Connecting to TPU cluster...")
         tf.config.experimental_connect_to_cluster(tpu_resolver)
+        
+        logger.info("🔄 Checking TPU devices before initialization...")
+        try:
+            tpu_devices = tf.config.experimental.list_logical_devices('TPU')
+            logger.info(f"Found TPU devices: {tpu_devices}")
+        except:
+            logger.warning("Could not list TPU devices before initialization")
+        
         logger.info("🔄 Initializing TPU system...")
         tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
+        
+        logger.info("🔄 Checking TPU devices after initialization...")
+        try:
+            tpu_devices = tf.config.experimental.list_logical_devices('TPU')
+            logger.info(f"TPU devices after init: {tpu_devices}")
+            if not tpu_devices:
+                raise RuntimeError("No TPU devices found after initialization")
+        except Exception as e:
+            logger.error(f"TPU device check failed: {e}")
+            raise
         
         # Create TPU strategy after successful initialization
         strategy = tf.distribute.TPUStrategy(tpu_resolver)

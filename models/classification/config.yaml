@@ -1,7 +1,7 @@
 data:
   metadata_path: "data/classification/metadata.json" 
   image_size: [224, 224] 
-  batch_size: 64  # Optimized for TPU v3-8 (8 cores)
+  batch_size: 128  # Optimized for TPU v3-8 (8 cores × 16 per core)
   split_ratio: 0.2
   debug_max_total_samples: null # Disabled for production - use all samples
 
@@ -106,7 +106,7 @@ model:
 # Production Optimizer Configuration
 optimizer:
   name: "AdamW"
-  learning_rate: 0.05  # High but safer than 0.1
+  learning_rate: 0.02  # Scaled for TPU effective batch size (1024)
   weight_decay: 0.001  # Minimal regularization for testing
   clipnorm: 10.0  # Further increased for plateau escape
   
