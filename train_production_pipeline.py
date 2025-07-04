@@ -36,8 +36,7 @@ SEGMENTATION_CONFIG_PATH = "models/segmentation/config.yaml"
 
 def run_training_step(model_name: str, script_path: str, config_path: str) -> bool:
     """
-    Execute a training or export script. Uses direct execution for TPU training 
-    scripts and subprocess for others.
+    Execute a training or export script as a subprocess with robust error handling.
     
     Args:
         model_name: Human-readable name for the training step
@@ -49,23 +48,6 @@ def run_training_step(model_name: str, script_path: str, config_path: str) -> bo
     """
     logger.info(f"=== Starting {model_name} ===")
     
-    # Use direct execution for classification training (TPU compatibility)
-    if "classification" in script_path and "train.py" in script_path:
-        logger.info(f"Using direct execution for TPU compatibility")
-        try:
-            from models.classification.train import train_classification_direct
-            logger.info(f"Running classification training directly with config: {config_path}")
-            train_classification_direct(config_path, debug_mode=False)
-            logger.info(f"=== {model_name} completed successfully ===")
-            return True
-        except Exception as e:
-            logger.error(f"Direct execution failed for {model_name}: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
-    # Use subprocess for all other scripts (export, segmentation, etc.)
-    logger.info(f"Using subprocess execution")
     command = [sys.executable, script_path, "--config", config_path]
     logger.info(f"Executing: {' '.join(command)}")
     
