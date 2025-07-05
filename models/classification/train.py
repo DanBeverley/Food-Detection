@@ -189,12 +189,9 @@ def set_mixed_precision_policy(config: Dict, strategy: tf.distribute.Strategy):
 
         if policy_name:
             logger.info(f"Setting mixed precision policy to '{policy_name}'.")
-            if hasattr(tf.keras.mixed_precision, 'set_global_policy'):
-                policy = mixed_precision.Policy(policy_name)
-                mixed_precision.set_global_policy(policy)
-                logger.info(f"Using tf.keras.mixed_precision.set_global_policy. Compute dtype: {policy.compute_dtype}, Variable dtype: {policy.variable_dtype}")
-            else:
-                logger.warning(f"Could not set mixed precision policy. tf.keras.mixed_precision.set_global_policy API not found. Ensure TensorFlow/Keras version is compatible.")
+            mixed_precision.set_global_policy(policy_name)
+            policy = mixed_precision.global_policy()
+            logger.info(f"Mixed precision policy set. Compute dtype: {policy.compute_dtype}, Variable dtype: {policy.variable_dtype}")
     else:
         logger.info("Mixed precision training not enabled in config.")
 
@@ -511,11 +508,9 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         num_classes, 
         activation=output_activation, 
         kernel_regularizer=output_regularizer,
-        name='output_layer'
+        name='output_layer',
+        dtype=tf.float32
     )(x)
-    
-    # Cast to float32 for mixed precision compatibility with loss functions
-    outputs = tf.cast(outputs, tf.float32)
 
     # Determine model inputs
     if is_multimodal_enabled:
@@ -877,6 +872,13 @@ def train_model(model: models.Model,
     except Exception as e:
         logger.error(f"Error inspecting training data: {e}")
 
+    # Debug tensor dtypes before training
+    for batch in train_dataset.take(1):
+        inputs, targets = batch
+        logger.info(f"Dataset inputs dtype: {inputs.dtype}")
+        logger.info(f"Dataset targets dtype: {targets.dtype}")
+        break
+    
     logger.info("Starting model.fit()...")
     with strategy.scope():
         history = model.fit(
