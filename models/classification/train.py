@@ -926,6 +926,7 @@ def main(args):
     data_cfg = config.get('data', {})
     training_cfg = config.get('training', {})
     model_cfg = config.get('model', {})
+    optimizer_cfg = config.get('optimizer', {})
 
     # --- Determine if debug mode is active --- 
     cli_debug_active = args.debug
@@ -978,7 +979,7 @@ def main(args):
         # Set mixed precision policy within strategy scope
         set_mixed_precision_policy(config, strategy)
         
-        model = build_model(num_classes=num_classes, config=config, learning_rate_to_use=training_cfg.get('learning_rate', 0.001))
+        model = build_model(num_classes=num_classes, config=config, learning_rate_to_use=optimizer_cfg.get('learning_rate', 0.001))
     
     logger.info(f"Model built. Num classes: {num_classes}")
 
