@@ -225,6 +225,25 @@ class DetailedLoggingCallback(callbacks.Callback):
             print(log_message, flush=True)
 
 def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.Model:
+    # Custom model class to handle mixed precision loss computation
+    class CustomModel(tf.keras.Model):
+        def compute_loss(self, x=None, y=None, y_pred=None, sample_weight=None):
+            # This method overrides the default loss computation to handle mixed precision
+            
+            # 1. Compute the main loss from the compiled loss function.
+            # This will be float32 because of our MixedPrecisionLoss wrapper.
+            main_loss = super().compute_loss(x, y, y_pred, sample_weight)
+
+            # 2. self.losses contains the regularization penalties from the layers.
+            # In mixed precision, these are float16. We must cast and sum them.
+            if self.losses:
+                # Cast each regularization loss to float32 before summing
+                reg_loss = tf.add_n([tf.cast(loss, tf.float32) for loss in self.losses])
+                # Add the float32 regularization loss to the float32 main loss
+                return main_loss + reg_loss
+            else:
+                return main_loss
+    
     model_cfg = config.get('model', {})
     data_cfg = config.get('data', {})
     optimizer_cfg = config.get('optimizer', {})
@@ -531,7 +550,49 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     else:
         model_inputs = rgb_input_tensor # Single input: RGB only
 
-    model = models.Model(inputs=model_inputs, outputs=outputs)
+    # Custom model class to handle mixed precision regularization loss dtype conflicts
+    class CustomModel(tf.keras.Model):
+        def compute_loss(self, x=None, y=None, y_pred=None, sample_weight=None):
+            # The issue: Keras' parent compute_loss() tries to sum mixed dtype tensors
+            # Solution: Use the actual loss function directly, handle regularization separately
+            
+            if y is not None and y_pred is not None:
+                # 1. Cast inputs to float32 for consistent dtype
+                y_true = tf.cast(y, tf.float32)
+                y_pred = tf.cast(y_pred, tf.float32)
+                
+                # 2. Get the actual loss function from the compiled loss object
+                # This avoids recursion by not calling compute_loss methods
+                loss_fn = self.loss  # This should be our MixedPrecisionLoss wrapper
+                if loss_fn is not None:
+                    main_loss = loss_fn(y_true, y_pred)
+                    if sample_weight is not None:
+                        main_loss = main_loss * tf.cast(sample_weight, tf.float32)
+                    main_loss = tf.reduce_mean(tf.cast(main_loss, tf.float32))
+                else:
+                    # Fallback to categorical crossentropy
+                    main_loss = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
+                    main_loss = tf.reduce_mean(tf.cast(main_loss, tf.float32))
+                
+                # 3. Handle regularization losses separately
+                if self.losses:
+                    # Cast float16 regularization losses to float32 and sum them
+                    reg_loss = tf.add_n([tf.cast(loss, tf.float32) for loss in self.losses])
+                    return tf.cast(main_loss + reg_loss, tf.float32)
+                
+                return main_loss
+            else:
+                # Fallback case
+                return tf.constant(0.0, dtype=tf.float32)
+
+    # Check if we need to use CustomModel for mixed precision
+    training_cfg = config.get('training', {})
+    if training_cfg.get('use_mixed_precision') is True:
+        model = CustomModel(inputs=model_inputs, outputs=outputs)
+        logger.info("Created CustomModel for mixed precision training")
+    else:
+        model = models.Model(inputs=model_inputs, outputs=outputs)
+        logger.info("Created standard Model")
 
     # Optimizer setup
     optimizer_name = optimizer_cfg.get('name', 'AdamW')  # Default to AdamW
