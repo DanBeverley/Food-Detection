@@ -164,7 +164,7 @@ def initialize_strategy() -> tf.distribute.Strategy:
         return tf.distribute.get_strategy()
 
 def set_mixed_precision_policy(config: Dict, strategy: tf.distribute.Strategy):
-    if config.get('training', {}).get('use_mixed_precision', False):
+    if config.get('training', {}).get('use_mixed_precision') is True:
         policy_name = ''
         if isinstance(strategy, tf.distribute.TPUStrategy):
             policy_name = 'mixed_bfloat16'
@@ -511,7 +511,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         name='output_layer'
     )(x)
     
-    # No need to cast outputs when using LossScaleOptimizer
+    # No output casting needed when mixed precision is disabled
 
     # Determine model inputs
     if is_multimodal_enabled:
@@ -564,9 +564,9 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
             clipvalue=clipvalue
         )
     
-    # Apply loss scaling for mixed precision
+    # Apply loss scaling for mixed precision  
     training_cfg = config.get('training', {})
-    if training_cfg.get('use_mixed_precision', False):
+    if training_cfg.get('use_mixed_precision') is True:
         optimizer_instance = mixed_precision.LossScaleOptimizer(optimizer_instance)
         logger.info("Applied loss scaling for mixed precision training")
     
@@ -713,7 +713,7 @@ def _get_metrics(metrics_cfg: List[str], num_classes: int, multilabel: bool, con
             metric_class = getattr(metrics, metric_name)
             if callable(metric_class):
                 training_cfg = config.get('training', {})
-                if training_cfg.get('use_mixed_precision', False) and metric_name.lower() in ['precision', 'recall']:
+                if training_cfg.get('use_mixed_precision') is True and metric_name.lower() in ['precision', 'recall']:
                     compiled_metrics.append(metric_class(dtype=tf.float32))
                 else:
                     compiled_metrics.append(metric_class())

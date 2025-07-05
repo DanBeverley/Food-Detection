@@ -1,7 +1,7 @@
 data:
   metadata_path: "data/classification/metadata.json" 
   image_size: [224, 224] 
-  batch_size: 1024  # Optimized for TPU v3-8 (8 cores × 128 per core)
+  batch_size: 512
   split_ratio: 0.2
   debug_max_total_samples: null # Disabled for production - use all samples
 
@@ -134,7 +134,7 @@ metrics: ["accuracy", "precision", "recall"]
 training:
   epochs: 30 
   debug_epochs: 3  
-  use_mixed_precision: true
+  use_mixed_precision: false
   use_tpu: true  
   
   # Class weights for imbalanced datasets
