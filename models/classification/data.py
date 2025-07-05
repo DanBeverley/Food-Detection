@@ -596,7 +596,7 @@ def load_classification_data(
                 if actual_buffer_size > 0 : # Ensure buffer_size is positive
                     dataset = dataset.shuffle(actual_buffer_size, seed=data_config.get('random_seed', None))
             
-            dataset = dataset.batch(batch_size)
+            dataset = dataset.batch(batch_size, drop_remainder=True)
             
             # Convert integer labels to one-hot encoding
             def convert_to_one_hot(images, labels):
