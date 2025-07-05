@@ -511,10 +511,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         name='output_layer'
     )(x)
     
-    # Cast to float32 for loss computation when using mixed precision
-    training_cfg = config.get('training', {})
-    if training_cfg.get('use_mixed_precision', False):
-        outputs = layers.Lambda(lambda x: tf.cast(x, tf.float32), name='cast_to_float32')(outputs)
+    # No need to cast outputs when using LossScaleOptimizer
 
     # Determine model inputs
     if is_multimodal_enabled:
@@ -566,6 +563,11 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
             clipnorm=clipnorm,
             clipvalue=clipvalue
         )
+    
+    # Apply loss scaling for mixed precision
+    if training_cfg.get('use_mixed_precision', False):
+        optimizer_instance = mixed_precision.LossScaleOptimizer(optimizer_instance)
+        logger.info("Applied loss scaling for mixed precision training")
     
     # Log gradient clipping configuration
     if clipnorm is not None:
