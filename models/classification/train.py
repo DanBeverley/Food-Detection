@@ -13,6 +13,16 @@ from pathlib import Path # Added import
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'  # Reduce TensorFlow logging
 
 import tensorflow as tf
+
+# Configure GPU memory growth before any TensorFlow operations
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError as e:
+        print(f"GPU memory growth configuration failed: {e}")
+
 from tensorflow.keras import models, layers, optimizers, losses, callbacks, applications, metrics
 from tensorflow.keras.applications import mobilenet_v2, mobilenet_v3, efficientnet_v2, convnext
 from tensorflow.keras import mixed_precision
@@ -148,10 +158,7 @@ def initialize_strategy() -> tf.distribute.Strategy:
     # Fallback to GPU/CPU
     logger.info("TPU initialization failed, falling back to GPU/CPU")
     gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        
+    if gpus:        
         if len(gpus) > 1:
             strategy = tf.distribute.MirroredStrategy()
             logger.info(f"Multi-GPU strategy: {len(gpus)} GPUs")
