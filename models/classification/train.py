@@ -1,4 +1,3 @@
-print("<<<<< EXECUTING LATEST train.py - TOP OF FILE >>>>>", flush=True)
 
 import yaml
 import argparse
@@ -9,47 +8,168 @@ import traceback
 from datetime import datetime
 from pathlib import Path # Added import
 
+# TPU-specific imports and configuration
+# Allow TPU library loading in subprocess context
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'  # Reduce TensorFlow logging
+
 import tensorflow as tf
+
+# Configure GPU memory growth before any TensorFlow operations
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError as e:
+        print(f"GPU memory growth configuration failed: {e}")
+
 from tensorflow.keras import models, layers, optimizers, losses, callbacks, applications, metrics
 from tensorflow.keras.applications import mobilenet_v2, mobilenet_v3, efficientnet_v2, convnext
 from tensorflow.keras import mixed_precision
+from tensorflow.keras import backend as K
+
+class DebugCallback(tf.keras.callbacks.Callback):
+    def __init__(self):
+        super().__init__()
+        self.batch_count = 0
+        
+    def on_train_batch_end(self, batch, logs=None):
+        self.batch_count += 1
+        if self.batch_count % 100 == 0:
+            current_loss = logs.get('loss', 0)
+            current_acc = logs.get('categorical_accuracy', 0)
+            logger.info(f"Batch {self.batch_count}: Loss={current_loss:.4f}, Acc={current_acc:.4f}")
+            
+            # Check learning rate more robustly
+            try:
+                # K.get_value is safer for retrieving tensor values
+                lr_val = K.get_value(self.model.optimizer.learning_rate)
+                logger.info(f"Learning Rate: {float(lr_val)}")
+            except Exception as e:
+                logger.warning(f"Could not retrieve learning rate: {e}")
 
 from typing import Dict, Tuple, Any, List, Optional
 
+# Configure TensorFlow for TPU compatibility
+try:
+    tf.config.experimental.enable_tensor_float_32(False)  # Disable TF32 for TPU compatibility
+except AttributeError:
+    # TF32 control not available in this TensorFlow version
+    pass
+
 logger = logging.getLogger(__name__)
 
-def initialize_strategy() -> tf.distribute.Strategy:
+def diagnose_tpu_environment():
+    """Diagnose TPU environment and configuration"""
+    import os
+    
+    logger.info("=== TPU Environment Diagnostics ===")
+    
+    # Check environment variables
+    tpu_vars = ['TPU_NAME', 'TPU_LOAD_LIBRARY', 'COLAB_TPU_ADDR', 'KFAC_DEVICE']
+    for var in tpu_vars:
+        value = os.environ.get(var)
+        logger.info(f"{var}: {value}")
+    
+    # Check TensorFlow TPU devices
     try:
-        tpu_resolver = tf.distribute.cluster_resolver.TPUClusterResolver.connect()
-        if tpu_resolver:
-            logger.info(f'Running on TPU: {tpu_resolver.master()}')
-            tf.config.experimental_connect_to_cluster(tpu_resolver)
-            tf.tpu.experimental.initialize_tpu_system(tpu_resolver)
-            strategy = tf.distribute.TPUStrategy(tpu_resolver)
-            logger.info(f"TPU strategy initialized with {strategy.num_replicas_in_sync} replicas.")
-            return strategy
-    except ValueError as e:
-        logger.info(f"TPU not found or error connecting: {e}. Checking for GPUs.")
+        tpu_devices = tf.config.experimental.list_physical_devices('TPU')
+        logger.info(f"TPU devices detected: {tpu_devices}")
     except Exception as e:
-        logger.error(f"An unexpected error occurred during TPU initialization: {e}. Checking for GPUs.")
+        logger.info(f"TPU device detection failed: {e}")
+    
+    logger.info("=== End TPU Diagnostics ===")
 
+def initialize_strategy() -> tf.distribute.Strategy:
+    import os
+    import time
+    
+    logger.info("Initializing distributed strategy...")
+    
+    # Diagnose TPU environment first
+    diagnose_tpu_environment()
+    
+    # Clear TensorFlow session for subprocess compatibility
+    tf.keras.backend.clear_session()
+    
+    # Check for TPU environment variables first
+    tpu_name = os.environ.get('TPU_NAME')
+    colab_tpu_addr = os.environ.get('COLAB_TPU_ADDR')
+    
+    if tpu_name:
+        logger.info(f"TPU_NAME environment variable found: {tpu_name}")
+        resolver_address = tpu_name
+    elif colab_tpu_addr:
+        logger.info(f"COLAB_TPU_ADDR found: {colab_tpu_addr}")
+        resolver_address = colab_tpu_addr
+    else:
+        # For Kaggle TPU, try empty string first (standard approach)
+        resolver_address = ''
+        logger.info("No TPU environment variables found, trying empty string resolver for Kaggle TPU")
+    
+    # Try TPU detection with retry mechanism
+    for attempt in range(3):
+        try:
+            logger.info(f"TPU initialization attempt {attempt + 1}/3")
+            resolver = tf.distribute.cluster_resolver.TPUClusterResolver(resolver_address)
+            logger.info(f"TPU resolver created: {resolver}")
+            
+            tf.config.experimental_connect_to_cluster(resolver)
+            logger.info("Successfully connected to TPU cluster")
+            
+            tf.tpu.experimental.initialize_tpu_system(resolver)
+            logger.info("TPU system initialized")
+            
+            strategy = tf.distribute.TPUStrategy(resolver)
+            logger.info(f"TPU strategy initialized with {strategy.num_replicas_in_sync} replicas")
+            return strategy
+            
+        except Exception as e:
+            logger.info(f"TPU initialization attempt {attempt + 1} failed: {e}")
+            if attempt < 2:  # Don't sleep on last attempt
+                time.sleep(2)
+    
+    # If TPU fails, try alternative resolver addresses
+    if resolver_address == '':
+        try:
+            logger.info("Trying 'local' resolver as fallback")
+            resolver = tf.distribute.cluster_resolver.TPUClusterResolver('local')
+            tf.config.experimental_connect_to_cluster(resolver)
+            tf.tpu.experimental.initialize_tpu_system(resolver)
+            strategy = tf.distribute.TPUStrategy(resolver)
+            logger.info(f"TPU strategy initialized with fallback resolver: {strategy.num_replicas_in_sync} replicas")
+            return strategy
+        except Exception as e:
+            logger.info(f"TPU fallback initialization failed: {e}")
+    elif resolver_address == 'local':
+        try:
+            logger.info("Trying empty string resolver as fallback")
+            resolver = tf.distribute.cluster_resolver.TPUClusterResolver('')
+            tf.config.experimental_connect_to_cluster(resolver)
+            tf.tpu.experimental.initialize_tpu_system(resolver)
+            strategy = tf.distribute.TPUStrategy(resolver)
+            logger.info(f"TPU strategy initialized with fallback resolver: {strategy.num_replicas_in_sync} replicas")
+            return strategy
+        except Exception as e:
+            logger.info(f"TPU fallback initialization failed: {e}")
+    
+    # Fallback to GPU/CPU
+    logger.info("TPU initialization failed, falling back to GPU/CPU")
     gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
-        logger.info(f"Found GPUs: {gpus}")
-        tf.config.experimental.set_visible_devices(gpus[0], 'GPU')
-        tf.config.experimental.set_memory_growth(gpus[0], True)
-        logger.info(f"Restricted TensorFlow to use GPU: {gpus[0].name} and enabled memory growth.")
-        strategy = tf.distribute.get_strategy()
-        logger.info(f"Using default strategy (CPU or single GPU): {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
+    if gpus:        
+        if len(gpus) > 1:
+            strategy = tf.distribute.MirroredStrategy()
+            logger.info(f"Multi-GPU strategy: {len(gpus)} GPUs")
+        else:
+            strategy = tf.distribute.get_strategy()
+            logger.info(f"Single GPU strategy")
         return strategy
     else:
-        logger.warning("No GPUs found by TensorFlow. Training will use CPU.")
-        strategy = tf.distribute.get_strategy()
-        logger.info(f"Using default strategy (CPU): {strategy.__class__.__name__} with {strategy.num_replicas_in_sync} replicas.")
-        return strategy
+        logger.info("Using CPU strategy")
+        return tf.distribute.get_strategy()
 
 def set_mixed_precision_policy(config: Dict, strategy: tf.distribute.Strategy):
-    if config.get('training', {}).get('use_mixed_precision', False):
+    if config.get('training', {}).get('use_mixed_precision') is True:
         policy_name = ''
         if isinstance(strategy, tf.distribute.TPUStrategy):
             policy_name = 'mixed_bfloat16'
@@ -74,12 +194,9 @@ def set_mixed_precision_policy(config: Dict, strategy: tf.distribute.Strategy):
 
         if policy_name:
             logger.info(f"Setting mixed precision policy to '{policy_name}'.")
-            if hasattr(tf.keras.mixed_precision, 'set_global_policy'):
-                policy = mixed_precision.Policy(policy_name)
-                mixed_precision.set_global_policy(policy)
-                logger.info(f"Using tf.keras.mixed_precision.set_global_policy. Compute dtype: {policy.compute_dtype}, Variable dtype: {policy.variable_dtype}")
-            else:
-                logger.warning(f"Could not set mixed precision policy. tf.keras.mixed_precision.set_global_policy API not found. Ensure TensorFlow/Keras version is compatible.")
+            mixed_precision.set_global_policy(policy_name)
+            policy = mixed_precision.global_policy()
+            logger.info(f"Mixed precision policy set. Compute dtype: {policy.compute_dtype}, Variable dtype: {policy.variable_dtype}")
     else:
         logger.info("Mixed precision training not enabled in config.")
 
@@ -108,6 +225,25 @@ class DetailedLoggingCallback(callbacks.Callback):
             print(log_message, flush=True)
 
 def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.Model:
+    # Custom model class to handle mixed precision loss computation
+    class CustomModel(tf.keras.Model):
+        def compute_loss(self, x=None, y=None, y_pred=None, sample_weight=None):
+            # This method overrides the default loss computation to handle mixed precision
+            
+            # 1. Compute the main loss from the compiled loss function.
+            # This will be float32 because of our MixedPrecisionLoss wrapper.
+            main_loss = super().compute_loss(x, y, y_pred, sample_weight)
+
+            # 2. self.losses contains the regularization penalties from the layers.
+            # In mixed precision, these are float16. We must cast and sum them.
+            if self.losses:
+                # Cast each regularization loss to float32 before summing
+                reg_loss = tf.add_n([tf.cast(loss, tf.float32) for loss in self.losses])
+                # Add the float32 regularization loss to the float32 main loss
+                return main_loss + reg_loss
+            else:
+                return main_loss
+    
     model_cfg = config.get('model', {})
     data_cfg = config.get('data', {})
     optimizer_cfg = config.get('optimizer', {})
@@ -175,12 +311,20 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     rgb_base_model = base_model_class(include_top=False, input_shape=rgb_input_shape, weights=weights)
     
     rgb_base_model.trainable = fine_tune_rgb
-    if fine_tune_rgb and fine_tune_layers_rgb > 0:
-        for layer in rgb_base_model.layers[:-fine_tune_layers_rgb]:
-            layer.trainable = False
-        for layer in rgb_base_model.layers[-fine_tune_layers_rgb:]:
+    if fine_tune_rgb and fine_tune_layers_rgb == -1:
+        # Unfreeze ALL layers
+        logger.info(f"RGB Fine-tuning: Unfreezing ALL layers of {architecture}.")
+        for layer in rgb_base_model.layers:
             layer.trainable = True
-        logger.info(f"RGB Fine-tuning: Unfreezing the top {fine_tune_layers_rgb} layers of {architecture}.")
+    elif fine_tune_rgb and fine_tune_layers_rgb > 0:
+        # Unfreeze only top N layers
+        total_layers = len(rgb_base_model.layers)
+        actual_layers_to_unfreeze = min(fine_tune_layers_rgb, total_layers)
+        for layer in rgb_base_model.layers[:-actual_layers_to_unfreeze]:
+            layer.trainable = False
+        for layer in rgb_base_model.layers[-actual_layers_to_unfreeze:]:
+            layer.trainable = True
+        logger.info(f"RGB Fine-tuning: Unfreezing the top {actual_layers_to_unfreeze}/{total_layers} layers of {architecture}.")
     elif fine_tune_rgb:
         logger.info(f"RGB Fine-tuning: Unfreezing all layers of {architecture}.")
         for layer in rgb_base_model.layers:
@@ -189,6 +333,11 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         logger.info(f"RGB Feature Extraction: Freezing all layers of {architecture}.")
         for layer in rgb_base_model.layers:
             layer.trainable = False
+    
+    # Debug: Count trainable parameters
+    trainable_count = sum([1 for layer in rgb_base_model.layers if layer.trainable])
+    total_count = len(rgb_base_model.layers)
+    logger.info(f"RGB backbone: {trainable_count}/{total_count} layers are trainable")
 
     rgb_features_map = rgb_base_model(preprocessed_rgb)
 
@@ -385,6 +534,12 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         kernel_regularizer=output_regularizer,
         name='output_layer'
     )(x)
+    
+    # Cast output to float32 for loss computation when using mixed precision
+    training_cfg = config.get('training', {})
+    if training_cfg.get('use_mixed_precision') is True:
+        # Use explicit float32 casting for mixed precision compatibility
+        outputs = layers.Activation('linear', dtype=tf.float32, name='cast_to_float32')(outputs)
 
     # Determine model inputs
     if is_multimodal_enabled:
@@ -395,7 +550,49 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     else:
         model_inputs = rgb_input_tensor # Single input: RGB only
 
-    model = models.Model(inputs=model_inputs, outputs=outputs)
+    # Custom model class to handle mixed precision regularization loss dtype conflicts
+    class CustomModel(tf.keras.Model):
+        def compute_loss(self, x=None, y=None, y_pred=None, sample_weight=None):
+            # The issue: Keras' parent compute_loss() tries to sum mixed dtype tensors
+            # Solution: Use the actual loss function directly, handle regularization separately
+            
+            if y is not None and y_pred is not None:
+                # 1. Cast inputs to float32 for consistent dtype
+                y_true = tf.cast(y, tf.float32)
+                y_pred = tf.cast(y_pred, tf.float32)
+                
+                # 2. Get the actual loss function from the compiled loss object
+                # This avoids recursion by not calling compute_loss methods
+                loss_fn = self.loss  # This should be our MixedPrecisionLoss wrapper
+                if loss_fn is not None:
+                    main_loss = loss_fn(y_true, y_pred)
+                    if sample_weight is not None:
+                        main_loss = main_loss * tf.cast(sample_weight, tf.float32)
+                    main_loss = tf.reduce_mean(tf.cast(main_loss, tf.float32))
+                else:
+                    # Fallback to categorical crossentropy
+                    main_loss = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
+                    main_loss = tf.reduce_mean(tf.cast(main_loss, tf.float32))
+                
+                # 3. Handle regularization losses separately
+                if self.losses:
+                    # Cast float16 regularization losses to float32 and sum them
+                    reg_loss = tf.add_n([tf.cast(loss, tf.float32) for loss in self.losses])
+                    return tf.cast(main_loss + reg_loss, tf.float32)
+                
+                return main_loss
+            else:
+                # Fallback case
+                return tf.constant(0.0, dtype=tf.float32)
+
+    # Check if we need to use CustomModel for mixed precision
+    training_cfg = config.get('training', {})
+    if training_cfg.get('use_mixed_precision') is True:
+        model = CustomModel(inputs=model_inputs, outputs=outputs)
+        logger.info("Created CustomModel for mixed precision training")
+    else:
+        model = models.Model(inputs=model_inputs, outputs=outputs)
+        logger.info("Created standard Model")
 
     # Optimizer setup
     optimizer_name = optimizer_cfg.get('name', 'AdamW')  # Default to AdamW
@@ -437,6 +634,12 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
             clipvalue=clipvalue
         )
     
+    # Apply loss scaling for mixed precision  
+    training_cfg = config.get('training', {})
+    if training_cfg.get('use_mixed_precision') is True:
+        optimizer_instance = mixed_precision.LossScaleOptimizer(optimizer_instance)
+        logger.info("Applied loss scaling for mixed precision training")
+    
     # Log gradient clipping configuration
     if clipnorm is not None:
         logger.info(f"Applied gradient clipping with clipnorm={clipnorm}")
@@ -466,6 +669,43 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     model.compile(optimizer=optimizer_instance, loss=selected_loss, metrics=compiled_metrics)
     
     logger.info(f"Model compiled with optimizer: {optimizer_name}, loss: {loss_function_name}, metrics: {[m.name if hasattr(m, 'name') else str(m) for m in compiled_metrics]}.")
+    
+    # Check trainable parameters
+    total_params = model.count_params()
+    trainable_params = sum([tf.keras.backend.count_params(w) for w in model.trainable_weights])
+    logger.info(f"Total parameters: {total_params:,}")
+    logger.info(f"Trainable parameters: {trainable_params:,}")
+    
+    if trainable_params == 0:
+        logger.error("Model has 0 trainable parameters - all layers are frozen")
+        return
+    
+    # Test forward pass
+    logger.info("Testing forward pass...")
+    try:
+        dummy_batch = tf.random.normal((2, 224, 224, 3))
+        dummy_output = model(dummy_batch, training=False)
+        logger.info(f"Forward pass successful. Output shape: {dummy_output.shape}")
+        
+        # Check if output is always the same (indicating frozen model)
+        dummy_output2 = model(dummy_batch, training=False)
+        outputs_identical = tf.reduce_all(tf.equal(dummy_output, dummy_output2))
+        logger.info(f"Repeated calls identical: {outputs_identical}")
+        
+        # CRITICAL: Check optimizer learning rate
+        actual_lr = model.optimizer.learning_rate
+        if hasattr(actual_lr, 'numpy'):
+            actual_lr_value = actual_lr.numpy()
+        else:
+            actual_lr_value = actual_lr
+        logger.info(f"Optimizer LR: {actual_lr_value}, Type: {type(model.optimizer).__name__}")
+        
+        if actual_lr_value < 1e-8:
+            logger.error(f"CRITICAL: Learning rate is too small: {actual_lr_value}")
+        
+    except Exception as e:
+        logger.error(f"Forward pass failed: {e}")
+        return
     
     # Optionally print model summary
     if model_cfg.get('print_summary', True):
@@ -498,19 +738,79 @@ def _create_optimizer(optimizer_name: str, learning_rate: float, clipnorm: Optio
 
 
 def _get_loss_function(loss_function_name: str, loss_params: Dict, num_classes: int, config: Dict) -> losses.Loss:
+    # Check if mixed precision is enabled
+    training_cfg = config.get('training', {})
+    reduction = tf.keras.losses.Reduction.AUTO
+    if training_cfg.get('use_mixed_precision') is True:
+        # Use SUM_OVER_BATCH_SIZE for mixed precision compatibility
+        reduction = tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
+    
     if loss_function_name.lower() == 'categoricalcrossentropy' or loss_function_name.lower() == 'categorical_crossentropy':
-        loss_instance = losses.CategoricalCrossentropy(
+        # Create a custom loss wrapper for mixed precision compatibility
+        base_loss = losses.CategoricalCrossentropy(
             label_smoothing=loss_params.get('label_smoothing', 0.0),
-            from_logits=loss_params.get('from_logits', False) # Usually False if softmax is last layer
+            from_logits=loss_params.get('from_logits', False), # Usually False if softmax is last layer
+            reduction=reduction
         )
+        
+        if training_cfg.get('use_mixed_precision') is True:
+            # Wrap loss to ensure dtype compatibility
+            class MixedPrecisionLoss(tf.keras.losses.Loss):
+                def __init__(self, base_loss):
+                    super().__init__(name=base_loss.name, reduction=base_loss.reduction)
+                    self.base_loss = base_loss
+                
+                def call(self, y_true, y_pred):
+                    # Ensure both tensors are float32 for loss computation
+                    y_true = tf.cast(y_true, tf.float32)
+                    y_pred = tf.cast(y_pred, tf.float32)
+                    return self.base_loss(y_true, y_pred)
+            
+            loss_instance = MixedPrecisionLoss(base_loss)
+        else:
+            loss_instance = base_loss
     elif loss_function_name.lower() == 'sparsecategoricalcrossentropy' or loss_function_name.lower() == 'sparse_categorical_crossentropy':
         # This branch should ideally not be hit if MixUp/CutMix are used, but handle for completeness
-        loss_instance = losses.SparseCategoricalCrossentropy(
-            from_logits=loss_params.get('from_logits', False)
+        base_loss = losses.SparseCategoricalCrossentropy(
+            from_logits=loss_params.get('from_logits', False),
+            reduction=reduction
         )
+        
+        if training_cfg.get('use_mixed_precision') is True:
+            class MixedPrecisionSparseLoss(tf.keras.losses.Loss):
+                def __init__(self, base_loss):
+                    super().__init__(name=base_loss.name, reduction=base_loss.reduction)
+                    self.base_loss = base_loss
+                
+                def call(self, y_true, y_pred):
+                    y_true = tf.cast(y_true, tf.float32)
+                    y_pred = tf.cast(y_pred, tf.float32)
+                    return self.base_loss(y_true, y_pred)
+            
+            loss_instance = MixedPrecisionSparseLoss(base_loss)
+        else:
+            loss_instance = base_loss
     else:
         logger.error(f"Unsupported loss function: {loss_function_name}. Defaulting to CategoricalCrossentropy.")
-        loss_instance = losses.CategoricalCrossentropy(label_smoothing=loss_params.get('label_smoothing', 0.0))
+        base_loss = losses.CategoricalCrossentropy(
+            label_smoothing=loss_params.get('label_smoothing', 0.0),
+            reduction=reduction
+        )
+        
+        if training_cfg.get('use_mixed_precision') is True:
+            class MixedPrecisionLoss(tf.keras.losses.Loss):
+                def __init__(self, base_loss):
+                    super().__init__(name=base_loss.name, reduction=base_loss.reduction)
+                    self.base_loss = base_loss
+                
+                def call(self, y_true, y_pred):
+                    y_true = tf.cast(y_true, tf.float32)
+                    y_pred = tf.cast(y_pred, tf.float32)
+                    return self.base_loss(y_true, y_pred)
+            
+            loss_instance = MixedPrecisionLoss(base_loss)
+        else:
+            loss_instance = base_loss
 
     return loss_instance
 
@@ -521,18 +821,36 @@ def _get_metrics(metrics_cfg: List[str], num_classes: int, multilabel: bool, con
         if metric_name.lower() == 'accuracy':
             # If using CategoricalCrossentropy, CategoricalAccuracy is more appropriate.
             # 'accuracy' can sometimes alias to SparseCategoricalAccuracy depending on context.
-            compiled_metrics.append(metrics.CategoricalAccuracy(name='categorical_accuracy'))
+            training_cfg = config.get('training', {})
+            if training_cfg.get('use_mixed_precision') is True:
+                compiled_metrics.append(metrics.CategoricalAccuracy(name='categorical_accuracy', dtype=tf.float32))
+            else:
+                compiled_metrics.append(metrics.CategoricalAccuracy(name='categorical_accuracy'))
             logger.info("Using CategoricalAccuracy metric (aliased from 'accuracy').")
         elif metric_name.lower() == 'top_5_accuracy':
-            compiled_metrics.append(metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy'))
-            logger.info("Using TopKCategoricalAccuracy metric for top_5_accuracy.")
+            # Skip TopK metrics when using mixed precision due to dtype incompatibility
+            training_cfg = config.get('training', {})
+            if training_cfg.get('use_mixed_precision') is True:
+                logger.warning("Skipping top_5_accuracy metric due to mixed precision dtype incompatibility")
+            else:
+                compiled_metrics.append(metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy'))
+                logger.info("Using TopKCategoricalAccuracy metric for top_5_accuracy.")
         elif metric_name.lower() == 'top_3_accuracy':
-            compiled_metrics.append(metrics.TopKCategoricalAccuracy(k=3, name='top_3_accuracy'))
-            logger.info("Using TopKCategoricalAccuracy metric for top_3_accuracy.")
+            # Skip TopK metrics when using mixed precision due to dtype incompatibility
+            training_cfg = config.get('training', {})
+            if training_cfg.get('use_mixed_precision') is True:
+                logger.warning("Skipping top_3_accuracy metric due to mixed precision dtype incompatibility")
+            else:
+                compiled_metrics.append(metrics.TopKCategoricalAccuracy(k=3, name='top_3_accuracy'))
+                logger.info("Using TopKCategoricalAccuracy metric for top_3_accuracy.")
         elif hasattr(metrics, metric_name):
             metric_class = getattr(metrics, metric_name)
             if callable(metric_class):
-                compiled_metrics.append(metric_class())
+                training_cfg = config.get('training', {})
+                if training_cfg.get('use_mixed_precision') is True and metric_name.lower() in ['precision', 'recall']:
+                    compiled_metrics.append(metric_class(dtype=tf.float32))
+                else:
+                    compiled_metrics.append(metric_class())
                 logger.info(f"Using {metric_name} metric.")
             else:
                 logger.warning(f"Metric {metric_name} is not callable. Skipping.")
@@ -568,6 +886,11 @@ def train_model(model: models.Model,
     callbacks = []
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     
+    # Add debug callback to monitor gradient flow
+    debug_callback = DebugCallback()
+    callbacks.append(debug_callback)
+    logger.info("Added debug callback to monitor gradient flow")
+    
     # Model Checkpoint
     checkpoint_dir_rel = paths_cfg.get('checkpoint_dir', f'trained_models/classification/checkpoints_{timestamp}')
     checkpoint_dir = project_root / checkpoint_dir_rel
@@ -578,13 +901,19 @@ def train_model(model: models.Model,
     
     save_best_only = training_cfg.get('callbacks', {}).get('model_checkpoint', {}).get('save_best_only', True)
     save_weights_only = training_cfg.get('callbacks', {}).get('model_checkpoint', {}).get('save_weights_only', True)
-    monitor_metric = training_cfg.get('callbacks', {}).get('model_checkpoint', {}).get('monitor', 'val_loss')
+    
+    # Use float32-safe accuracy metric instead of potentially float16 loss
+    training_cfg_inner = config.get('training', {})
+    if training_cfg_inner.get('use_mixed_precision') is True:
+        monitor_metric = training_cfg.get('callbacks', {}).get('model_checkpoint', {}).get('monitor', 'val_categorical_accuracy')
+    else:
+        monitor_metric = training_cfg.get('callbacks', {}).get('model_checkpoint', {}).get('monitor', 'val_loss')
 
     model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
         filepath=str(checkpoint_filepath),
         save_weights_only=save_weights_only,
         monitor=monitor_metric,
-        mode='min' if 'loss' in monitor_metric else 'max',
+        mode='max' if 'accuracy' in monitor_metric else 'min',
         save_best_only=save_best_only,
         verbose=1)
     callbacks.append(model_checkpoint_callback)
@@ -593,12 +922,18 @@ def train_model(model: models.Model,
     # Early Stopping
     early_stopping_cfg = training_cfg.get('callbacks', {}).get('early_stopping', {})
     if early_stopping_cfg.get('enabled', True):
-        early_stopping_monitor = early_stopping_cfg.get('monitor', 'val_loss')
+        # Use float32-safe accuracy metric for mixed precision
+        if training_cfg_inner.get('use_mixed_precision') is True:
+            early_stopping_monitor = early_stopping_cfg.get('monitor', 'val_categorical_accuracy')
+        else:
+            early_stopping_monitor = early_stopping_cfg.get('monitor', 'val_loss')
+            
         early_stopping_patience = early_stopping_cfg.get('patience', 10)
         early_stopping_callback = tf.keras.callbacks.EarlyStopping(
             monitor=early_stopping_monitor,
             patience=early_stopping_patience,
             verbose=1,
+            mode='max' if 'accuracy' in early_stopping_monitor else 'min',
             restore_best_weights=early_stopping_cfg.get('restore_best_weights', True))
         callbacks.append(early_stopping_callback)
         logger.info(f"EarlyStopping configured: monitor='{early_stopping_monitor}', patience={early_stopping_patience}")
@@ -606,7 +941,12 @@ def train_model(model: models.Model,
     # ReduceLROnPlateau
     reduce_lr_cfg = training_cfg.get('callbacks', {}).get('reduce_lr_on_plateau', {})
     if reduce_lr_cfg.get('enabled', True):
-        reduce_lr_monitor = reduce_lr_cfg.get('monitor', 'val_loss')
+        # Use float32-safe accuracy metric for mixed precision
+        if training_cfg_inner.get('use_mixed_precision') is True:
+            reduce_lr_monitor = reduce_lr_cfg.get('monitor', 'val_categorical_accuracy')
+        else:
+            reduce_lr_monitor = reduce_lr_cfg.get('monitor', 'val_loss')
+            
         reduce_lr_factor = reduce_lr_cfg.get('factor', 0.2)
         reduce_lr_patience = reduce_lr_cfg.get('patience', 5)
         reduce_lr_callback = tf.keras.callbacks.ReduceLROnPlateau(
@@ -614,6 +954,7 @@ def train_model(model: models.Model,
             factor=reduce_lr_factor,
             patience=reduce_lr_patience,
             verbose=1,
+            mode='max' if 'accuracy' in reduce_lr_monitor else 'min',
             min_lr=reduce_lr_cfg.get('min_lr', 1e-7))
         callbacks.append(reduce_lr_callback)
         logger.info(f"ReduceLROnPlateau configured: monitor='{reduce_lr_monitor}', factor={reduce_lr_factor}, patience={reduce_lr_patience}")
@@ -661,17 +1002,135 @@ def train_model(model: models.Model,
         logger.info("No initial weights path specified. Training from scratch or with backbone's pre-trained weights.")
 
 
+    # Inspect training data
+    logger.info("Inspecting training data samples...")
+    try:
+        sample_count = 0
+        batch_hashes = []
+        for batch_inputs, batch_labels in train_dataset.take(3):
+            sample_count += 1
+            # Compute hash of batch to detect repetition
+            if isinstance(batch_inputs, dict):
+                batch_hash = hash(str(batch_inputs['rgb_input'].numpy().mean()))
+            else:
+                batch_hash = hash(str(batch_inputs.numpy().mean()))
+            batch_hashes.append(batch_hash)
+            
+            logger.info(f"Batch {sample_count} - Input: {batch_inputs.shape if hasattr(batch_inputs, 'shape') else 'dict'}, Labels: {batch_labels.shape}")
+            label_classes = tf.argmax(batch_labels, axis=1)
+            unique_labels = tf.unique(label_classes)[0]
+            logger.info(f"Batch {sample_count} - Label classes: {len(unique_labels)} unique")
+            
+            if len(unique_labels) == 1:
+                logger.warning(f"All labels in batch {sample_count} are identical (class: {unique_labels[0].numpy()})")
+            
+            label_sum = tf.reduce_sum(label_classes)
+            logger.info(f"Batch {sample_count} - Label sum: {label_sum.numpy()}")
+        
+        if len(set(batch_hashes)) == 1:
+            logger.error("All batches have identical hashes - data pipeline may be stuck")
+        else:
+            logger.info("Batches have different hashes - data pipeline OK")
+            
+    except Exception as e:
+        logger.error(f"Error inspecting training data: {e}")
+
+    # Debug tensor dtypes before training
+    for batch in train_dataset.take(1):
+        inputs, targets = batch
+        logger.info(f"Dataset inputs dtype: {inputs.dtype}")
+        logger.info(f"Dataset targets dtype: {targets.dtype}")
+        break
+    
     logger.info("Starting model.fit()...")
-    history = model.fit(
-        train_dataset,
-        epochs=epochs,  
-        validation_data=val_dataset,
-        callbacks=callbacks,
-        steps_per_epoch=steps_per_epoch, 
-        validation_steps=validation_steps, 
-        verbose=training_cfg.get('verbose', 1),
-        initial_epoch=initial_epoch
-    )
+    
+    # Enhanced logging for dtype debugging
+    try:
+        logger.info("=== DTYPE DEBUGGING INFO ===")
+        logger.info(f"Mixed precision policy: {tf.keras.mixed_precision.global_policy().name}")
+        logger.info(f"Model input dtype: {model.input.dtype}")
+        logger.info(f"Model output dtype: {model.output.dtype}")
+        
+        # Test a single batch to isolate the error
+        logger.info("Testing single batch prediction...")
+        test_batch = train_dataset.take(1)
+        for test_images, test_labels in test_batch:
+            logger.info(f"Test batch input dtype: {test_images.dtype}")
+            logger.info(f"Test batch label dtype: {test_labels.dtype}")
+            
+            # Test forward pass
+            try:
+                test_pred = model(test_images, training=False)
+                logger.info(f"Test prediction dtype: {test_pred.dtype}")
+                logger.info("Forward pass successful")
+            except Exception as forward_error:
+                logger.error(f"Forward pass failed: {forward_error}")
+                raise
+                
+            # Test loss computation
+            try:
+                test_loss = model.compute_loss(test_images, test_labels, test_pred)
+                logger.info(f"Test loss dtype: {test_loss.dtype}")
+                logger.info("Loss computation successful")
+            except Exception as loss_error:
+                logger.error(f"Loss computation failed: {loss_error}")
+                raise
+                
+            # Test metrics computation
+            try:
+                for metric in model.metrics:
+                    if hasattr(metric, 'update_state'):
+                        metric.reset_state()
+                        metric.update_state(test_labels, test_pred)
+                        result = metric.result()
+                        if not isinstance(result, dict):
+                            logger.info(f"Metric {metric.name} dtype: {result.dtype}")
+                logger.info("Metrics computation successful")
+            except Exception as metric_error:
+                logger.error(f"Metrics computation failed: {metric_error}")
+                raise
+            break
+        
+        logger.info("=== END DTYPE DEBUGGING ===")
+        
+        with strategy.scope():
+            history = model.fit(
+                train_dataset,
+                epochs=epochs,  
+                validation_data=val_dataset,
+                callbacks=callbacks,
+                steps_per_epoch=steps_per_epoch, 
+                validation_steps=validation_steps, 
+                verbose=training_cfg.get('verbose', 1),
+                initial_epoch=initial_epoch
+            )
+    except Exception as e:
+        logger.error("=== DETAILED ERROR ANALYSIS ===")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error message: {str(e)}")
+        
+        # Enhanced tensor debugging
+        import traceback
+        tb_str = traceback.format_exc()
+        logger.error(f"Full traceback:\n{tb_str}")
+        
+        # Try to identify the problematic tensor
+        if "Mul_3" in str(e):
+            logger.error("The error involves Mul_3 tensor - this is likely from:")
+            logger.error("1. Learning rate scheduling")
+            logger.error("2. Loss scaling operations")
+            logger.error("3. Optimizer gradient calculations")
+            logger.error("4. Metric calculations involving multiplication")
+            
+        if "float16" in str(e) and "float32" in str(e):
+            logger.error("Mixed precision dtype conversion error detected")
+            logger.error("Current mixed precision policy:")
+            policy = tf.keras.mixed_precision.global_policy()
+            logger.error(f"  Policy name: {policy.name}")
+            logger.error(f"  Compute dtype: {policy.compute_dtype}")
+            logger.error(f"  Variable dtype: {policy.variable_dtype}")
+        
+        raise
     logger.info("model.fit() finished.")
 
     # Save the final model
@@ -692,11 +1151,11 @@ def main(args):
     logger.info(f"Loaded configuration from: {args.config}")
 
     strategy = initialize_strategy()
-    set_mixed_precision_policy(config, strategy)
 
     data_cfg = config.get('data', {})
     training_cfg = config.get('training', {})
     model_cfg = config.get('model', {})
+    optimizer_cfg = config.get('optimizer', {})
 
     # --- Determine if debug mode is active --- 
     cli_debug_active = args.debug
@@ -746,7 +1205,10 @@ def main(args):
     index_to_label_map = {i: name for i, name in enumerate(class_names)}
 
     with strategy.scope():
-        model = build_model(num_classes=num_classes, config=config, learning_rate_to_use=training_cfg.get('learning_rate', 0.001))
+        # Set mixed precision policy within strategy scope
+        set_mixed_precision_policy(config, strategy)
+        
+        model = build_model(num_classes=num_classes, config=config, learning_rate_to_use=optimizer_cfg.get('learning_rate', 0.001))
     
     logger.info(f"Model built. Num classes: {num_classes}")
 
@@ -793,7 +1255,7 @@ def main(args):
         if dataset_cardinality != -1 and dataset_cardinality < steps_per_epoch_val:
             logger.warning(f"Dataset cardinality ({dataset_cardinality}) is less than expected steps_per_epoch ({steps_per_epoch_val}). This may cause the 'ran out of data' warning.")
             # Option 1: Use dataset cardinality as steps_per_epoch
-            steps_per_epoch_val = dataset_cardinality
+            steps_per_epoch_val = int(dataset_cardinality)  # Ensure it's an integer
             logger.info(f"Adjusted steps_per_epoch to dataset cardinality: {steps_per_epoch_val}")
     except Exception as e:
         logger.error(f"Error accessing training dataset cardinality: {e}")
@@ -826,6 +1288,7 @@ def main(args):
         logger.info("Test dataset is present but num_test_samples is 0. Skipping final evaluation.")
     elif not test_ds:
         logger.info("No test dataset provided. Skipping final evaluation.")
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train a classification model using a YAML configuration file.")

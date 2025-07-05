@@ -48,7 +48,6 @@ def run_training_step(model_name: str, script_path: str, config_path: str) -> bo
     """
     logger.info(f"=== Starting {model_name} ===")
     
-    # Construct command
     command = [sys.executable, script_path, "--config", config_path]
     logger.info(f"Executing: {' '.join(command)}")
     

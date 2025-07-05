@@ -387,10 +387,29 @@ def load_classification_data(
             windows_path_count += 1
             if windows_path_count <= 3:  # Log first few for debugging
                 logger.debug(f"Found Windows absolute path: {relative_path}")
-            # Skip absolute Windows paths - likely from original dataset creation
-            # In Kaggle/cloud environments, we expect data to be in input directories
-            skipped_count += 1
-            continue
+            
+            # Convert Windows absolute path to Kaggle input path
+            # E:\_MetaFood3D_new_RGBD_videos\RGBD_videos\Food\food_1\original\0.jpg -> 
+            # /kaggle/input/metafood3d/_MetaFood3D_new_RGBD_videos/RGBD_videos/Food/food_1/original/0.jpg
+            if 'RGBD_videos' in relative_path:
+                path_parts = relative_path.split('\\')
+                rgbd_index = next((i for i, part in enumerate(path_parts) if 'RGBD_videos' in part), -1)
+                if rgbd_index >= 0:
+                    # Take everything from RGBD_videos onwards
+                    kaggle_path_parts = path_parts[rgbd_index:]
+                    kaggle_path_str = '/'.join(kaggle_path_parts)
+                    # Use the exact Kaggle path structure
+                    full_image_path = Path('/kaggle/input/metafood3d/_MetaFood3D_new_RGBD_videos') / kaggle_path_str
+                    if windows_path_count <= 3:
+                        logger.info(f"Converting Windows path: {relative_path} -> {full_image_path}")
+                else:
+                    logger.warning(f"Could not convert Windows path to Kaggle path: {relative_path}")
+                    skipped_count += 1
+                    continue
+            else:
+                logger.warning(f"Unexpected Windows path format: {relative_path}")
+                skipped_count += 1
+                continue
         elif relative_path.startswith('/kaggle/input/'):
             # Direct Kaggle input path
             full_image_path = Path(relative_path)
@@ -577,7 +596,7 @@ def load_classification_data(
                 if actual_buffer_size > 0 : # Ensure buffer_size is positive
                     dataset = dataset.shuffle(actual_buffer_size, seed=data_config.get('random_seed', None))
             
-            dataset = dataset.batch(batch_size)
+            dataset = dataset.batch(batch_size, drop_remainder=True)
             
             # Convert integer labels to one-hot encoding
             def convert_to_one_hot(images, labels):

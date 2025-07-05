@@ -1,6 +1,6 @@
 data:
   image_size: [256, 256]  
-  batch_size: 32  
+  batch_size: 64  # Optimized for TPU v3-8  
   split_ratios:
     train: 0.7
     val: 0.15
@@ -13,7 +13,7 @@ data:
   depth_map_dir_name: "depth"
 
   use_point_cloud: true
-  point_cloud_root_dir: "E:/_MetaFood3D_new_Point_cloud/Point_cloud"
+  point_cloud_root_dir: "/kaggle/input/metafood3d-pointcloud/_MetaFood3D_new_Point_cloud/Point_cloud"
   point_cloud_sampling_rate_dir: "4096" 
   point_cloud_suffix: "_sampled_1.ply" 
 
@@ -145,7 +145,7 @@ training:
   debug_epochs: 3  # Fast debug epochs
   debug_mode: false  # Disabled for production training
   use_mixed_precision: true
-  use_tpu: false
+  use_tpu: true  # Enabled for TPU v3-8 training
   
   # Production IoU metric configuration
   metrics: ["binary_accuracy", "binary_iou", "dice_coefficient", "precision", "recall"] 
