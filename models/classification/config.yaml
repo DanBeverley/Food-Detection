@@ -128,7 +128,7 @@ loss:
     from_logits: false
 
 # Metrics Configuration
-metrics: ["accuracy"] 
+metrics: ["accuracy", "precision", "recall"] 
 
 # Production Training Configuration
 training:
@@ -155,7 +155,7 @@ training:
       filename_template: "model_epoch-{epoch:02d}_val_acc-{val_categorical_accuracy:.4f}.h5"
       
     early_stopping:
-      enabled: false  # Disabled for TPU mixed precision compatibility
+      enabled: true
       monitor: "val_loss"
       mode: "min"
       patience: 12
@@ -163,7 +163,7 @@ training:
       min_delta: 0.001
       
     reduce_lr_on_plateau:
-      enabled: false  # Disabled for TPU mixed precision compatibility
+      enabled: true
       monitor: "val_loss" 
       mode: "min" 
       factor: 0.5
@@ -172,7 +172,7 @@ training:
       cooldown: 2
       
     tensorboard:
-      enabled: false  # Disabled for TPU mixed precision compatibility
+      enabled: true
       log_dir: "logs/classification/" 
       histogram_freq: 1
       write_graph: true
