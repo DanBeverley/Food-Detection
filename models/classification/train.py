@@ -565,6 +565,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         )
     
     # Apply loss scaling for mixed precision
+    training_cfg = config.get('training', {})
     if training_cfg.get('use_mixed_precision', False):
         optimizer_instance = mixed_precision.LossScaleOptimizer(optimizer_instance)
         logger.info("Applied loss scaling for mixed precision training")
