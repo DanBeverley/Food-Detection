@@ -95,8 +95,8 @@ model:
     activation: "relu" 
     final_activation: "softmax"
     
-    # Regularization
-    kernel_l2_factor: 0.002
+    # Regularization - reduced for mixed precision stability
+    kernel_l2_factor: 0.0005
     activity_l2_factor: 0.001
 
     # Batch normalization
@@ -106,9 +106,9 @@ model:
 # Production Optimizer Configuration
 optimizer:
   name: "AdamW"
-  learning_rate: 0.0005  # Optimal for T4x2 GPU with batch_size 128
+  learning_rate: 0.0001  # Reduced for mixed precision stability - was 0.0005
   weight_decay: 0.01  # Standard weight decay for GPU training
-  clipnorm: 5.0  # Optimal gradient clipping for T4x2 GPU
+  clipnorm: 1.0  # Reduced gradient clipping for mixed precision stability - was 5.0
   
   # Learning rate scheduling - DISABLED for debugging
   schedule:
