@@ -518,7 +518,10 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         name='output_layer'
     )(x)
     
-    # No output casting needed when mixed precision is disabled
+    # Cast output to float32 for loss computation when using mixed precision
+    training_cfg = config.get('training', {})
+    if training_cfg.get('use_mixed_precision') is True:
+        outputs = layers.Lambda(lambda x: tf.cast(x, tf.float32), name='cast_to_float32')(outputs)
 
     # Determine model inputs
     if is_multimodal_enabled:
@@ -675,19 +678,31 @@ def _create_optimizer(optimizer_name: str, learning_rate: float, clipnorm: Optio
 
 
 def _get_loss_function(loss_function_name: str, loss_params: Dict, num_classes: int, config: Dict) -> losses.Loss:
+    # Check if mixed precision is enabled
+    training_cfg = config.get('training', {})
+    reduction = tf.keras.losses.Reduction.AUTO
+    if training_cfg.get('use_mixed_precision') is True:
+        # Use SUM_OVER_BATCH_SIZE for mixed precision compatibility
+        reduction = tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
+    
     if loss_function_name.lower() == 'categoricalcrossentropy' or loss_function_name.lower() == 'categorical_crossentropy':
         loss_instance = losses.CategoricalCrossentropy(
             label_smoothing=loss_params.get('label_smoothing', 0.0),
-            from_logits=loss_params.get('from_logits', False) # Usually False if softmax is last layer
+            from_logits=loss_params.get('from_logits', False), # Usually False if softmax is last layer
+            reduction=reduction
         )
     elif loss_function_name.lower() == 'sparsecategoricalcrossentropy' or loss_function_name.lower() == 'sparse_categorical_crossentropy':
         # This branch should ideally not be hit if MixUp/CutMix are used, but handle for completeness
         loss_instance = losses.SparseCategoricalCrossentropy(
-            from_logits=loss_params.get('from_logits', False)
+            from_logits=loss_params.get('from_logits', False),
+            reduction=reduction
         )
     else:
         logger.error(f"Unsupported loss function: {loss_function_name}. Defaulting to CategoricalCrossentropy.")
-        loss_instance = losses.CategoricalCrossentropy(label_smoothing=loss_params.get('label_smoothing', 0.0))
+        loss_instance = losses.CategoricalCrossentropy(
+            label_smoothing=loss_params.get('label_smoothing', 0.0),
+            reduction=reduction
+        )
 
     return loss_instance
 
@@ -698,21 +713,25 @@ def _get_metrics(metrics_cfg: List[str], num_classes: int, multilabel: bool, con
         if metric_name.lower() == 'accuracy':
             # If using CategoricalCrossentropy, CategoricalAccuracy is more appropriate.
             # 'accuracy' can sometimes alias to SparseCategoricalAccuracy depending on context.
-            compiled_metrics.append(metrics.CategoricalAccuracy(name='categorical_accuracy'))
+            training_cfg = config.get('training', {})
+            if training_cfg.get('use_mixed_precision') is True:
+                compiled_metrics.append(metrics.CategoricalAccuracy(name='categorical_accuracy', dtype=tf.float32))
+            else:
+                compiled_metrics.append(metrics.CategoricalAccuracy(name='categorical_accuracy'))
             logger.info("Using CategoricalAccuracy metric (aliased from 'accuracy').")
         elif metric_name.lower() == 'top_5_accuracy':
-            # Skip TopK metrics when using mixed precision on TPU due to bfloat16 incompatibility
+            # Skip TopK metrics when using mixed precision due to dtype incompatibility
             training_cfg = config.get('training', {})
-            if training_cfg.get('use_mixed_precision', False):
-                logger.warning("Skipping top_5_accuracy metric due to mixed precision incompatibility on TPU")
+            if training_cfg.get('use_mixed_precision') is True:
+                logger.warning("Skipping top_5_accuracy metric due to mixed precision dtype incompatibility")
             else:
                 compiled_metrics.append(metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy'))
                 logger.info("Using TopKCategoricalAccuracy metric for top_5_accuracy.")
         elif metric_name.lower() == 'top_3_accuracy':
-            # Skip TopK metrics when using mixed precision on TPU due to bfloat16 incompatibility
+            # Skip TopK metrics when using mixed precision due to dtype incompatibility
             training_cfg = config.get('training', {})
-            if training_cfg.get('use_mixed_precision', False):
-                logger.warning("Skipping top_3_accuracy metric due to mixed precision incompatibility on TPU")
+            if training_cfg.get('use_mixed_precision') is True:
+                logger.warning("Skipping top_3_accuracy metric due to mixed precision dtype incompatibility")
             else:
                 compiled_metrics.append(metrics.TopKCategoricalAccuracy(k=3, name='top_3_accuracy'))
                 logger.info("Using TopKCategoricalAccuracy metric for top_3_accuracy.")
