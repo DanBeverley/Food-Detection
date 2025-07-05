@@ -1,7 +1,7 @@
 data:
   metadata_path: "data/classification/metadata.json" 
   image_size: [224, 224] 
-  batch_size: 1024
+  batch_size: 128  # Optimal for T4x2 GPU (2 GPUs × 64 per GPU)
   split_ratio: 0.2
   debug_max_total_samples: null # Disabled for production - use all samples
 
@@ -106,9 +106,9 @@ model:
 # Production Optimizer Configuration
 optimizer:
   name: "AdamW"
-  learning_rate: 0.001  # Reduced to prevent gradient explosion
-  weight_decay: 0.001  # Minimal regularization for testing
-  clipnorm: 1.0  # Reduced to prevent gradient explosion
+  learning_rate: 0.0005  # Optimal for T4x2 GPU with batch_size 128
+  weight_decay: 0.01  # Standard weight decay for GPU training
+  clipnorm: 5.0  # Optimal gradient clipping for T4x2 GPU
   
   # Learning rate scheduling - DISABLED for debugging
   schedule:
@@ -134,8 +134,8 @@ metrics: ["accuracy", "precision", "recall"]
 training:
   epochs: 30 
   debug_epochs: 3  
-  use_mixed_precision: false
-  use_tpu: true  
+  use_mixed_precision: true  # Enable for T4x2 GPU efficiency
+  use_tpu: false  # Disable TPU for GPU training  
   
   # Class weights for imbalanced datasets
   use_class_weights: true
