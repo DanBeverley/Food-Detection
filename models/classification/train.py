@@ -510,6 +510,11 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         kernel_regularizer=output_regularizer,
         name='output_layer'
     )(x)
+    
+    # Cast to float32 for loss computation when using mixed precision
+    training_cfg = config.get('training', {})
+    if training_cfg.get('use_mixed_precision', False):
+        outputs = tf.cast(outputs, tf.float32)
 
     # Determine model inputs
     if is_multimodal_enabled:
@@ -704,7 +709,11 @@ def _get_metrics(metrics_cfg: List[str], num_classes: int, multilabel: bool, con
         elif hasattr(metrics, metric_name):
             metric_class = getattr(metrics, metric_name)
             if callable(metric_class):
-                compiled_metrics.append(metric_class())
+                training_cfg = config.get('training', {})
+                if training_cfg.get('use_mixed_precision', False) and metric_name.lower() in ['precision', 'recall']:
+                    compiled_metrics.append(metric_class(dtype=tf.float32))
+                else:
+                    compiled_metrics.append(metric_class())
                 logger.info(f"Using {metric_name} metric.")
             else:
                 logger.warning(f"Metric {metric_name} is not callable. Skipping.")
