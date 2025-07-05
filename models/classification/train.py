@@ -508,8 +508,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         num_classes, 
         activation=output_activation, 
         kernel_regularizer=output_regularizer,
-        name='output_layer',
-        dtype=tf.float32
+        name='output_layer'
     )(x)
 
     # Determine model inputs
