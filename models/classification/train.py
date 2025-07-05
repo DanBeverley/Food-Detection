@@ -514,7 +514,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     # Cast to float32 for loss computation when using mixed precision
     training_cfg = config.get('training', {})
     if training_cfg.get('use_mixed_precision', False):
-        outputs = tf.cast(outputs, tf.float32)
+        outputs = layers.Lambda(lambda x: tf.cast(x, tf.float32), name='cast_to_float32')(outputs)
 
     # Determine model inputs
     if is_multimodal_enabled:
