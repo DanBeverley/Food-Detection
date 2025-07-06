@@ -1072,15 +1072,38 @@ def train_model(model: models.Model,
     try:
         logger.info("=== DTYPE DEBUGGING INFO ===")
         logger.info(f"Mixed precision policy: {tf.keras.mixed_precision.global_policy().name}")
-        logger.info(f"Model input dtype: {model.input.dtype}")
+        
+        # Handle single vs. multiple inputs
+        if isinstance(model.input, list):
+            for i, inp in enumerate(model.input):
+                logger.info(f"Model input #{i} ({inp.name}) dtype: {inp.dtype}")
+        else:
+            logger.info(f"Model input dtype: {model.input.dtype}")
+            
         logger.info(f"Model output dtype: {model.output.dtype}")
         
         # Test a single batch to isolate the error
         logger.info("Testing single batch prediction...")
         test_batch = train_dataset.take(1)
         for test_images, test_labels in test_batch:
-            logger.info(f"Test batch input dtype: {test_images.dtype}")
+            # Handle single vs. multiple inputs (dictionary)
+            if isinstance(test_images, dict):
+                for name, tensor in test_images.items():
+                    logger.info(f"Test batch input tensor '{name}' dtype: {tensor.dtype}")
+            else:
+                logger.info(f"Test batch input dtype: {test_images.dtype}")
+                
             logger.info(f"Test batch label dtype: {test_labels.dtype}")
+            
+            # Add data sanity check
+            logger.info("Checking for NaNs in input data...")
+            if isinstance(test_images, dict):
+                for name, tensor in test_images.items():
+                    tf.debugging.check_numerics(tensor, f"NaN or Inf found in input tensor: {name}")
+            else:
+                tf.debugging.check_numerics(test_images, "NaN or Inf found in input images")
+            tf.debugging.check_numerics(test_labels, "NaN or Inf found in input labels")
+            logger.info("No NaNs found in input data. OK.")
             
             # Test forward pass
             try:
