@@ -18,10 +18,10 @@ data:
   point_cloud_sampling_rate_dir: "4096" 
   point_cloud_suffix: "_sampled_1.ply" 
 
-  # Production augmentation settings
+  # DISABLED for debugging - too complex
   augmentation:
-    enabled: true
-    augment_training_data: true
+    enabled: false
+    augment_training_data: false
     augment_validation_data: false
     
     # Production augmentation ranges
@@ -51,14 +51,14 @@ data:
 
   # Advanced augmentation techniques (applied after batching)
   advanced_augmentation:
-    # MixUp Augmentation
+    # DISABLED for debugging
     mixup:
-      enabled: true
+      enabled: false
       alpha: 0.4
 
-    # CutMix Augmentation
+    # DISABLED for debugging
     cutmix:
-      enabled: true
+      enabled: false
       alpha: 1.0
     
     # Label smoothing equivalent through augmentation
@@ -77,7 +77,7 @@ model:
   architecture: "MobileNetV3Small" 
   use_pretrained_weights: true 
   fine_tune: true 
-  fine_tune_layers: -1  # Unfreeze ALL layers (-1 means all)
+  fine_tune_layers: 10  # Only top 10 layers for stability
 
   # Production Classification Head with Regularization
   classification_head:
@@ -95,9 +95,9 @@ model:
     activation: "relu" 
     final_activation: "softmax"
     
-    # Regularization - reduced for mixed precision stability
-    kernel_l2_factor: 0.0005
-    activity_l2_factor: 0.001
+    # DISABLED for debugging
+    kernel_l2_factor: 0.0
+    activity_l2_factor: 0.0
 
     # Batch normalization
     use_batch_norm: true
@@ -128,7 +128,7 @@ loss:
     from_logits: false
 
 # Metrics Configuration
-metrics: ["accuracy", "precision", "recall"] 
+metrics: ["accuracy"] 
 
 # Production Training Configuration
 training:
@@ -137,8 +137,8 @@ training:
   use_mixed_precision: true  # Enable for T4x2 GPU efficiency
   use_tpu: false  # Disable TPU for GPU training  
   
-  # Class weights for imbalanced datasets
-  use_class_weights: true
+  # DISABLED for debugging
+  use_class_weights: false
   
   # Advanced augmentation parameters
   mixup_alpha: 0.4
