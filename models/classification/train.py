@@ -225,24 +225,14 @@ class DetailedLoggingCallback(callbacks.Callback):
             print(log_message, flush=True)
 
 def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.Model:
-    # Custom model class to handle mixed precision loss computation
+    # Simple, robust CustomModel for mixed precision
     class CustomModel(tf.keras.Model):
         def compute_loss(self, x=None, y=None, y_pred=None, sample_weight=None):
-            # This method overrides the default loss computation to handle mixed precision
-            
-            # 1. Compute the main loss from the compiled loss function.
-            # This will be float32 because of our MixedPrecisionLoss wrapper.
             main_loss = super().compute_loss(x, y, y_pred, sample_weight)
-
-            # 2. self.losses contains the regularization penalties from the layers.
-            # In mixed precision, these are float16. We must cast and sum them.
             if self.losses:
-                # Cast each regularization loss to float32 before summing
                 reg_loss = tf.add_n([tf.cast(loss, tf.float32) for loss in self.losses])
-                # Add the float32 regularization loss to the float32 main loss
                 return main_loss + reg_loss
-            else:
-                return main_loss
+            return main_loss
     
     model_cfg = config.get('model', {})
     data_cfg = config.get('data', {})
@@ -259,9 +249,34 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     fine_tune_layers_rgb = model_cfg.get('fine_tune_layers', 10)
     weights = 'imagenet' if use_pretrained else None
 
-    # Determine if multi-modal input is configured
+    # Determine if multi-modal input is configured (backward compatibility)
     modalities_cfg = data_cfg.get('modalities_config', {})
-    is_multimodal_enabled = modalities_cfg.get('enabled', False)
+    
+    # Backward compatibility: Check old flags and create modalities_cfg if needed
+    use_depth_map = data_cfg.get('use_depth_map', False)
+    use_point_cloud = data_cfg.get('use_point_cloud', False)
+    
+    if use_depth_map or use_point_cloud:
+        is_multimodal_enabled = True
+        # Create modalities config from old flags and modalities_preprocessing
+        preprocessing_cfg = data_cfg.get('modalities_preprocessing', {})
+        
+        if use_depth_map:
+            modalities_cfg['depth'] = {
+                'enabled': True,
+                'normalize': preprocessing_cfg.get('depth', {}).get('normalize', False)
+            }
+        
+        if use_point_cloud:
+            modalities_cfg['point_cloud'] = {
+                'enabled': True,
+                'normalize': preprocessing_cfg.get('point_cloud', {}).get('normalize', False)
+            }
+            
+        logger.info("Using backward compatibility for old multimodal flags")
+    else:
+        is_multimodal_enabled = modalities_cfg.get('enabled', False)
+    
     logger.info(f"Multi-modal input enabled: {is_multimodal_enabled}")
 
     active_input_layers_list = []
@@ -372,9 +387,13 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         depth_pooling_type = depth_arch_cfg.get('pooling', 'GlobalAveragePooling2D')
 
         depth_x = depth_input_tensor
-        # Pre-process depth: potentially scale to [0,1] or repeat channels if necessary for pretrained models expecting 3 channels
-        # For a custom CNN, ensure it's appropriate. Example: If depth_map is not [0,1], normalize it.
-        # Example: depth_x = layers.Rescaling(1./255)(depth_input_tensor) if values are 0-255
+        
+        # Apply normalization based on config - CRITICAL for preventing NaN!
+        depth_preprocessing_cfg = modalities_cfg.get('depth', {})
+        if depth_preprocessing_cfg.get('normalize', False):
+            # Assuming depth values are 0-255. Change to 1./65535 if 16-bit depth maps
+            logger.info("Applying Rescaling(1./255) to depth input to prevent NaN")
+            depth_x = layers.Rescaling(1./255)(depth_x)
         # If a pretrained model adapted for depth were used, it might expect 3 channels:
         # if depth_arch_cfg.get('repeat_channels_for_pretrained', False):
         #     logger.info("Repeating depth channel 3 times for potentially pretrained model input.")
@@ -420,6 +439,14 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         pc_pooling_type = pc_arch_cfg.get('pooling', 'GlobalMaxPooling1D') # PointNet uses MaxPooling
 
         pc_x = pc_input_tensor
+        
+        # Apply normalization based on config - CRITICAL for preventing NaN!
+        pc_preprocessing_cfg = modalities_cfg.get('point_cloud', {})
+        if pc_preprocessing_cfg.get('normalize', False):
+            # Normalize point cloud coordinates to prevent large values causing NaN
+            logger.info("Applying LayerNormalization to point cloud input to prevent NaN")
+            pc_x = layers.LayerNormalization(axis=-1)(pc_x)
+        
         for i, layer_params in enumerate(pc_conv1d_layers):
             pc_x = layers.Conv1D(layer_params['filters'], 
                                 kernel_size=layer_params.get('kernel_size', 1), 
@@ -550,40 +577,6 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     else:
         model_inputs = rgb_input_tensor # Single input: RGB only
 
-    # Custom model class to handle mixed precision regularization loss dtype conflicts
-    class CustomModel(tf.keras.Model):
-        def compute_loss(self, x=None, y=None, y_pred=None, sample_weight=None):
-            # The issue: Keras' parent compute_loss() tries to sum mixed dtype tensors
-            # Solution: Use the actual loss function directly, handle regularization separately
-            
-            if y is not None and y_pred is not None:
-                # 1. Cast inputs to float32 for consistent dtype
-                y_true = tf.cast(y, tf.float32)
-                y_pred = tf.cast(y_pred, tf.float32)
-                
-                # 2. Get the actual loss function from the compiled loss object
-                # This avoids recursion by not calling compute_loss methods
-                loss_fn = self.loss  # This should be our MixedPrecisionLoss wrapper
-                if loss_fn is not None:
-                    main_loss = loss_fn(y_true, y_pred)
-                    if sample_weight is not None:
-                        main_loss = main_loss * tf.cast(sample_weight, tf.float32)
-                    main_loss = tf.reduce_mean(tf.cast(main_loss, tf.float32))
-                else:
-                    # Fallback to categorical crossentropy
-                    main_loss = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
-                    main_loss = tf.reduce_mean(tf.cast(main_loss, tf.float32))
-                
-                # 3. Handle regularization losses separately
-                if self.losses:
-                    # Cast float16 regularization losses to float32 and sum them
-                    reg_loss = tf.add_n([tf.cast(loss, tf.float32) for loss in self.losses])
-                    return tf.cast(main_loss + reg_loss, tf.float32)
-                
-                return main_loss
-            else:
-                # Fallback case
-                return tf.constant(0.0, dtype=tf.float32)
 
     # Check if we need to use CustomModel for mixed precision
     training_cfg = config.get('training', {})
