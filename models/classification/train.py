@@ -680,12 +680,37 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     # Test forward pass
     logger.info("Testing forward pass...")
     try:
-        dummy_batch = tf.random.normal((2, 224, 224, 3))
-        dummy_output = model(dummy_batch, training=False)
+        if is_multimodal_enabled:
+            # Create a dictionary of dummy inputs for multimodal model
+            dummy_inputs = {}
+            input_layers = model.inputs if isinstance(model.inputs, list) else [model.inputs]
+            
+            for input_tensor in input_layers:
+                input_name = input_tensor.name
+                input_shape = input_tensor.shape[1:]  # Exclude batch dimension
+                
+                logger.info(f"Creating dummy data for input '{input_name}' with shape {input_shape}")
+                
+                # Extract key name (remove ':0' suffix)
+                input_key = input_name.split(':')[0]
+                dummy_inputs[input_key] = tf.random.normal((2, *input_shape))
+            
+            logger.info(f"Testing forward pass with multimodal inputs: {list(dummy_inputs.keys())}")
+            dummy_output = model(dummy_inputs, training=False)
+        else:
+            # Single RGB input
+            dummy_batch = tf.random.normal((2, *image_size, 3))
+            logger.info("Testing forward pass with single RGB input")
+            dummy_output = model(dummy_batch, training=False)
+        
         logger.info(f"Forward pass successful. Output shape: {dummy_output.shape}")
         
         # Check if output is always the same (indicating frozen model)
-        dummy_output2 = model(dummy_batch, training=False)
+        if is_multimodal_enabled:
+            dummy_output2 = model(dummy_inputs, training=False)
+        else:
+            dummy_output2 = model(dummy_batch, training=False)
+        
         outputs_identical = tf.reduce_all(tf.equal(dummy_output, dummy_output2))
         logger.info(f"Repeated calls identical: {outputs_identical}")
         
@@ -702,6 +727,8 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         
     except Exception as e:
         logger.error(f"Forward pass failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return
     
     # Optionally print model summary
