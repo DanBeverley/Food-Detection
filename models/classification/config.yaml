@@ -3,7 +3,10 @@ data:
   image_size: [224, 224] 
   batch_size: 32  # Adjusted for single GPU
   split_ratio: 0.2
-  debug_max_total_samples: 100 # Use a small subset for local debugging
+  # debug_max_total_samples: 100 # Commented out to use full dataset
+  
+  # Base directory for Kaggle dataset
+  base_data_dir: "/kaggle/input/metafood3d/_MetaFood3D_new_RGBD_videos/RGBD_videos"
 
   # Data splits for better validation
   validation_split: 0.2

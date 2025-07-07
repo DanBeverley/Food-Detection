@@ -1231,9 +1231,30 @@ def main(args):
 
     # Load data using the function from data.py
     logger.info("Loading classification data...")
+    
+    # Check if base_data_dir is specified in config or environment
+    base_data_dir = data_cfg.get('base_data_dir', None)
+    if not base_data_dir:
+        # Try common Kaggle paths
+        kaggle_paths = [
+            "/kaggle/input/metafood3d/_MetaFood3D_new_RGBD_videos/RGBD_videos",
+            "/kaggle/input/metafood3d-dataset/RGBD_videos"
+        ]
+        for path in kaggle_paths:
+            if os.path.exists(path):
+                base_data_dir = path
+                logger.info(f"Auto-detected base_data_dir: {base_data_dir}")
+                break
+    
+    if base_data_dir:
+        logger.info(f"Using base_data_dir: {base_data_dir}")
+    else:
+        logger.warning("No base_data_dir found. Using relative paths from metadata.")
+    
     data_result = load_classification_data(
         config=config, 
-        max_samples_to_load=max_samples_for_loader
+        max_samples_to_load=max_samples_for_loader,
+        base_data_dir=base_data_dir
     )
     
     if data_result is None:
