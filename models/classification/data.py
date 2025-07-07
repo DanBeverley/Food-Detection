@@ -591,6 +591,7 @@ def load_classification_data(
             else:
                 depth_path = full_rgb_path.replace('.jpg', '_depth.jpg').replace('.png', '_depth.png')
             
+            logger.debug(f"Attempting to load depth map from: {depth_path}")
             if os.path.exists(depth_path):
                 # Load depth image
                 with open(depth_path, 'rb') as f:
@@ -598,7 +599,9 @@ def load_classification_data(
                 depth_img = tf.image.decode_image(depth_bytes, channels=1, expand_animations=False)
                 depth_img = tf.image.resize(depth_img, image_size)
                 depth_np = depth_img.numpy().astype(np.uint8)
+                logger.debug(f"Successfully loaded depth map from: {depth_path}")
             else:
+                logger.warning(f"Depth map file not found: {depth_path}. Using dummy.")
                 depth_np = np.zeros([*image_size, 1], dtype=np.uint8)
         except Exception as e:
             logger.error(f"Error loading depth map for {rgb_path_str}: {e}")
@@ -617,16 +620,19 @@ def load_classification_data(
                 # Extract food_class and food_item from the relative rgb_path_str
                 # Example: Apple/apple_1/original/0.jpg
                 path_parts_relative = Path(rgb_path_str).parts
-                if len(path_parts_relative) >= 3: # Expecting Class/Instance/original/image.jpg
+                
+                # Assuming structure: ClassName/InstanceName/original/image.jpg
+                if len(path_parts_relative) >= 3: 
                     food_class = path_parts_relative[0]
                     food_item = path_parts_relative[1]
                     
                     pc_path = os.path.join(pc_root, sampling_rate, food_class, food_item, f"{food_item}{suffix}")
                     
+                    logger.debug(f"Attempting to load point cloud from: {pc_path}") # Add debug log
                     if os.path.exists(pc_path):
-                        # (rest of the point cloud loading logic)
-                        # For now, just return a dummy if not implemented
+                        # (rest of the point cloud loading logic - currently dummy)
                         pc_np = np.zeros([num_points, 3], dtype=np.float32) # Placeholder
+                        logger.debug(f"Point cloud found: {pc_path}")
                     else:
                         logger.warning(f"Point cloud file not found: {pc_path}. Using dummy.")
                         pc_np = np.zeros([num_points, 3], dtype=np.float32)
@@ -659,10 +665,17 @@ def load_classification_data(
             # Single unified processing function
             def load_and_process(path, label):
                 # Load RGB image
-                image_data = tf.io.read_file(path)
-                image = tf.image.decode_image(image_data, channels=3, expand_animations=False)
-                image = tf.image.resize(image, image_size)
-                image = tf.cast(image, tf.float32)
+                try:
+                    logger.debug(f"Attempting to read RGB image from: {path.numpy().decode('utf-8')}")
+                    image_data = tf.io.read_file(path)
+                    image = tf.image.decode_image(image_data, channels=3, expand_animations=False)
+                    image = tf.image.resize(image, image_size)
+                    image = tf.cast(image, tf.float32)
+                    logger.debug(f"Successfully loaded RGB image from: {path.numpy().decode('utf-8')}")
+                except Exception as e:
+                    logger.error(f"Error loading or decoding RGB image {path.numpy().decode('utf-8')}: {e}")
+                    # Return a dummy image to prevent pipeline from breaking
+                    image = tf.zeros((*image_size, 3), dtype=tf.float32)
                 
                 # Apply augmentation if enabled
                 if augmentation_pipeline is not None and augment_ds and is_training_set_flag:
