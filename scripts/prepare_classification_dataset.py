@@ -80,7 +80,7 @@ def create_dataset_metadata(source_rgbd_base_dir_path: str, output_metadata_dir_
                 try:
                     # Reference the original image directly
                     metadata_entry = {
-                        "image_path": str(img_path.resolve()), # Absolute path to original image
+                        "image_path": str(img_path.relative_to(source_dir)), # Store path relative to source_dir
                         "class_name": class_name,
                         "instance_name": instance_folder.name
                     }
