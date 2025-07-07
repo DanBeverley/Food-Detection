@@ -338,7 +338,8 @@ class GaussianNoise(tf.keras.layers.Layer):
 
 def load_classification_data(
     config: Dict,
-    max_samples_to_load: Optional[int] = None
+    max_samples_to_load: Optional[int] = None,
+    base_data_dir: Optional[str] = None # New parameter
 ) -> Tuple[
     Optional[tf.data.Dataset],
     Optional[tf.data.Dataset],
@@ -418,9 +419,12 @@ def load_classification_data(
             logger.warning(f"Skipping item due to missing path or label: {item}")
             continue
         
-        # Simplified logic: The metadata file should contain absolute paths.
-        full_image_path = Path(relative_path)
-        
+        # Construct full_image_path using base_data_dir if provided
+        if base_data_dir:
+            full_image_path = Path(base_data_dir) / relative_path
+        else:
+            full_image_path = Path(relative_path)
+
         if not full_image_path.exists():
             logger.warning(f"Image file not found: {full_image_path}. Skipping.")
             skipped_count += 1
@@ -447,6 +451,7 @@ def load_classification_data(
         logger.error("1. All paths in metadata are Windows absolute paths (E:, C:, etc.)")
         logger.error("2. Expected data is not in /kaggle/input/ or other accessible locations")
         logger.error("3. Dataset needs to be uploaded to Kaggle or paths need to be updated")
+        logger.error("4. base_data_dir was not provided when metadata contains relative paths.") # New error message
         return None, None, None, 0, 0, 0, class_names, num_classes
     
     logger.info(f"Collected {len(all_image_paths)} total image paths with labels.")
@@ -556,7 +561,7 @@ def load_classification_data(
     augmentation_pipeline = _build_augmentation_pipeline(data_config) # Pass data_config
 
     # Helper function for tf.py_function - handles complex file I/O in Python
-    def _load_modalities_py(rgb_path_tensor):
+    def _load_modalities_py(rgb_path_tensor, base_data_dir_tensor):
         """Load depth and point cloud data given RGB path"""
         # Handle both string tensors and byte tensors
         if hasattr(rgb_path_tensor, 'numpy'):
@@ -564,17 +569,27 @@ def load_classification_data(
             if isinstance(path_numpy, bytes):
                 rgb_path_str = path_numpy.decode('utf-8')
             else:
-                rgb_path_str = str(path_numpy, 'utf-8') if isinstance(path_numpy, (bytes, bytearray)) else str(path_numpy)
+                rgb_path_str = str(path_numpy)
         else:
             rgb_path_str = rgb_path_tensor.decode('utf-8') if isinstance(rgb_path_tensor, bytes) else str(rgb_path_tensor)
-        
+
+        if hasattr(base_data_dir_tensor, 'numpy'):
+            base_data_dir_str = base_data_dir_tensor.numpy().decode('utf-8')
+        else:
+            base_data_dir_str = base_data_dir_tensor.decode('utf-8') if isinstance(base_data_dir_tensor, bytes) else str(base_data_dir_tensor)
+
         # Load depth map
         try:
             depth_dir_name = data_config.get('depth_map_dir_name', 'depth')
-            if '/original/' in rgb_path_str:
-                depth_path = rgb_path_str.replace('/original/', f'/{depth_dir_name}/')
+            # Assuming rgb_path_str is now the relative path from base_data_dir
+            # Reconstruct the full path to the RGB image first
+            full_rgb_path = os.path.join(base_data_dir_str, rgb_path_str)
+
+            # Derive depth path from full_rgb_path
+            if '/original/' in full_rgb_path:
+                depth_path = full_rgb_path.replace('/original/', f'/{depth_dir_name}/')
             else:
-                depth_path = rgb_path_str.replace('.jpg', '_depth.jpg').replace('.png', '_depth.png')
+                depth_path = full_rgb_path.replace('.jpg', '_depth.jpg').replace('.png', '_depth.png')
             
             if os.path.exists(depth_path):
                 # Load depth image
@@ -586,40 +601,44 @@ def load_classification_data(
             else:
                 depth_np = np.zeros([*image_size, 1], dtype=np.uint8)
         except Exception as e:
+            logger.error(f"Error loading depth map for {rgb_path_str}: {e}")
             depth_np = np.zeros([*image_size, 1], dtype=np.uint8)
         
         # Load point cloud with correct path structure
         try:
             num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
             
-            if 'RGBD_videos' in rgb_path_str:
-                path_parts = rgb_path_str.split('/')
-                rgbd_idx = -1
-                for i, part in enumerate(path_parts):
-                    if part == 'RGBD_videos':
-                        rgbd_idx = i
-                        break
-                
-                if rgbd_idx >= 0 and rgbd_idx + 2 < len(path_parts):
-                    food_class = path_parts[rgbd_idx + 1]
-                    food_item = path_parts[rgbd_idx + 2]
-                    pc_root = data_config.get('point_cloud_root_dir')
-                    if pc_root:
-                        pc_path = f'{pc_root}/{sampling_rate}/{food_class}/{food_item}/{food_item}{suffix}'
-                        if os.path.exists(pc_path):
-                            # (rest of the point cloud loading logic)
-                            pass
-                        else:
-                            pc_np = np.zeros([num_points, 3], dtype=np.float32)
+            # The point_cloud_root_dir from config is already absolute (Kaggle path)
+            pc_root = data_config.get('point_cloud_root_dir')
+            sampling_rate = data_config.get('point_cloud_sampling_rate_dir')
+            suffix = data_config.get('point_cloud_suffix')
+
+            if pc_root and sampling_rate and suffix:
+                # Extract food_class and food_item from the relative rgb_path_str
+                # Example: Apple/apple_1/original/0.jpg
+                path_parts_relative = Path(rgb_path_str).parts
+                if len(path_parts_relative) >= 3: # Expecting Class/Instance/original/image.jpg
+                    food_class = path_parts_relative[0]
+                    food_item = path_parts_relative[1]
+                    
+                    pc_path = os.path.join(pc_root, sampling_rate, food_class, food_item, f"{food_item}{suffix}")
+                    
+                    if os.path.exists(pc_path):
+                        # (rest of the point cloud loading logic)
+                        # For now, just return a dummy if not implemented
+                        pc_np = np.zeros([num_points, 3], dtype=np.float32) # Placeholder
                     else:
-                        logger.error("point_cloud_root_dir is not defined in the config but use_point_cloud is true.")
+                        logger.warning(f"Point cloud file not found: {pc_path}. Using dummy.")
                         pc_np = np.zeros([num_points, 3], dtype=np.float32)
                 else:
+                    logger.warning(f"Could not parse food_class/food_item from relative path: {rgb_path_str}. Using dummy point cloud.")
                     pc_np = np.zeros([num_points, 3], dtype=np.float32)
             else:
+                logger.error("Point cloud configuration (root, sampling_rate, suffix) is incomplete. Using dummy.")
                 pc_np = np.zeros([num_points, 3], dtype=np.float32)
                 
         except Exception as e:
+            logger.error(f"Error loading point cloud for {rgb_path_str}: {e}")
             num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
             pc_np = np.zeros([num_points, 3], dtype=np.float32)
         
@@ -661,7 +680,7 @@ def load_classification_data(
                     # Load additional modalities using tf.py_function
                     depth_data, pc_data = tf.py_function(
                         func=_load_modalities_py,
-                        inp=[path],
+                        inp=[path, base_data_dir],
                         Tout=[tf.uint8, tf.float32]
                     )
                     
