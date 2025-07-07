@@ -231,6 +231,20 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     # Simple, robust CustomModel for mixed precision
     class CustomModel(tf.keras.Model):
         def compute_loss(self, x=None, y=None, y_pred=None, sample_weight=None):
+            # Handle shape issues before calling super().compute_loss()
+            if y is not None and y_pred is not None:
+                # Ensure both tensors have concrete shapes
+                if hasattr(y, 'shape') and y.shape.rank is None:
+                    # If y has unknown rank, assume it should match y_pred shape
+                    y = tf.ensure_shape(y, y_pred.shape)
+                
+                if hasattr(y_pred, 'shape') and y_pred.shape.rank is None:
+                    # If y_pred has unknown rank, try to infer from context
+                    # For classification, it should be [batch_size, num_classes]  
+                    if y is not None and y.shape.rank == 2:
+                        y_pred = tf.ensure_shape(y_pred, y.shape)
+            
+            # Now call the parent compute_loss with properly shaped tensors
             main_loss = super().compute_loss(x, y, y_pred, sample_weight)
             if self.losses:
                 reg_loss = tf.add_n([tf.cast(loss, tf.float32) for loss in self.losses])
