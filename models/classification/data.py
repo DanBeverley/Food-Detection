@@ -425,9 +425,19 @@ def load_classification_data(
         else:
             full_image_path = Path(relative_path)
 
-        logger.debug(f"Checking image path: {full_image_path}, exists: {full_image_path.exists()}")
+        # Add detailed logging for the first few entries to debug path issues
+        if len(all_image_paths) < 5:
+            logger.info(f"DEBUG Path construction:")
+            logger.info(f"  base_data_dir: {base_data_dir}")
+            logger.info(f"  relative_path: {relative_path}")
+            logger.info(f"  full_image_path: {full_image_path}")
+            logger.info(f"  exists: {full_image_path.exists()}")
+            if base_data_dir and Path(base_data_dir).exists():
+                logger.info(f"  base_data_dir contents: {list(Path(base_data_dir).iterdir())[:5]}")
+        
         if not full_image_path.exists():
-            logger.warning(f"Image file not found: {full_image_path}. Skipping.")
+            if skipped_count < 5:  # Only log first few missing files to avoid spam
+                logger.warning(f"Image file not found: {full_image_path}. Skipping.")
             skipped_count += 1
             continue
 
@@ -564,9 +574,15 @@ def load_classification_data(
     # Helper function for tf.py_function - handles complex file I/O in Python
     def _load_modalities_py(rgb_path_tensor, base_data_dir_tensor):
         """Load depth and point cloud data given RGB path"""
-        # Convert tensors to Python strings for os.path operations
-        rgb_path_str = tf.compat.as_str_any(rgb_path_tensor)
-        base_data_dir_str = tf.compat.as_str_any(base_data_dir_tensor)
+        try:
+            # Convert tensors to Python strings for os.path operations
+            rgb_path_str = tf.compat.as_str_any(rgb_path_tensor)
+            base_data_dir_str = tf.compat.as_str_any(base_data_dir_tensor)
+        except Exception as e:
+            logger.error(f"Error converting tensors to strings: {e}")
+            # Return dummy data
+            num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
+            return np.zeros([*image_size, 1], dtype=np.uint8), np.zeros([num_points, 3], dtype=np.float32)
 
         # Load depth map
         try:
@@ -639,7 +655,7 @@ def load_classification_data(
         
         return depth_np, pc_np
 
-    def configure_dataset(paths_np: np.ndarray, labels_np: np.ndarray, shuffle_ds: bool, augment_ds: bool, is_training_set_flag: bool) -> Optional[tf.data.Dataset]:
+    def configure_dataset(paths_np: np.ndarray, labels_np: np.ndarray, shuffle_ds: bool, augment_ds: bool, is_training_set_flag: bool, base_data_dir_param: str = None) -> Optional[tf.data.Dataset]:
         if len(paths_np) == 0:
             return None
         try:
@@ -682,7 +698,7 @@ def load_classification_data(
                     # Load additional modalities using tf.py_function
                     depth_data, pc_data = tf.py_function(
                         func=_load_modalities_py,
-                        inp=[path, base_data_dir],
+                        inp=[path, base_data_dir_param or ""],
                         Tout=[tf.uint8, tf.float32]
                     )
                     
@@ -760,9 +776,9 @@ def load_classification_data(
     augment_train = data_config.get('augmentation', {}).get('augment_training_data', True) and data_config.get('augmentation', {}).get('enabled', False)
     augment_val = data_config.get('augmentation', {}).get('augment_validation_data', False) and data_config.get('augmentation', {}).get('enabled', False)
 
-    train_dataset = configure_dataset(train_paths, train_labels, shuffle_ds=True, augment_ds=augment_train, is_training_set_flag=True)
-    val_dataset = configure_dataset(val_paths, val_labels, shuffle_ds=data_config.get('shuffle_validation_data', True), augment_ds=augment_val, is_training_set_flag=False)
-    test_dataset = configure_dataset(test_paths, test_labels, shuffle_ds=False, augment_ds=False, is_training_set_flag=False)
+    train_dataset = configure_dataset(train_paths, train_labels, shuffle_ds=True, augment_ds=augment_train, is_training_set_flag=True, base_data_dir_param=base_data_dir)
+    val_dataset = configure_dataset(val_paths, val_labels, shuffle_ds=data_config.get('shuffle_validation_data', True), augment_ds=augment_val, is_training_set_flag=False, base_data_dir_param=base_data_dir)
+    test_dataset = configure_dataset(test_paths, test_labels, shuffle_ds=False, augment_ds=False, is_training_set_flag=False, base_data_dir_param=base_data_dir)
 
     # Log dataset cardinalities with error handling
     if train_dataset:
