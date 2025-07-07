@@ -455,6 +455,7 @@ def load_classification_data(
     logger.info(f"  - Windows paths skipped: {windows_path_count}")
     logger.info(f"  - Total items skipped: {skipped_count}")
     logger.info(f"  - Valid images found: {len(all_image_paths)}")
+    logger.info(f"  - Success rate: {len(all_image_paths)/len(metadata_items)*100:.2f}%")
 
     if not all_image_paths:
         logger.error("No valid image paths found after processing metadata.")
