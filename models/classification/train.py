@@ -156,16 +156,19 @@ def initialize_strategy() -> tf.distribute.Strategy:
     # Fallback to GPU/CPU
     logger.info("TPU initialization failed, falling back to GPU/CPU")
     gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:        
+    if gpus:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        
         if len(gpus) > 1:
             strategy = tf.distribute.MirroredStrategy()
-            logger.info(f"Multi-GPU strategy: {len(gpus)} GPUs")
+            logger.info(f"Multi-GPU strategy: {len(gpus)} GPUs detected. Using MirroredStrategy.")
         else:
-            strategy = tf.distribute.get_strategy()
-            logger.info(f"Single GPU strategy")
+            strategy = tf.distribute.OneDeviceStrategy(device="/gpu:0")
+            logger.info(f"Single GPU strategy: {len(gpus)} GPU detected. Using OneDeviceStrategy.")
         return strategy
     else:
-        logger.info("Using CPU strategy")
+        logger.info("No GPUs found. Using CPU strategy.")
         return tf.distribute.get_strategy()
 
 def set_mixed_precision_policy(config: Dict, strategy: tf.distribute.Strategy):
@@ -424,7 +427,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     use_pc = modalities_cfg.get('point_cloud', {}).get('enabled', False) if is_multimodal_enabled else False
     if use_pc:
         pc_cfg = modalities_cfg.get('point_cloud', {})
-        num_points = pc_cfg.get('num_points', 1024)
+        num_points = pc_cfg.get('num_points', 4096) # Read from config, default to 4096
         pc_input_shape = (num_points, 3) # (Num points, 3 coords)
         pc_input_tensor = layers.Input(shape=pc_input_shape, name='point_cloud_input')
         active_input_layers_list.append(pc_input_tensor)
@@ -1062,7 +1065,11 @@ def train_model(model: models.Model,
     # Debug tensor dtypes before training
     for batch in train_dataset.take(1):
         inputs, targets = batch
-        logger.info(f"Dataset inputs dtype: {inputs.dtype}")
+        if isinstance(inputs, dict):
+            for key, tensor in inputs.items():
+                logger.info(f"Dataset inputs dtype for '{key}': {tensor.dtype}")
+        else:
+            logger.info(f"Dataset inputs dtype: {inputs.dtype}")
         logger.info(f"Dataset targets dtype: {targets.dtype}")
         break
     
