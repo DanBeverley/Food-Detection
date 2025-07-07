@@ -556,38 +556,169 @@ def load_classification_data(
     preprocess_input_fn = _get_preprocess_fn(architecture)
     augmentation_pipeline = _build_augmentation_pipeline(data_config) # Pass data_config
 
-    def load_and_preprocess_image(path: str, label: int) -> Tuple[tf.Tensor, int]:
+    # Helper function for tf.py_function - handles complex file I/O in Python
+    def _load_modalities_py(rgb_path_tensor):
+        """Load depth and point cloud data given RGB path"""
+        # Handle both string tensors and byte tensors
+        if hasattr(rgb_path_tensor, 'numpy'):
+            path_numpy = rgb_path_tensor.numpy()
+            if isinstance(path_numpy, bytes):
+                rgb_path_str = path_numpy.decode('utf-8')
+            else:
+                rgb_path_str = str(path_numpy, 'utf-8') if isinstance(path_numpy, (bytes, bytearray)) else str(path_numpy)
+        else:
+            rgb_path_str = rgb_path_tensor.decode('utf-8') if isinstance(rgb_path_tensor, bytes) else str(rgb_path_tensor)
+        
+        # Load depth map
         try:
-            img = tf.io.read_file(path)
-            img = tf.image.decode_image(img, channels=3, expand_animations=False)
-            img = tf.image.resize(img, image_size) 
-            return img, label 
+            depth_dir_name = data_config.get('depth_map_dir_name', 'depth')
+            if '/original/' in rgb_path_str:
+                depth_path = rgb_path_str.replace('/original/', f'/{depth_dir_name}/')
+            else:
+                depth_path = rgb_path_str.replace('.jpg', '_depth.jpg').replace('.png', '_depth.png')
+            
+            if os.path.exists(depth_path):
+                # Load depth image
+                with open(depth_path, 'rb') as f:
+                    depth_bytes = f.read()
+                depth_img = tf.image.decode_image(depth_bytes, channels=1, expand_animations=False)
+                depth_img = tf.image.resize(depth_img, image_size)
+                depth_np = depth_img.numpy().astype(np.uint8)
+            else:
+                depth_np = np.zeros([*image_size, 1], dtype=np.uint8)
         except Exception as e:
-            logger.error(f"Error loading image {path}: {e}. Traceback: {traceback.format_exc()}")
-            dummy_img = tf.zeros([*image_size, 3], dtype=tf.float32)
-            dummy_label = tf.constant(0, dtype=tf.int32) 
-            return dummy_img, dummy_label
+            depth_np = np.zeros([*image_size, 1], dtype=np.uint8)
+        
+        # Load point cloud with correct path structure
+        try:
+            num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
+            
+            # Extract food class and item name from RGB path
+            # /kaggle/input/metafood3d/_MetaFood3D_new_RGBD_videos/RGBD_videos/Food/food_1/original/0.jpg
+            # -> /kaggle/input/metafood3d-pointcloud/_MetaFood3D_new_Point_cloud/Point_cloud/4096/Food/food_1/food_1_sampled_1.ply
+            if 'RGBD_videos' in rgb_path_str and '/Food/' in rgb_path_str:
+                path_parts = rgb_path_str.split('/')
+                food_class_idx = path_parts.index('Food') if 'Food' in path_parts else -1
+                
+                if food_class_idx >= 0 and food_class_idx + 1 < len(path_parts):
+                    food_class = path_parts[food_class_idx]  # 'Food'
+                    food_item = path_parts[food_class_idx + 1]  # 'food_1'
+                    
+                    # Build point cloud path according to user's example
+                    pc_root = data_config.get('point_cloud_root_dir', '/kaggle/input/metafood3d-pointcloud/_MetaFood3D_new_Point_cloud/Point_cloud')
+                    sampling_rate = data_config.get('point_cloud_sampling_rate_dir', '4096')
+                    suffix = data_config.get('point_cloud_suffix', '_sampled_1.ply')
+                    
+                    pc_path = f'{pc_root}/{sampling_rate}/{food_class}/{food_item}/{food_item}{suffix}'
+                    
+                    if os.path.exists(pc_path):
+                        # Simple PLY loading - read header to skip to data
+                        # For production, use optimized PLY parser
+                        try:
+                            with open(pc_path, 'rb') as f:
+                                # Skip PLY header (simplified)
+                                line = f.readline()
+                                while not line.startswith(b'end_header'):
+                                    line = f.readline()
+                                
+                                # Read point data (assuming x,y,z format)
+                                points = []
+                                for _ in range(min(num_points, 10000)):  # Limit for performance
+                                    line = f.readline().strip()
+                                    if not line:
+                                        break
+                                    try:
+                                        coords = line.decode('utf-8').split()[:3]
+                                        if len(coords) == 3:
+                                            point = [float(coords[0]), float(coords[1]), float(coords[2])]
+                                            points.append(point)
+                                    except:
+                                        break
+                                
+                                if points:
+                                    pc_np = np.array(points[:num_points], dtype=np.float32)
+                                    # Pad if needed
+                                    if len(pc_np) < num_points:
+                                        padding = np.zeros((num_points - len(pc_np), 3), dtype=np.float32)
+                                        pc_np = np.vstack([pc_np, padding])
+                                else:
+                                    pc_np = np.zeros([num_points, 3], dtype=np.float32)
+                        except Exception as e:
+                            pc_np = np.zeros([num_points, 3], dtype=np.float32)
+                    else:
+                        pc_np = np.zeros([num_points, 3], dtype=np.float32)
+                else:
+                    pc_np = np.zeros([num_points, 3], dtype=np.float32)
+            else:
+                pc_np = np.zeros([num_points, 3], dtype=np.float32)
+                
+        except Exception as e:
+            num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
+            pc_np = np.zeros([num_points, 3], dtype=np.float32)
+        
+        return depth_np, pc_np
 
     def configure_dataset(paths_np: np.ndarray, labels_np: np.ndarray, shuffle_ds: bool, augment_ds: bool, is_training_set_flag: bool) -> Optional[tf.data.Dataset]:
         if len(paths_np) == 0:
             return None
         try:
-            dataset = tf.data.Dataset.from_tensor_slices((list(paths_np), list(labels_np)))
-            dataset = dataset.map(load_and_preprocess_image, num_parallel_calls=tf.data.AUTOTUNE)
+            # Check if multimodal is enabled
+            use_depth_map = data_config.get('use_depth_map', False)
+            use_point_cloud = data_config.get('use_point_cloud', False)
+            is_multimodal = use_depth_map or use_point_cloud
             
-            def map_fn_wrapper(image, label):
+            # Create dataset from paths and labels
+            dataset = tf.data.Dataset.from_tensor_slices((list(paths_np), list(labels_np)))
+            
+            # Single unified processing function
+            def load_and_process(path, label):
+                # Load RGB image
+                image_data = tf.io.read_file(path)
+                image = tf.image.decode_image(image_data, channels=3, expand_animations=False)
+                image = tf.image.resize(image, image_size)
                 image = tf.cast(image, tf.float32)
+                
+                # Apply augmentation if enabled
                 if augmentation_pipeline is not None and augment_ds and is_training_set_flag:
                     # Add batch dimension for augmentation pipeline
                     image = tf.expand_dims(image, 0)
-                    image = augmentation_pipeline(image, training=True) # Pass training=True
+                    image = augmentation_pipeline(image, training=True)
                     # Remove batch dimension
                     image = tf.squeeze(image, 0)
+                
+                # Apply preprocessing
                 if preprocess_input_fn:
                     image = preprocess_input_fn(image)
-                return image, label
-
-            dataset = dataset.map(map_fn_wrapper, num_parallel_calls=tf.data.AUTOTUNE)
+                
+                if is_multimodal:
+                    # Load additional modalities using tf.py_function
+                    depth_data, pc_data = tf.py_function(
+                        func=_load_modalities_py,
+                        inp=[path],
+                        Tout=[tf.uint8, tf.float32]
+                    )
+                    
+                    # Set shapes for depth and point cloud data
+                    depth_data.set_shape([*image_size, 1])
+                    num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
+                    pc_data.set_shape([num_points, 3])
+                    
+                    # Convert depth to float32 and normalize
+                    depth_data = tf.cast(depth_data, tf.float32) / 255.0
+                    
+                    # Create multimodal inputs dictionary
+                    inputs_dict = {
+                        'rgb_input': image,
+                        'depth_input': depth_data,
+                        'point_cloud_input': pc_data
+                    }
+                    
+                    return inputs_dict, label
+                else:
+                    # Return single RGB input
+                    return image, label
+            
+            dataset = dataset.map(load_and_process, num_parallel_calls=tf.data.AUTOTUNE)
 
             if shuffle_ds:
                 buffer_size = data_config.get('shuffle_buffer_size', 1000)
