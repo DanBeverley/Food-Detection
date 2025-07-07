@@ -124,7 +124,7 @@ def _build_augmentation_pipeline(data_conf: Dict) -> Optional[tf.keras.Sequentia
 def mixup(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_classes: int) -> Tuple[tf.Tensor, tf.Tensor]:
     batch_size = tf.shape(batch_images)[0]
     # Ensure labels are one-hot.
-    if len(tf.shape(batch_labels)) == 1: # Sparse labels (batch_size,)
+    if tf.rank(batch_labels) == 1: # Sparse labels (batch_size,)
         labels_one_hot = tf.one_hot(tf.cast(batch_labels, dtype=tf.int32), depth=num_classes)
     else: # Already one-hot (batch_size, num_classes)
         labels_one_hot = batch_labels
@@ -155,7 +155,7 @@ def cutmix(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_c
     image_h = tf.shape(batch_images)[1]
     image_w = tf.shape(batch_images)[2]
 
-    if len(tf.shape(batch_labels)) == 1:
+    if tf.rank(batch_labels) == 1:
         labels_one_hot = tf.one_hot(tf.cast(batch_labels, dtype=tf.int32), depth=num_classes)
     else:
         labels_one_hot = batch_labels
