@@ -563,25 +563,13 @@ def load_classification_data(
     # Helper function for tf.py_function - handles complex file I/O in Python
     def _load_modalities_py(rgb_path_tensor, base_data_dir_tensor):
         """Load depth and point cloud data given RGB path"""
-        # Handle both string tensors and byte tensors
-        if hasattr(rgb_path_tensor, 'numpy'):
-            path_numpy = rgb_path_tensor.numpy()
-            if isinstance(path_numpy, bytes):
-                rgb_path_str = path_numpy.decode('utf-8')
-            else:
-                rgb_path_str = str(path_numpy)
-        else:
-            rgb_path_str = rgb_path_tensor.decode('utf-8') if isinstance(rgb_path_tensor, bytes) else str(rgb_path_tensor)
-
-        if hasattr(base_data_dir_tensor, 'numpy'):
-            base_data_dir_str = base_data_dir_tensor.numpy().decode('utf-8')
-        else:
-            base_data_dir_str = base_data_dir_tensor.decode('utf-8') if isinstance(base_data_dir_tensor, bytes) else str(base_data_dir_tensor)
+        # Convert tensors to Python strings for os.path operations
+        rgb_path_str = tf.compat.as_str_any(rgb_path_tensor)
+        base_data_dir_str = tf.compat.as_str_any(base_data_dir_tensor)
 
         # Load depth map
         try:
             depth_dir_name = data_config.get('depth_map_dir_name', 'depth')
-            # Assuming rgb_path_str is now the relative path from base_data_dir
             # Reconstruct the full path to the RGB image first
             full_rgb_path = os.path.join(base_data_dir_str, rgb_path_str)
 
@@ -666,14 +654,14 @@ def load_classification_data(
             def load_and_process(path, label):
                 # Load RGB image
                 try:
-                    logger.debug(f"Attempting to read RGB image from: {path.numpy().decode('utf-8')}")
+                    logger.debug(f"Attempting to read RGB image from: {tf.strings.as_string(path)}")
                     image_data = tf.io.read_file(path)
                     image = tf.image.decode_image(image_data, channels=3, expand_animations=False)
                     image = tf.image.resize(image, image_size)
                     image = tf.cast(image, tf.float32)
-                    logger.debug(f"Successfully loaded RGB image from: {path.numpy().decode('utf-8')}")
+                    logger.debug(f"Successfully loaded RGB image from: {tf.strings.as_string(path)}")
                 except Exception as e:
-                    logger.error(f"Error loading or decoding RGB image {path.numpy().decode('utf-8')}: {e}")
+                    logger.error(f"Error loading or decoding RGB image {tf.strings.as_string(path)}: {e}")
                     # Return a dummy image to prevent pipeline from breaking
                     image = tf.zeros((*image_size, 3), dtype=tf.float32)
                 
