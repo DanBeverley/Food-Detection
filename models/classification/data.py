@@ -734,17 +734,20 @@ def load_classification_data(
             
             dataset = dataset.batch(batch_size, drop_remainder=is_training_set_flag)
             
-            # Convert integer labels to one-hot encoding  
+            # Convert integer labels to one-hot encoding with explicit shape handling
+            @tf.function
             def convert_to_one_hot(images, labels):
                 # Cast labels to int32 first to ensure compatibility
                 labels = tf.cast(labels, tf.int32)
-                labels_one_hot = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
                 
-                # Explicitly set shape to help with mixed precision
-                # The batch dimension should be preserved from the batching step
-                batch_size = tf.shape(labels)[0]
-                labels_one_hot = tf.reshape(labels_one_hot, [batch_size, num_classes])
-                labels_one_hot.set_shape([None, num_classes])
+                # Create one-hot encoding with explicit dtype
+                labels_one_hot = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
+                if is_training_set_flag:
+                    # For training with drop_remainder=True, we have fixed batch size
+                    labels_one_hot.set_shape([batch_size, num_classes])
+                else:
+                    # For validation/test, batch size might vary but we still know the classes dim
+                    labels_one_hot.set_shape([None, num_classes])
                 
                 return images, labels_one_hot
             
