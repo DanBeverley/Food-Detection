@@ -763,6 +763,8 @@ def load_classification_data(
             dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
             return dataset
         except Exception as e:
+            import sys
+            print(f"!!!!!! EXCEPTION IN CONFIGURE_DATASET: {e}", file=sys.stderr)
             logger.error(f"Error configuring dataset: {e}. Traceback: {traceback.format_exc()}")
             return None
 
