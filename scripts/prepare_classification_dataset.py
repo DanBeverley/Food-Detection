@@ -26,7 +26,6 @@ def create_dataset_metadata(source_rgbd_base_dir_path: str, output_metadata_dir_
     output_meta_dir = Path(output_metadata_dir_path)
     metadata_file_path = output_meta_dir / "metadata.json"
 
-    source_dir = os.path.join("E:", "MetaFood3D", "_MetaFood3D_new_RGBD_videos", "RGBD_videos")
     print(f"Checking for source directory: {source_dir}")
     if not os.path.isdir(source_dir):
         logging.error(f"Source directory not found: {source_dir}")
