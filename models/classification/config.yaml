@@ -1,19 +1,19 @@
 data:
   metadata_path: "data/classification/metadata.json" 
   image_size: [224, 224] 
-  batch_size: 128  # Optimal for T4x2 GPU (2 GPUs × 64 per GPU)
+  batch_size: 32  # Adjusted for single GPU
   split_ratio: 0.2
-  debug_max_total_samples: null # Disabled for production - use all samples
+  debug_max_total_samples: 100 # Use a small subset for local debugging
 
   # Data splits for better validation
   validation_split: 0.2
   test_split: 0.1
   random_seed: 42
 
-  use_depth_map: true  # Enable for production testing
+  use_depth_map: true
   depth_map_dir_name: "depth" 
 
-  use_point_cloud: true  # Enable for production testing
+  use_point_cloud: true
   point_cloud_root_dir: "/kaggle/input/metafood3d-pointcloud/_MetaFood3D_new_Point_cloud/Point_cloud" 
   point_cloud_sampling_rate_dir: "4096" 
   point_cloud_suffix: "_sampled_1.ply" 
@@ -134,8 +134,8 @@ metrics: ["accuracy"]
 training:
   epochs: 30 
   debug_epochs: 3  
-  use_mixed_precision: true  # Enable for T4x2 GPU efficiency
-  use_tpu: false  # Disable TPU for GPU training  
+  use_mixed_precision: true
+  use_tpu: false  
   
   # DISABLED for debugging
   use_class_weights: false
