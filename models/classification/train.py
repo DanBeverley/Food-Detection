@@ -781,22 +781,21 @@ def _get_loss_function(loss_function_name: str, loss_params: Dict, num_classes: 
         )
         
         if training_cfg.get('use_mixed_precision') is True:
-            # Wrap loss to ensure dtype compatibility
-            class MixedPrecisionLoss(tf.keras.losses.Loss):
-                def __init__(self, base_loss):
-                    super().__init__(name=base_loss.name, reduction=base_loss.reduction)
-                    self.base_loss = base_loss
+            # For mixed precision, create a simple wrapper that handles casting
+            def mixed_precision_categorical_crossentropy(y_true, y_pred):
+                # Ensure both tensors are float32
+                y_true = tf.cast(y_true, tf.float32)
+                y_pred = tf.cast(y_pred, tf.float32)
                 
-                @tf.function
-                def call(self, y_true, y_pred):
-                    # For mixed precision, ensure float32 casting and simple loss computation
-                    y_true = tf.cast(y_true, tf.float32)
-                    y_pred = tf.cast(y_pred, tf.float32)
-                    
-                    # Direct call without complex shape operations that cause issues
-                    return self.base_loss(y_true, y_pred)
+                # Use the base loss function directly with proper casting
+                return tf.keras.losses.categorical_crossentropy(
+                    y_true, 
+                    y_pred, 
+                    from_logits=loss_params.get('from_logits', False),
+                    label_smoothing=loss_params.get('label_smoothing', 0.0)
+                )
             
-            loss_instance = MixedPrecisionLoss(base_loss)
+            loss_instance = mixed_precision_categorical_crossentropy
         else:
             loss_instance = base_loss
     elif loss_function_name.lower() == 'sparsecategoricalcrossentropy' or loss_function_name.lower() == 'sparse_categorical_crossentropy':
@@ -828,21 +827,21 @@ def _get_loss_function(loss_function_name: str, loss_params: Dict, num_classes: 
         )
         
         if training_cfg.get('use_mixed_precision') is True:
-            class MixedPrecisionLoss(tf.keras.losses.Loss):
-                def __init__(self, base_loss):
-                    super().__init__(name=base_loss.name, reduction=base_loss.reduction)
-                    self.base_loss = base_loss
+            # For mixed precision, create a simple wrapper that handles casting
+            def mixed_precision_categorical_crossentropy(y_true, y_pred):
+                # Ensure both tensors are float32
+                y_true = tf.cast(y_true, tf.float32)
+                y_pred = tf.cast(y_pred, tf.float32)
                 
-                @tf.function
-                def call(self, y_true, y_pred):
-                    # For mixed precision, ensure float32 casting and simple loss computation
-                    y_true = tf.cast(y_true, tf.float32)
-                    y_pred = tf.cast(y_pred, tf.float32)
-                    
-                    # Direct call without complex shape operations that cause issues
-                    return self.base_loss(y_true, y_pred)
+                # Use the base loss function directly with proper casting
+                return tf.keras.losses.categorical_crossentropy(
+                    y_true, 
+                    y_pred, 
+                    from_logits=loss_params.get('from_logits', False),
+                    label_smoothing=loss_params.get('label_smoothing', 0.0)
+                )
             
-            loss_instance = MixedPrecisionLoss(base_loss)
+            loss_instance = mixed_precision_categorical_crossentropy
         else:
             loss_instance = base_loss
 
