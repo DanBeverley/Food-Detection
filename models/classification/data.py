@@ -593,18 +593,17 @@ def load_classification_data(
         try:
             num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
             
-            # Extract food class and item name from RGB path
-            # /kaggle/input/metafood3d/_MetaFood3D_new_RGBD_videos/RGBD_videos/Food/food_1/original/0.jpg
-            # -> /kaggle/input/metafood3d-pointcloud/_MetaFood3D_new_Point_cloud/Point_cloud/4096/Food/food_1/food_1_sampled_1.ply
-            if 'RGBD_videos' in rgb_path_str and '/Food/' in rgb_path_str:
+            if 'RGBD_videos' in rgb_path_str:
                 path_parts = rgb_path_str.split('/')
-                food_class_idx = path_parts.index('Food') if 'Food' in path_parts else -1
+                rgbd_idx = -1
+                for i, part in enumerate(path_parts):
+                    if part == 'RGBD_videos':
+                        rgbd_idx = i
+                        break
                 
-                if food_class_idx >= 0 and food_class_idx + 1 < len(path_parts):
-                    food_class = path_parts[food_class_idx]  # 'Food'
-                    food_item = path_parts[food_class_idx + 1]  # 'food_1'
-                    
-                    # Build point cloud path according to user's example
+                if rgbd_idx >= 0 and rgbd_idx + 2 < len(path_parts):
+                    food_class = path_parts[rgbd_idx + 1]
+                    food_item = path_parts[rgbd_idx + 2]
                     pc_root = data_config.get('point_cloud_root_dir', '/kaggle/input/metafood3d-pointcloud/_MetaFood3D_new_Point_cloud/Point_cloud')
                     sampling_rate = data_config.get('point_cloud_sampling_rate_dir', '4096')
                     suffix = data_config.get('point_cloud_suffix', '_sampled_1.ply')
