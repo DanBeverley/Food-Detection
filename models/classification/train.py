@@ -787,10 +787,13 @@ def _get_loss_function(loss_function_name: str, loss_params: Dict, num_classes: 
                     super().__init__(name=base_loss.name, reduction=base_loss.reduction)
                     self.base_loss = base_loss
                 
+                @tf.function
                 def call(self, y_true, y_pred):
-                    # Ensure both tensors are float32 for loss computation
+                    # For mixed precision, ensure float32 casting and simple loss computation
                     y_true = tf.cast(y_true, tf.float32)
                     y_pred = tf.cast(y_pred, tf.float32)
+                    
+                    # Direct call without complex shape operations that cause issues
                     return self.base_loss(y_true, y_pred)
             
             loss_instance = MixedPrecisionLoss(base_loss)
@@ -830,9 +833,13 @@ def _get_loss_function(loss_function_name: str, loss_params: Dict, num_classes: 
                     super().__init__(name=base_loss.name, reduction=base_loss.reduction)
                     self.base_loss = base_loss
                 
+                @tf.function
                 def call(self, y_true, y_pred):
+                    # For mixed precision, ensure float32 casting and simple loss computation
                     y_true = tf.cast(y_true, tf.float32)
                     y_pred = tf.cast(y_pred, tf.float32)
+                    
+                    # Direct call without complex shape operations that cause issues
                     return self.base_loss(y_true, y_pred)
             
             loss_instance = MixedPrecisionLoss(base_loss)
