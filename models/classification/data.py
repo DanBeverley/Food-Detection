@@ -425,6 +425,7 @@ def load_classification_data(
         else:
             full_image_path = Path(relative_path)
 
+        logger.debug(f"Checking image path: {full_image_path}, exists: {full_image_path.exists()}")
         if not full_image_path.exists():
             logger.warning(f"Image file not found: {full_image_path}. Skipping.")
             skipped_count += 1
