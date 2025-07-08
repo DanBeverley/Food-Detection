@@ -754,9 +754,9 @@ def _create_optimizer(optimizer_name: str, learning_rate: float, clipnorm: Optio
 
 
 def _get_loss_function(loss_function_name: str, loss_params: Dict, num_classes: int, config: Dict) -> losses.Loss:
-    # Keras handles mixed precision and reduction correctly for distributed strategies
-    # We don't need manual casting - let Keras do its job
-    reduction = tf.keras.losses.Reduction.AUTO
+    # Use SUM_OVER_BATCH_SIZE which is the standard for most training scenarios
+    # This works well with distributed training and mixed precision
+    reduction = tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
 
     if loss_function_name.lower() in ['categoricalcrossentropy', 'categorical_crossentropy']:
         loss_instance = losses.CategoricalCrossentropy(
