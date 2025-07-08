@@ -755,9 +755,9 @@ def load_classification_data(
                     
                     # 5. Add final validation clipping to prevent any extreme values
                     inputs_dict = {
-                        'rgb_input': tf.clip_by_value(image, -3.0, 3.0),
-                        'depth_input': tf.clip_by_value(depth_data_3_channel, -3.0, 3.0),  
-                        'point_cloud_input': tf.clip_by_value(pc_data, -1.0, 1.0)
+                        'rgb_input': tf.clip_by_value(image, -5.0, 5.0),
+                        'depth_input': tf.clip_by_value(depth_data_3_channel, -5.0, 5.0),  
+                        'point_cloud_input': tf.clip_by_value(pc_data, -2.0, 2.0)
                     }
                     
                     return inputs_dict, label

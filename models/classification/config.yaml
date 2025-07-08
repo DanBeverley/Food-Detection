@@ -80,8 +80,8 @@ model:
   architecture: "MobileNetV3Small" 
   use_pretrained_weights: true 
   fine_tune: true 
-  fine_tune_layers: 10  # Only top 10 layers for stability
-
+  fine_tune_layers: 30  
+  
   # Production Classification Head with Regularization
   classification_head:
     pooling: "GlobalAveragePooling2D" 
@@ -109,11 +109,10 @@ model:
 # Production Optimizer Configuration
 optimizer:
   name: "AdamW"
-  learning_rate: 0.0000001  
+  learning_rate: 0.0001  
   weight_decay: 0.0001 
-  clipnorm: 0.1  
+  clipnorm: 1.0  
   
-  # Learning rate scheduling - DISABLED for debugging
   schedule:
     enabled: false
     type: "cosine_decay_restarts"
@@ -127,7 +126,7 @@ optimizer:
 loss:
   name: "CategoricalCrossentropy" 
   params:
-    label_smoothing: 0.0  # DISABLED to test if this is causing stuck loss
+    label_smoothing: 0.05  
     from_logits: false
 
 # Metrics Configuration
