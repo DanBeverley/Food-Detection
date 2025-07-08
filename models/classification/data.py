@@ -205,8 +205,13 @@ def cutmix(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_c
         lambda_val = gamma_1_sample / (gamma_1_sample + gamma_2_sample)
     else:
         if isinstance(batch_images, dict):
+            for _, tensor in batch_images.items():
+                tensor.set_shape([None]+tensor.shape.as_list()[1:])
+                labels_one_hot.set_shape([None, num_classes])
             return batch_images, labels_one_hot
         else:
+            rgb_images.set_shape([None]+rgb_images.shape.as_list()[1:])
+            labels_one_hot.set_shape([None, num_classes])
             return rgb_images, labels_one_hot
     
     shuffled_indices = tf.random.shuffle(tf.range(batch_size))
@@ -247,12 +252,18 @@ def cutmix(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_c
     one_val_lbl = tf.cast(1.0, dtype=labels_one_hot.dtype)
     mixed_labels = lambda_val * labels_one_hot + (one_val_lbl - lambda_val) * shuffled_labels_one_hot
     
+    mixed_labels.set_shape([None, num_classes])
     # Reconstruct output
     if isinstance(batch_images, dict):
         output_images = batch_images.copy()
         output_images['rgb_input'] = cutmix_images
+        # Set shape for all tensors in dictionary
+        for _, tensor in output_images.items():
+            tensor.set_shape([None]+tensor.shape.as_list()[1:])
         return output_images, mixed_labels
     else:
+        # Set shape for single image tensor
+        cutmix_images.set_shape([None] + rgb_images.shape.as_list()[1:])
         return cutmix_images, mixed_labels
 
 # Custom augmentation layers for overfitting prevention
