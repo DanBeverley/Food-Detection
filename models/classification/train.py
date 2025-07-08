@@ -228,7 +228,6 @@ class DetailedLoggingCallback(callbacks.Callback):
             print(log_message, flush=True)
 
 def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.Model:
-    # No custom model needed - Keras handles mixed precision automatically
     
     model_cfg = config.get('model', {})
     data_cfg = config.get('data', {})
@@ -366,10 +365,10 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     
     all_branch_features.append(pooled_rgb_features)
 
-    # --- Depth Branch (conditional on multi-modal AND specific depth config) ---
+    # Depth Branch (conditional on multi-modal AND specific depth config)
     use_depth = modalities_cfg.get('depth', {}).get('enabled', False) if is_multimodal_enabled else False
     if use_depth:
-        depth_input_shape_config = modalities_cfg.get('depth', {}).get('input_shape', [*image_size, 1])
+        depth_input_shape_config = modalities_cfg.get('depth', {}).get('input_shape', [*image_size, 3])
         depth_input_shape = tuple(depth_input_shape_config) # Ensure it's a tuple
         depth_input_tensor = layers.Input(shape=depth_input_shape, name='depth_input')
         active_input_layers_list.append(depth_input_tensor)
@@ -384,12 +383,6 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
 
         depth_x = depth_input_tensor
         
-        # Apply normalization based on config - CRITICAL for preventing NaN!
-        depth_preprocessing_cfg = modalities_cfg.get('depth', {})
-        if depth_preprocessing_cfg.get('normalize', False):
-            # Assuming depth values are 0-255. Change to 1./65535 if 16-bit depth maps
-            logger.info("Applying Rescaling(1./255) to depth input to prevent NaN")
-            depth_x = layers.Rescaling(1./255)(depth_x)
         # If a pretrained model adapted for depth were used, it might expect 3 channels:
         # if depth_arch_cfg.get('repeat_channels_for_pretrained', False):
         #     logger.info("Repeating depth channel 3 times for potentially pretrained model input.")
@@ -618,16 +611,6 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
             clipnorm=clipnorm,
             clipvalue=clipvalue
         )
-    
-    # Apply loss scaling for mixed precision  
-    training_cfg = config.get('training', {})
-    if training_cfg.get('use_mixed_precision') is True:
-        optimizer_instance = mixed_precision.LossScaleOptimizer(
-            optimizer_instance,
-            initial_scale=128.0,  # Much smaller to prevent gradient explosion
-            dynamic_growth_steps=2000
-        )
-        logger.info("Applied conservative loss scaling for mixed precision training")
     
     # Log gradient clipping configuration
     if clipnorm is not None:
