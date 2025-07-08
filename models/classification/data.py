@@ -660,9 +660,49 @@ def load_classification_data(
                     
                     logger.debug(f"Attempting to load point cloud from: {pc_path}") # Add debug log
                     if os.path.exists(pc_path):
-                        # (rest of the point cloud loading logic - currently dummy)
-                        pc_np = np.zeros([num_points, 3], dtype=np.float32) # Placeholder
-                        logger.debug(f"Point cloud found: {pc_path}")
+                        # Load actual PLY file
+                        try:
+                            pc_data = []
+                            with open(pc_path, 'r') as f:
+                                lines = f.readlines()
+                                
+                            # Find where vertex data starts
+                            vertex_count = 0
+                            data_start = 0
+                            for i, line in enumerate(lines):
+                                if line.startswith('element vertex'):
+                                    vertex_count = int(line.split()[-1])
+                                elif line.startswith('end_header'):
+                                    data_start = i + 1
+                                    break
+                            
+                            # Read vertex coordinates
+                            for i in range(data_start, min(data_start + vertex_count, data_start + num_points)):
+                                if i < len(lines):
+                                    coords = lines[i].strip().split()
+                                    if len(coords) >= 3:
+                                        x, y, z = float(coords[0]), float(coords[1]), float(coords[2])
+                                        pc_data.append([x, y, z])
+                            
+                            # Convert to numpy and handle size
+                            if len(pc_data) > 0:
+                                pc_np = np.array(pc_data, dtype=np.float32)
+                                if len(pc_np) > num_points:
+                                    # Random sampling if too many points
+                                    indices = np.random.choice(len(pc_np), num_points, replace=False)
+                                    pc_np = pc_np[indices]
+                                elif len(pc_np) < num_points:
+                                    # Pad with zeros if too few points
+                                    padding = np.zeros((num_points - len(pc_np), 3), dtype=np.float32)
+                                    pc_np = np.vstack([pc_np, padding])
+                            else:
+                                pc_np = np.zeros([num_points, 3], dtype=np.float32)
+                                
+                            logger.debug(f"Loaded {len(pc_data)} points from: {pc_path}")
+                            
+                        except Exception as e:
+                            logger.warning(f"Error reading PLY file {pc_path}: {e}. Using dummy.")
+                            pc_np = np.zeros([num_points, 3], dtype=np.float32)
                     else:
                         logger.warning(f"Point cloud file not found: {pc_path}. Using dummy.")
                         pc_np = np.zeros([num_points, 3], dtype=np.float32)
