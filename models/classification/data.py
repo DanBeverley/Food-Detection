@@ -145,8 +145,14 @@ def mixup(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_cl
         lambda_lbl = tf.reshape(lambda_val, [batch_size, 1])
     else: # No mixing if alpha is 0
         if isinstance(batch_images, dict):
+            # Set shape for consistency even when no mixing
+            for _, tensor in batch_images.items():
+                tensor.set_shape([None] + tensor.shape.as_list()[1:])
+            labels_one_hot.set_shape([None, num_classes])
             return batch_images, labels_one_hot
         else:
+            rgb_images.set_shape([None] + rgb_images.shape.as_list()[1:])
+            labels_one_hot.set_shape([None, num_classes])
             return rgb_images, labels_one_hot
 
     shuffled_indices = tf.random.shuffle(tf.range(batch_size))
@@ -160,12 +166,19 @@ def mixup(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_cl
     one_val_lbl = tf.cast(1.0, dtype=labels_one_hot.dtype)
     mixed_labels = lambda_lbl * labels_one_hot + (one_val_lbl - lambda_lbl) * shuffled_labels_one_hot
     
+    # --- CRITICAL FIX: Set the shape before returning ---
+    mixed_labels.set_shape([None, num_classes])
+    
     # Reconstruct output
     if isinstance(batch_images, dict):
         output_images = batch_images.copy()
         output_images['rgb_input'] = mixed_images
+        # Set the shape for all tensors in the dictionary
+        for _, tensor in output_images.items():
+            tensor.set_shape([None] + tensor.shape.as_list()[1:])
         return output_images, mixed_labels
     else:
+        mixed_images.set_shape([None] + rgb_images.shape.as_list()[1:])
         return mixed_images, mixed_labels
 
 @tf.function
