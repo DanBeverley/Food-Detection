@@ -743,7 +743,7 @@ def load_classification_data(
                     
                     # 4. Normalize Point Cloud data robustly
                     # This centers the data and scales it, preventing huge coordinate values
-                    pc_data = tf.keras.layers.LayerNormalization(axis=-1)(pc_data)
+                    pc_data = tf.nn.l2_normalize(pc_data, axis=-1)
                     
                     # Create multimodal inputs dictionary
                     inputs_dict = {
