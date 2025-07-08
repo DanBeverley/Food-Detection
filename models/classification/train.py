@@ -539,12 +539,19 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
                 activation=activation, 
                 kernel_regularizer=regularizer,
                 activity_regularizer=activity_regularizer,
+                kernel_initializer='he_normal',  # He initialization for ReLU
+                bias_initializer='zeros',
                 name=f'head_dense_{i+1}'
             )(x)
             
             # Add batch normalization if enabled
             if layer_batch_norm:
-                x = layers.BatchNormalization(momentum=batch_norm_momentum, name=f'head_bn_{i+1}')(x)
+                x = layers.BatchNormalization(
+                    momentum=batch_norm_momentum, 
+                    gamma_initializer='ones',
+                    beta_initializer='zeros',
+                    name=f'head_bn_{i+1}'
+                )(x)
             
             # Add layer-specific dropout
             if layer_dropout > 0:
@@ -570,6 +577,8 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         num_classes, 
         activation=output_activation, 
         kernel_regularizer=output_regularizer,
+        kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),  # Small weights for output
+        bias_initializer='zeros',
         name='output_layer'
     )(x)
     
