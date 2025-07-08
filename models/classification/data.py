@@ -715,10 +715,6 @@ def load_classification_data(
                     # Remove batch dimension
                     image = tf.squeeze(image, 0)
                 
-                # Apply preprocessing
-                if preprocess_input_fn:
-                    image = preprocess_input_fn(image)
-                
                 if is_multimodal:
                     # Load additional modalities using tf.py_function
                     depth_data, pc_data = tf.py_function(
@@ -732,19 +728,35 @@ def load_classification_data(
                     num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
                     pc_data.set_shape([num_points, 3])
                     
-                    # Convert depth to float32 and normalize
-                    depth_data = tf.cast(depth_data, tf.float32) / 255.0
+                    # Normalize modalities 
+                    
+                    # 1. Normalize depth data to be in the [0, 255] range
+                    depth_data = tf.cast(depth_data, tf.float32)
+                    
+                    # 2. Concatenate Depth map 3 times to mimic RGB channels
+                    depth_data_3_channel = tf.concat([depth_data, depth_data, depth_data], axis=-1)
+
+                    # 3. Apply the similar preprocessing to both RGB and Depth
+                    if preprocess_input_fn:
+                        image = preprocess_input_fn(image)
+                        depth_data_3_channel = preprocess_input_fn(depth_data_3_channel)
+                    
+                    # 4. Normalize Point Cloud data robustly
+                    # This centers the data and scales it, preventing huge coordinate values
+                    pc_data = tf.keras.utils.normalize(pc_data, axis=-1)
                     
                     # Create multimodal inputs dictionary
                     inputs_dict = {
                         'rgb_input': image,
-                        'depth_input': depth_data,
+                        'depth_input': depth_data_3_channel,  
                         'point_cloud_input': pc_data
                     }
                     
                     return inputs_dict, label
                 else:
-                    # Return single RGB input
+                    # Apply preprocessing to RGB-only case
+                    if preprocess_input_fn:
+                        image = preprocess_input_fn(image)
                     return image, label
             
             dataset = dataset.map(load_and_process, num_parallel_calls=tf.data.AUTOTUNE)
