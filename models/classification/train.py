@@ -35,18 +35,40 @@ class DebugCallback(tf.keras.callbacks.Callback):
         
     def on_train_batch_end(self, batch, logs=None):
         self.batch_count += 1
-        if self.batch_count % 100 == 0:
-            current_loss = logs.get('loss', 0)
-            current_acc = logs.get('categorical_accuracy', 0)
-            logger.info(f"Batch {self.batch_count}: Loss={current_loss:.4f}, Acc={current_acc:.4f}")
+        current_loss = logs.get('loss', 0)
+        current_acc = logs.get('categorical_accuracy', 0)
+        
+        # Check for NaN/infinite loss early
+        if tf.math.is_nan(current_loss) or tf.math.is_inf(current_loss):
+            logger.error(f"GRADIENT EXPLOSION DETECTED at batch {self.batch_count}! Loss: {current_loss}")
+            logger.error("Stopping training due to gradient explosion.")
+            self.model.stop_training = True
+            return
+            
+        if self.batch_count % 10 == 0:  # More frequent monitoring during first steps
+            logger.info(f"Batch {self.batch_count}: Loss={current_loss:.6f}, Acc={current_acc:.4f}")
             
             # Check learning rate more robustly
             try:
-                # K.get_value is safer for retrieving tensor values
                 lr_val = K.get_value(self.model.optimizer.learning_rate)
                 logger.info(f"Learning Rate: {float(lr_val)}")
             except Exception as e:
                 logger.warning(f"Could not retrieve learning rate: {e}")
+                
+            # Monitor gradient norms for early detection
+            try:
+                total_norm = 0.0
+                for var in self.model.trainable_variables:
+                    if hasattr(var, 'gradient') and var.gradient is not None:
+                        var_norm = tf.norm(var.gradient)
+                        total_norm += var_norm ** 2
+                total_norm = tf.sqrt(total_norm)
+                logger.info(f"Gradient norm: {float(total_norm):.6f}")
+                
+                if float(total_norm) > 100.0:  # Warning threshold
+                    logger.warning(f"Large gradient norm detected: {float(total_norm):.6f}")
+            except Exception as e:
+                logger.debug(f"Could not compute gradient norm: {e}")
 
 from typing import Dict, Tuple, Any, List, Optional
 

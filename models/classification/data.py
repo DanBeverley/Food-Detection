@@ -728,10 +728,17 @@ def load_classification_data(
                     num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
                     pc_data.set_shape([num_points, 3])
                     
-                    # Normalize modalities 
+                    # Normalize modalities robustly to prevent gradient explosion
                     
-                    # 1. Normalize depth data to be in the [0, 255] range
+                    # 1. Normalize depth data to be in the [0, 255] range with proper clipping
                     depth_data = tf.cast(depth_data, tf.float32)
+                    # Clip extreme depth values and normalize to [0, 255] range
+                    depth_data = tf.clip_by_value(depth_data, 0.0, 10000.0)  # Clip extreme depth values
+                    depth_min = tf.reduce_min(depth_data)
+                    depth_max = tf.reduce_max(depth_data)
+                    # Avoid division by zero
+                    depth_range = tf.maximum(depth_max - depth_min, 1e-8)
+                    depth_data = (depth_data - depth_min) / depth_range * 255.0
                     
                     # 2. Concatenate Depth map 3 times to mimic RGB channels
                     depth_data_3_channel = tf.concat([depth_data, depth_data, depth_data], axis=-1)
@@ -741,15 +748,16 @@ def load_classification_data(
                         image = preprocess_input_fn(image)
                         depth_data_3_channel = preprocess_input_fn(depth_data_3_channel)
                     
-                    # 4. Normalize Point Cloud data robustly
-                    # This centers the data and scales it, preventing huge coordinate values
+                    # 4. Normalize Point Cloud data robustly with clipping
+                    # Clip extreme coordinates first, then normalize
+                    pc_data = tf.clip_by_value(pc_data, -1000.0, 1000.0)  # Clip extreme coordinates
                     pc_data = tf.nn.l2_normalize(pc_data, axis=-1)
                     
-                    # Create multimodal inputs dictionary
+                    # 5. Add final validation clipping to prevent any extreme values
                     inputs_dict = {
-                        'rgb_input': image,
-                        'depth_input': depth_data_3_channel,  
-                        'point_cloud_input': pc_data
+                        'rgb_input': tf.clip_by_value(image, -10.0, 10.0),
+                        'depth_input': tf.clip_by_value(depth_data_3_channel, -10.0, 10.0),  
+                        'point_cloud_input': tf.clip_by_value(pc_data, -10.0, 10.0)
                     }
                     
                     return inputs_dict, label
