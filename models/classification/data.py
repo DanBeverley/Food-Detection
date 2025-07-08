@@ -742,11 +742,32 @@ def load_classification_data(
                 
                 # Create one-hot encoding with explicit dtype
                 labels_one_hot = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
+
+                if is_multimodal:
+                    # Handle dictionary of inputs for multimodal case
+                    expected_shapes = {
+                        'rgb_input': [None, *image_size, 3],
+                        'depth_input': [None, *image_size, 1],
+                        'point_cloud_input': [None, data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096), 3]
+                    }
+                    
+                    # Set shape for each tensor in the dictionary
+                    for key, tensor in images.items():
+                        if key in expected_shapes:
+                            tensor.set_shape(expected_shapes[key])
+                else:
+                    # Handle single RGB input case
+                    if is_training_set_flag:
+                        # For training, batch size is fixed (due to drop_remainder=True)
+                        images.set_shape([batch_size, *image_size, 3])
+                    else:
+                        # For val/test, the last batch can be smaller
+                        images.set_shape([None, *image_size, 3])
+
+                # Set shape for the labels
                 if is_training_set_flag:
-                    # For training with drop_remainder=True, we have fixed batch size
                     labels_one_hot.set_shape([batch_size, num_classes])
                 else:
-                    # For validation/test, batch size might vary but we still know the classes dim
                     labels_one_hot.set_shape([None, num_classes])
                 
                 return images, labels_one_hot
