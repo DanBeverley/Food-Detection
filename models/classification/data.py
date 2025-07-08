@@ -743,7 +743,7 @@ def load_classification_data(
                     
                     # 4. Normalize Point Cloud data robustly
                     # This centers the data and scales it, preventing huge coordinate values
-                    pc_data = tf.keras.utils.normalize(pc_data, axis=-1)
+                    pc_data = tf.keras.layers.LayerNormalization(axis=-1)(pc_data)
                     
                     # Create multimodal inputs dictionary
                     inputs_dict = {
@@ -783,7 +783,7 @@ def load_classification_data(
                     # Handle dictionary of inputs for multimodal case
                     expected_shapes = {
                         'rgb_input': [None, *image_size, 3],
-                        'depth_input': [None, *image_size, 1],
+                        'depth_input': [None, *image_size, 3],
                         'point_cloud_input': [None, data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096), 3]
                     }
                     
