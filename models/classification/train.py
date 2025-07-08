@@ -45,30 +45,8 @@ class DebugCallback(tf.keras.callbacks.Callback):
             self.model.stop_training = True
             return
             
-        if self.batch_count % 10 == 0:  # More frequent monitoring during first steps
-            logger.info(f"Batch {self.batch_count}: Loss={current_loss:.6f}, Acc={current_acc:.4f}")
-            
-            # Check learning rate more robustly
-            try:
-                lr_val = K.get_value(self.model.optimizer.learning_rate)
-                logger.info(f"Learning Rate: {float(lr_val)}")
-            except Exception as e:
-                logger.warning(f"Could not retrieve learning rate: {e}")
-                
-            # Monitor gradient norms for early detection
-            try:
-                total_norm = 0.0
-                for var in self.model.trainable_variables:
-                    if hasattr(var, 'gradient') and var.gradient is not None:
-                        var_norm = tf.norm(var.gradient)
-                        total_norm += var_norm ** 2
-                total_norm = tf.sqrt(total_norm)
-                logger.info(f"Gradient norm: {float(total_norm):.6f}")
-                
-                if float(total_norm) > 100.0:  # Warning threshold
-                    logger.warning(f"Large gradient norm detected: {float(total_norm):.6f}")
-            except Exception as e:
-                logger.debug(f"Could not compute gradient norm: {e}")
+        # Only log at epoch end, not every batch
+        pass
 
 from typing import Dict, Tuple, Any, List, Optional
 
@@ -539,7 +517,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
                 activation=activation, 
                 kernel_regularizer=regularizer,
                 activity_regularizer=activity_regularizer,
-                kernel_initializer='he_normal',  # He initialization for ReLU
+                kernel_initializer='he_normal',
                 bias_initializer='zeros',
                 name=f'head_dense_{i+1}'
             )(x)
@@ -577,7 +555,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         num_classes, 
         activation=output_activation, 
         kernel_regularizer=output_regularizer,
-        kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),  # Small weights for output
+        kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
         bias_initializer='zeros',
         name='output_layer'
     )(x)
