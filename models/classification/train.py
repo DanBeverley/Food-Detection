@@ -511,7 +511,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
             
             x = layers.Dense(
                 units, 
-                activation=activation, 
+                activation=None,
                 kernel_regularizer=regularizer,
                 activity_regularizer=activity_regularizer,
                 kernel_initializer='he_normal',
@@ -527,6 +527,10 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
                     beta_initializer='zeros',
                     name=f'head_bn_{i+1}'
                 )(x)
+            
+            # Apply activation after batch norm
+            if activation:
+                x = layers.Activation(activation, name=f'head_act_{i+1}')(x)
             
             # Add layer-specific dropout
             if layer_dropout > 0:

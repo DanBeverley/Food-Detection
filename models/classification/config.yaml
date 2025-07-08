@@ -21,10 +21,9 @@ data:
   point_cloud_sampling_rate_dir: "4096" 
   point_cloud_suffix: "_sampled_1.ply" 
 
-  # DISABLED for debugging - too complex
   augmentation:
-    enabled: true
-    augment_training_data: true
+    enabled: false
+    augment_training_data: false
     augment_validation_data: false
     
     # Production augmentation ranges
@@ -55,7 +54,7 @@ data:
   # Advanced augmentation techniques (applied after batching)
   advanced_augmentation:
     mixup:
-      enabled: true
+      enabled: false
       alpha: 0.4
 
     # DISABLED for debugging
@@ -108,9 +107,9 @@ model:
 # Production Optimizer Configuration
 optimizer:
   name: "AdamW"
-  learning_rate: 0.005  
-  weight_decay: 0.0001 
-  clipnorm: 10.0  
+  learning_rate: 0.0001  
+  weight_decay: 0.01 
+  clipnorm: 1.0  
   
   schedule:
     enabled: false
@@ -125,7 +124,7 @@ optimizer:
 loss:
   name: "CategoricalCrossentropy" 
   params:
-    label_smoothing: 0.1  
+    label_smoothing: 0.0  
     from_logits: false
 
 # Metrics Configuration
