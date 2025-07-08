@@ -23,8 +23,8 @@ data:
 
   # DISABLED for debugging - too complex
   augmentation:
-    enabled: false
-    augment_training_data: false
+    enabled: true
+    augment_training_data: true
     augment_validation_data: false
     
     # Production augmentation ranges
@@ -54,9 +54,8 @@ data:
 
   # Advanced augmentation techniques (applied after batching)
   advanced_augmentation:
-    # DISABLED for debugging
     mixup:
-      enabled: false
+      enabled: true
       alpha: 0.4
 
     # DISABLED for debugging
@@ -80,7 +79,7 @@ model:
   architecture: "MobileNetV3Small" 
   use_pretrained_weights: true 
   fine_tune: true 
-  fine_tune_layers: 30  
+  fine_tune_layers: 50  
   
   # Production Classification Head with Regularization
   classification_head:
@@ -109,9 +108,9 @@ model:
 # Production Optimizer Configuration
 optimizer:
   name: "AdamW"
-  learning_rate: 0.001  
+  learning_rate: 0.005  
   weight_decay: 0.0001 
-  clipnorm: 5.0  
+  clipnorm: 10.0  
   
   schedule:
     enabled: false

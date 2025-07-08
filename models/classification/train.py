@@ -44,9 +44,6 @@ class DebugCallback(tf.keras.callbacks.Callback):
             logger.error("Stopping training due to gradient explosion.")
             self.model.stop_training = True
             return
-            
-        # Only log at epoch end, not every batch
-        pass
 
 from typing import Dict, Tuple, Any, List, Optional
 
