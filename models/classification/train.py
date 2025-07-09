@@ -43,7 +43,8 @@ class DebugCallback(tf.keras.callbacks.Callback):
             logger.error(f"GRADIENT EXPLOSION DETECTED at batch {self.batch_count}! Loss: {current_loss}")
             logger.error("Stopping training due to gradient explosion.")
             self.model.stop_training = True
-            return
+            return            
+        pass
 
 from typing import Dict, Tuple, Any, List, Optional
 
@@ -426,7 +427,6 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
 
         pc_x = pc_input_tensor
         
-        # Apply normalization based on config - CRITICAL for preventing NaN!
         pc_preprocessing_cfg = modalities_cfg.get('point_cloud', {})
         if pc_preprocessing_cfg.get('normalize', False):
             # Normalize point cloud coordinates to prevent large values causing NaN
@@ -511,10 +511,10 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
             
             x = layers.Dense(
                 units, 
-                activation=None,
+                activation=activation, 
                 kernel_regularizer=regularizer,
                 activity_regularizer=activity_regularizer,
-                kernel_initializer='he_normal',
+                kernel_initializer='he_normal',  # He initialization for ReLU
                 bias_initializer='zeros',
                 name=f'head_dense_{i+1}'
             )(x)
@@ -527,10 +527,6 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
                     beta_initializer='zeros',
                     name=f'head_bn_{i+1}'
                 )(x)
-            
-            # Apply activation after batch norm
-            if activation:
-                x = layers.Activation(activation, name=f'head_act_{i+1}')(x)
             
             # Add layer-specific dropout
             if layer_dropout > 0:
@@ -556,7 +552,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         num_classes, 
         activation=output_activation, 
         kernel_regularizer=output_regularizer,
-        kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+        kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),  # Small weights for output
         bias_initializer='zeros',
         name='output_layer'
     )(x)
@@ -699,7 +695,6 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         outputs_identical = tf.reduce_all(tf.equal(dummy_output, dummy_output2))
         logger.info(f"Repeated calls identical: {outputs_identical}")
         
-        # CRITICAL: Check optimizer learning rate
         actual_lr = model.optimizer.learning_rate
         if hasattr(actual_lr, 'numpy'):
             actual_lr_value = actual_lr.numpy()
@@ -708,7 +703,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         logger.info(f"Optimizer LR: {actual_lr_value}, Type: {type(model.optimizer).__name__}")
         
         if actual_lr_value < 1e-8:
-            logger.error(f"CRITICAL: Learning rate is too small: {actual_lr_value}")
+            logger.error(f"Learning rate is too small: {actual_lr_value}")
         
     except Exception as e:
         logger.error(f"Forward pass failed: {e}")
@@ -1198,6 +1193,21 @@ def main(args):
         return
     
     train_ds, val_ds, test_ds, num_train_samples, num_val_samples, num_test_samples, class_names, num_classes = data_result
+    
+    # Verify multi-modal data loading
+    logger.info("--- Verifying Multi-Modal Data ---")
+    if train_ds is not None:
+        for batch_inputs, _ in train_ds.take(1):
+            if isinstance(batch_inputs, dict):
+                for name, tensor in batch_inputs.items():
+                    mean_val = tf.reduce_mean(tf.cast(tensor, tf.float32))
+                    std_val = tf.math.reduce_std(tf.cast(tensor, tf.float32))
+                    logger.info(f"Input '{name}': Mean={mean_val.numpy():.4f}, StdDev={std_val.numpy():.4f}")
+                    if std_val.numpy() < 1e-6:
+                        logger.error(f"CRITICAL: Input '{name}' appears to be all zeros or constant! Check data loading.")
+            break
+    else:
+        logger.error("Training dataset is None, cannot verify data.")
     
     if num_train_samples == 0:
         logger.error("No training samples loaded. This typically means:")
