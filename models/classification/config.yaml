@@ -13,10 +13,10 @@ data:
   test_split: 0.1
   random_seed: 42
 
-  use_depth_map: true
+  use_depth_map: false
   depth_map_dir_name: "depth" 
 
-  use_point_cloud: true
+  use_point_cloud: false
   point_cloud_root_dir: "/kaggle/input/metafood3d-pointcloud/_MetaFood3D_new_Point_cloud/Point_cloud" 
   point_cloud_sampling_rate_dir: "4096" 
   point_cloud_suffix: "_sampled_1.ply" 
