@@ -22,8 +22,8 @@ data:
   point_cloud_suffix: "_sampled_1.ply" 
 
   augmentation:
-    enabled: false
-    augment_training_data: false
+    enabled: true
+    augment_training_data: true
     augment_validation_data: false
     
     # Production augmentation ranges
@@ -54,10 +54,9 @@ data:
   # Advanced augmentation techniques (applied after batching)
   advanced_augmentation:
     mixup:
-      enabled: false
+      enabled: true
       alpha: 0.4
 
-    # DISABLED for debugging
     cutmix:
       enabled: false
       alpha: 1.0
@@ -107,7 +106,7 @@ model:
 # Production Optimizer Configuration
 optimizer:
   name: "AdamW"
-  learning_rate: 0.0001  
+  learning_rate: 0.0005
   weight_decay: 0.01 
   clipnorm: 1.0  
   
@@ -124,7 +123,7 @@ optimizer:
 loss:
   name: "CategoricalCrossentropy" 
   params:
-    label_smoothing: 0.0  
+    label_smoothing: 0.1
     from_logits: false
 
 # Metrics Configuration
