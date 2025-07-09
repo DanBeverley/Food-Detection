@@ -451,14 +451,48 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     elif is_multimodal_enabled and modalities_cfg.get('point_cloud', {}).get('enabled', False):
         logger.info("Point Cloud modality is configured but 'use_point_cloud' (old flag) or specific 'point_cloud.enabled' is effectively false. Point Cloud branch NOT added.")
 
-    # --- Fusion and Classification Head ---
-    if is_multimodal_enabled and len(all_branch_features) > 1:
-        logger.info(f"Fusing {len(all_branch_features)} feature branches.")
-        fused_features = layers.Concatenate(name='feature_fusion')(all_branch_features)
-    elif len(all_branch_features) == 1:
-        fused_features = all_branch_features[0] # Single branch, no concatenation needed
+    # Fusion and Classification Head
+    
+    # 1. Normalize each branch's feature vector before fusion
+    # This prevents one modality from numerically dominating the others.
+    norm_branch_features = []
+    branch_names = ['rgb', 'depth', 'pc']
+    for i, features in enumerate(all_branch_features):
+        branch_name = branch_names[i] if i < len(branch_names) else f'branch_{i}'
+        norm_features = layers.BatchNormalization(name=f'{branch_name}_features_bn')(features)
+        norm_branch_features.append(norm_features)
+
+    if is_multimodal_enabled and len(norm_branch_features) > 1:
+        logger.info(f"Fusing {len(norm_branch_features)} feature branches with Gated Mechanism.")
+        
+        # 2. Gated Fusion Mechanism
+        # Instead of simple concatenation, let the model learn the importance of each modality.
+        
+        # concatenate the normalized features to get a combined view.
+        combined_features = layers.Concatenate(name='combined_feature_view')(norm_branch_features)
+        
+        # Create a small gating network that looks at the combined features.
+        gate_x = layers.Dense(128, activation='relu', name='gate_dense')(combined_features)
+        
+        # The output of the gating network is a set of weights (one for each branch).
+        # Softmax ensures the weights sum to 1.
+        gate_weights = layers.Dense(len(norm_branch_features), activation='softmax', name='gate_softmax')(gate_x)
+        
+        # 3. Apply the learned weights to each branch
+        weighted_features = []
+        for i, branch_features in enumerate(norm_branch_features):
+            # Extract the weight for this specific branch
+            branch_weight = layers.Lambda(lambda x, idx=i: x[:, idx:idx+1], name=f'gate_weight_b{i}')(gate_weights)
+            # Multiply the branch's features by its learned weight
+            weighted_branch = layers.Multiply(name=f'weighted_features_b{i}')([branch_features, branch_weight])
+            weighted_features.append(weighted_branch)
+            
+        # 4. Concatenate the *weighted* features for the final fused vector
+        fused_features = layers.Concatenate(name='weighted_feature_fusion')(weighted_features)
+
+    elif len(norm_branch_features) == 1:
+        fused_features = norm_branch_features[0] # Single branch, no fusion needed
     else:
-        # This case should not be reached if RGB branch is always added.
         logger.error("No feature branches were created. Cannot build model head.")
         raise ValueError("Model construction failed: No feature branches were created.")
 
