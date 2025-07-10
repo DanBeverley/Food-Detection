@@ -363,93 +363,48 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     
     all_branch_features.append(pooled_rgb_features)
 
-    # Depth Branch (conditional on multi-modal AND specific depth config)
     use_depth = modalities_cfg.get('depth', {}).get('enabled', False) if is_multimodal_enabled else False
     if use_depth:
-        depth_input_shape_config = modalities_cfg.get('depth', {}).get('input_shape', [*image_size, 3])
-        depth_input_shape = tuple(depth_input_shape_config) # Ensure it's a tuple
+        depth_input_shape = (*image_size, 3)
         depth_input_tensor = layers.Input(shape=depth_input_shape, name='depth_input')
         active_input_layers_list.append(depth_input_tensor)
-        logger.info(f"Depth Input: shape={depth_input_shape}, adding Depth processing branch.")
-
-        depth_arch_cfg = modalities_cfg.get('depth', {}).get('architecture', {})
-        depth_conv_layers = depth_arch_cfg.get('conv_layers', [
-            {'filters': 32, 'kernel_size': 3, 'pool': True, 'batch_norm': True},
-            {'filters': 64, 'kernel_size': 3, 'pool': True, 'batch_norm': True}
-        ])
-        depth_pooling_type = depth_arch_cfg.get('pooling', 'GlobalAveragePooling2D')
-
-        depth_x = depth_input_tensor
         
-        # If a pretrained model adapted for depth were used, it might expect 3 channels:
-        # if depth_arch_cfg.get('repeat_channels_for_pretrained', False):
-        #     logger.info("Repeating depth channel 3 times for potentially pretrained model input.")
-        #     depth_x = layers.Concatenate(axis=-1)([depth_x, depth_x, depth_x])
-
-        for i, layer_params in enumerate(depth_conv_layers):
-            depth_x = layers.Conv2D(layer_params['filters'], 
-                                    kernel_size=layer_params.get('kernel_size', 3), 
-                                    padding='same', 
-                                    activation='relu', name=f'depth_conv{i+1}')(depth_x)
-            if layer_params.get('batch_norm', False):
-                depth_x = layers.BatchNormalization(name=f'depth_bn{i+1}')(depth_x)
-            if layer_params.get('pool', False):
-                depth_x = layers.MaxPooling2D((2, 2), name=f'depth_pool{i+1}')(depth_x)
+        depth_base_model = applications.MobileNetV3Small(
+            include_top=False,
+            weights=None,
+            input_shape=depth_input_shape
+        )
+        depth_base_model._name = "depth_backbone"
+        depth_base_model.trainable = True 
         
-        if hasattr(layers, depth_pooling_type):
-            pooled_depth_features = getattr(layers, depth_pooling_type)(name='depth_pool')(depth_x)
-        else:
-            logger.warning(f"Depth pooling layer '{depth_pooling_type}' not found. Defaulting to GlobalAveragePooling2D.")
-            pooled_depth_features = layers.GlobalAveragePooling2D(name='depth_gap_fallback')(depth_x)
-
+        depth_features = depth_base_model(depth_input_tensor)
+        pooled_depth_features = layers.GlobalAveragePooling2D(name='depth_pool')(depth_features)
         all_branch_features.append(pooled_depth_features)
-        logger.info(f"Depth branch added with {len(depth_conv_layers)} conv blocks and {depth_pooling_type}.")
+        logger.info("Depth branch created with MobileNetV3Small architecture.")
     elif is_multimodal_enabled and modalities_cfg.get('depth', {}).get('enabled', False):
         logger.info("Depth modality is configured but 'use_depth_map' (old flag) or specific 'depth.enabled' is effectively false. Depth branch NOT added.")
 
-    # --- Point Cloud Branch (conditional on multi-modal AND specific PC config) ---
     use_pc = modalities_cfg.get('point_cloud', {}).get('enabled', False) if is_multimodal_enabled else False
     if use_pc:
-        pc_cfg = modalities_cfg.get('point_cloud', {})
-        num_points = pc_cfg.get('num_points', 4096) # Read from config, default to 4096
-        pc_input_shape = (num_points, 3) # (Num points, 3 coords)
+        num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
+        pc_input_shape = (num_points, 3)
         pc_input_tensor = layers.Input(shape=pc_input_shape, name='point_cloud_input')
         active_input_layers_list.append(pc_input_tensor)
-        logger.info(f"Point Cloud Input: shape={pc_input_shape}, num_points={num_points}. Adding Point Cloud processing branch.")
 
-        pc_arch_cfg = pc_cfg.get('architecture', {})
-        pc_conv1d_layers = pc_arch_cfg.get('conv1d_layers', [
-            {'filters': 64, 'kernel_size': 1, 'batch_norm': True},
-            {'filters': 128, 'kernel_size': 1, 'batch_norm': True},
-            {'filters': pc_arch_cfg.get('bottleneck_size', 256), 'kernel_size': 1, 'batch_norm': False} # Match PointNet-like global feature size
-        ])
-        pc_pooling_type = pc_arch_cfg.get('pooling', 'GlobalMaxPooling1D') # PointNet uses MaxPooling
+        def conv_bn_relu(x, filters, name):
+            x = layers.Conv1D(filters, kernel_size=1, padding='valid', name=f"{name}_conv")(x)
+            x = layers.BatchNormalization(momentum=0.9, name=f"{name}_bn")(x)
+            return layers.ReLU(name=f"{name}_relu")(x)
 
-        pc_x = pc_input_tensor
+        pc_x = layers.LayerNormalization(name="pc_input_norm")(pc_input_tensor)
+        pc_x = conv_bn_relu(pc_x, 64, name='pc_block1a')
+        pc_x = conv_bn_relu(pc_x, 128, name='pc_block1b')
+        pc_x = conv_bn_relu(pc_x, 256, name='pc_block2a')
+        pc_x = conv_bn_relu(pc_x, 512, name='pc_block2b')
         
-        pc_preprocessing_cfg = modalities_cfg.get('point_cloud', {})
-        if pc_preprocessing_cfg.get('normalize', False):
-            # Normalize point cloud coordinates to prevent large values causing NaN
-            logger.info("Applying LayerNormalization to point cloud input to prevent NaN")
-            pc_x = layers.LayerNormalization(axis=-1)(pc_x)
-        
-        for i, layer_params in enumerate(pc_conv1d_layers):
-            pc_x = layers.Conv1D(layer_params['filters'], 
-                                kernel_size=layer_params.get('kernel_size', 1), 
-                                activation='relu', name=f'pc_conv1d_{i+1}')(pc_x)
-            if layer_params.get('batch_norm', True):
-                pc_x = layers.BatchNormalization(name=f'pc_bn_{i+1}')(pc_x)
-
-        if hasattr(layers, pc_pooling_type):
-            pooled_pc_features = getattr(layers, pc_pooling_type)(name='pc_pool')(pc_x)
-        else:
-            logger.warning(f"Point cloud pooling layer '{pc_pooling_type}' not found. Defaulting to GlobalMaxPooling1D.")
-            pooled_pc_features = layers.GlobalMaxPooling1D(name='pc_gmp_fallback')(pc_x)
-
+        pooled_pc_features = layers.GlobalMaxPooling1D(name='pc_pool')(pc_x)
         all_branch_features.append(pooled_pc_features)
-        logger.info(f"Point Cloud branch added with {len(pc_conv1d_layers)} conv1d blocks and {pc_pooling_type}.")
-    elif is_multimodal_enabled and modalities_cfg.get('point_cloud', {}).get('enabled', False):
-        logger.info("Point Cloud modality is configured but 'use_point_cloud' (old flag) or specific 'point_cloud.enabled' is effectively false. Point Cloud branch NOT added.")
+        logger.info("Point Cloud branch created with deeper PointNet architecture.")
 
     # Fusion and Classification Head
     
