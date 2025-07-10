@@ -1128,6 +1128,12 @@ def main(args):
 
     data_cfg = config.get('data', {})
     training_cfg = config.get('training', {})
+    
+    # Additional TPU diagnostics
+    if training_cfg.get('use_tpu', False):
+        diagnose_tpu_environment()
+        logger.info(f"TPU Strategy initialized: {strategy.__class__.__name__}")
+        logger.info(f"Number of TPU cores: {strategy.num_replicas_in_sync}")
     model_cfg = config.get('model', {})
     optimizer_cfg = config.get('optimizer', {})
 
