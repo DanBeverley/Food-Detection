@@ -22,8 +22,8 @@ data:
   point_cloud_suffix: "_sampled_1.ply" 
 
   augmentation:
-    enabled: true
-    augment_training_data: true
+    enabled: false
+    augment_training_data: false
     augment_validation_data: false
     
     # Production augmentation ranges
@@ -54,7 +54,7 @@ data:
   # Advanced augmentation techniques (applied after batching)
   advanced_augmentation:
     mixup:
-      enabled: true
+      enabled: false
       alpha: 0.4
 
     cutmix:
