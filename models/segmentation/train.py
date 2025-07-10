@@ -240,18 +240,11 @@ def build_decoder_block(input_tensor, skip_feature_tensor, num_filters, kernel_s
             name=f'{block_name}_skip_resize'
         )(skip_feature_tensor)
     
-    # Concatenate the upsampled features with the (potentially resized) skip features
-    # The original code also had a channel projection for skip features if channels didn't match 'up'.
-    # This might be necessary if 'num_filters' for 'up' differs from 'processed_skip_tensor' channels.
-    # For now, let's assume direct concatenation is intended after spatial alignment.
-    # If channel mismatch occurs at concat, we might need to re-add skip projection or adjust num_filters.
+
     try:
         merge = layers.concatenate([up, processed_skip_tensor], axis=3, name=f'{block_name}_concat')
     except ValueError as e:
         logger.error(f"ERROR [{block_name}] concatenating shapes: up={up.shape}, processed_skip_tensor={processed_skip_tensor.shape} with axis=3. Error: {e}")
-        # If error is about channels, e.g. up has C1 channels, processed_skip_tensor has C2, then C1+C2 is the new channel count.
-        # The error might be if they are expected to be the same for some reason by a later layer, which is not typical for concat.
-        # More likely the spatial dimensions were still not fully resolved, or a None dimension issue.
         raise e
 
     conv = layers.Conv2D(num_filters, 3, activation='relu', padding='same', kernel_initializer=kernel_initializer, name=f'{block_name}_conv1')(merge)
@@ -302,11 +295,7 @@ def unet_model(output_channels: int, image_size: tuple, model_config: dict, data
     if len(input_layers_dict) == 0: # Should not happen if rgb_input is always there
         raise ValueError("No input layers were defined for the model.")
     
-    # Override input_shape for backbone if it's different from default (e.g. due to depth concatenation)
-    # Backbones expect a fixed channel number. If we have RGB+D, we can't directly use a pretrained backbone with 3 channels.
-    # Option 1: Modify backbone's first layer (complex, loses some pretraining benefits for initial layer)
-    # Option 2: Use a separate Conv2D to map RGB+D to 3 channels, then feed to standard backbone.
-    # Option 3: If backbone is 'None' or a custom simple U-Net, build it to handle `backbone_input_channels`.
+
 
     backbone_name = model_config.get('backbone', None)
     dropout_rate = model_config.get('dropout', 0.5)
@@ -655,10 +644,7 @@ def main():
     # Set mixed precision policy
     set_mixed_precision_policy(config, strategy)
 
-    # --- Determine if debug mode is active --- 
-    # Priority: CLI --debug flag > config.yaml training.debug_mode
-    # runtime_is_debug_mode is set here and passed into load_segmentation_data via config
-    # debug_epochs is handled later based on this combined debug_status
+
     cli_debug_active = args.debug
     yaml_debug_mode_active = training_cfg.get('debug_mode', False) # For debug_epochs primarily
     
@@ -711,8 +697,8 @@ def main():
     logger.info("--- End of pre-compile dataset check ---")
 
     # training_cfg already fetched and potentially modified with runtime_is_debug_mode
-    optimizer_cfg = config.get('optimizer', {}) # Corrected: Get from root config
-    loss_cfg = config.get('loss', {})           # Corrected: Get from root config
+    optimizer_cfg = config.get('optimizer', {}) 
+    loss_cfg = config.get('loss', {})           
     metrics_cfg = training_cfg.get('metrics', ['accuracy'])
     
     # Create model and optimizer within strategy scope for TPU/distributed training
@@ -839,8 +825,8 @@ def main():
     batch_size = data_cfg.get('batch_size', 8)
     
     # Determine epochs based on debug status
-    if yaml_debug_mode_active: # This is true if CLI --debug or YAML debug_mode is true
-        epochs = training_cfg.get('debug_epochs', 1) # Use debug_epochs from config
+    if yaml_debug_mode_active: 
+        epochs = training_cfg.get('debug_epochs', 1)
         logger.info(f"DEBUG MODE: Training for {epochs} epochs (from training.debug_epochs).")
     else:
         epochs = training_cfg.get('epochs', 50)

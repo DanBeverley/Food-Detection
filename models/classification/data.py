@@ -122,52 +122,100 @@ def _build_augmentation_pipeline(data_conf: Dict) -> Optional[tf.keras.Sequentia
 
 @tf.function
 def mixup(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_classes: int) -> Tuple[tf.Tensor, tf.Tensor]:
-    batch_size = tf.shape(batch_images)[0]
+    # Handle dictionary input for multi-modal data
+    if isinstance(batch_images, dict):
+        rgb_images = batch_images['rgb_input']
+    else:
+        rgb_images = batch_images
+
+    batch_size = tf.shape(rgb_images)[0]
     # Ensure labels are one-hot.
-    if len(tf.shape(batch_labels)) == 1: # Sparse labels (batch_size,)
+    if tf.rank(batch_labels) == 1: # Sparse labels (batch_size,)
         labels_one_hot = tf.one_hot(tf.cast(batch_labels, dtype=tf.int32), depth=num_classes)
     else: # Already one-hot (batch_size, num_classes)
         labels_one_hot = batch_labels
 
     if alpha > 0.0:
-        beta_dist = tf.compat.v1.distributions.Beta(alpha, alpha)
-        lambda_val = beta_dist.sample(batch_size) # Sample per image in batch
+        # Use pure TF2 random functions for Beta distribution sampling
+        gamma_1_sample = tf.random.gamma(shape=[batch_size], alpha=alpha)
+        gamma_2_sample = tf.random.gamma(shape=[batch_size], alpha=alpha)
+        lambda_val = gamma_1_sample / (gamma_1_sample + gamma_2_sample)
+        
         lambda_img = tf.reshape(lambda_val, [batch_size, 1, 1, 1])
         lambda_lbl = tf.reshape(lambda_val, [batch_size, 1])
     else: # No mixing if alpha is 0
-        return batch_images, labels_one_hot
+        if isinstance(batch_images, dict):
+            # Set shape for consistency even when no mixing
+            for _, tensor in batch_images.items():
+                tensor.set_shape([None] + tensor.shape.as_list()[1:])
+            labels_one_hot.set_shape([None, num_classes])
+            return batch_images, labels_one_hot
+        else:
+            rgb_images.set_shape([None] + rgb_images.shape.as_list()[1:])
+            labels_one_hot.set_shape([None, num_classes])
+            return rgb_images, labels_one_hot
 
     shuffled_indices = tf.random.shuffle(tf.range(batch_size))
-    shuffled_images = tf.gather(batch_images, shuffled_indices)
+    shuffled_images = tf.gather(rgb_images, shuffled_indices)
     shuffled_labels_one_hot = tf.gather(labels_one_hot, shuffled_indices)
 
     # Cast to ensure dtype compatibility with mixed precision
-    one_val = tf.cast(1.0, dtype=batch_images.dtype)
-    mixed_images = lambda_img * batch_images + (one_val - lambda_img) * shuffled_images
+    one_val = tf.cast(1.0, dtype=rgb_images.dtype)
+    mixed_images = lambda_img * rgb_images + (one_val - lambda_img) * shuffled_images
     
     one_val_lbl = tf.cast(1.0, dtype=labels_one_hot.dtype)
     mixed_labels = lambda_lbl * labels_one_hot + (one_val_lbl - lambda_lbl) * shuffled_labels_one_hot
-    return mixed_images, mixed_labels
+    
+    # --- CRITICAL FIX: Set the shape before returning ---
+    mixed_labels.set_shape([None, num_classes])
+    
+    # Reconstruct output
+    if isinstance(batch_images, dict):
+        output_images = batch_images.copy()
+        output_images['rgb_input'] = mixed_images
+        # Set the shape for all tensors in the dictionary
+        for _, tensor in output_images.items():
+            tensor.set_shape([None] + tensor.shape.as_list()[1:])
+        return output_images, mixed_labels
+    else:
+        mixed_images.set_shape([None] + rgb_images.shape.as_list()[1:])
+        return mixed_images, mixed_labels
 
 @tf.function
 def cutmix(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_classes: int) -> Tuple[tf.Tensor, tf.Tensor]:
-    batch_size = tf.shape(batch_images)[0]
-    image_h = tf.shape(batch_images)[1]
-    image_w = tf.shape(batch_images)[2]
+    # Handle dictionary input for multi-modal data
+    if isinstance(batch_images, dict):
+        rgb_images = batch_images['rgb_input']
+    else:
+        rgb_images = batch_images
 
-    if len(tf.shape(batch_labels)) == 1:
+    batch_size = tf.shape(rgb_images)[0]
+    image_h = tf.shape(rgb_images)[1]
+    image_w = tf.shape(rgb_images)[2]
+
+    if tf.rank(batch_labels) == 1:
         labels_one_hot = tf.one_hot(tf.cast(batch_labels, dtype=tf.int32), depth=num_classes)
     else:
         labels_one_hot = batch_labels
 
     if alpha > 0.0:
-        beta_dist = tf.compat.v1.distributions.Beta(alpha, alpha)
-        lambda_val = beta_dist.sample(1)[0] 
+        # Use pure TF2 random functions for Beta distribution sampling
+        gamma_1_sample = tf.random.gamma(shape=[], alpha=alpha)
+        gamma_2_sample = tf.random.gamma(shape=[], alpha=alpha)
+        lambda_val = gamma_1_sample / (gamma_1_sample + gamma_2_sample)
     else:
-        return batch_images, labels_one_hot
+        if isinstance(batch_images, dict):
+            for _, tensor in batch_images.items():
+                tensor.set_shape([None]+tensor.shape.as_list()[1:])
+                labels_one_hot.set_shape([None, num_classes])
+            return batch_images, labels_one_hot
+        else:
+            rgb_images.set_shape([None]+rgb_images.shape.as_list()[1:])
+            labels_one_hot.set_shape([None, num_classes])
+            return rgb_images, labels_one_hot
     
     shuffled_indices = tf.random.shuffle(tf.range(batch_size))
-    shuffled_images = tf.gather(batch_images, shuffled_indices)
+    shuffled_images = tf.gather(rgb_images, shuffled_indices)
     shuffled_labels_one_hot = tf.gather(labels_one_hot, shuffled_indices)
 
     cut_ratio = tf.sqrt(tf.cast(1.0, dtype=tf.float32) - lambda_val) 
@@ -193,17 +241,30 @@ def cutmix(batch_images: tf.Tensor, batch_labels: tf.Tensor, alpha: float, num_c
     mask_center_shape = [cut_h, cut_w, 1] # For broadcasting with channels
     padding = [[bby1, image_h - bby2], [bbx1, image_w - bbx2], [0, 0]] # Pad for channels dim too
     
-    mask_center = tf.zeros(mask_center_shape, dtype=batch_images.dtype)
-    mask = tf.pad(mask_center, padding, "CONSTANT", constant_values=tf.cast(1.0, dtype=batch_images.dtype)) # Pad with 1s
+    mask_center = tf.zeros(mask_center_shape, dtype=rgb_images.dtype)
+    mask = tf.pad(mask_center, padding, "CONSTANT", constant_values=tf.cast(1.0, dtype=rgb_images.dtype)) # Pad with 1s
 
     # Apply mask to images
     # Mask has 1s where original image should be, 0s where patch from shuffled image should be
-    one_val = tf.cast(1.0, dtype=batch_images.dtype)
-    cutmix_images = batch_images * mask + shuffled_images * (one_val - mask)
+    one_val = tf.cast(1.0, dtype=rgb_images.dtype)
+    cutmix_images = rgb_images * mask + shuffled_images * (one_val - mask)
     
     one_val_lbl = tf.cast(1.0, dtype=labels_one_hot.dtype)
     mixed_labels = lambda_val * labels_one_hot + (one_val_lbl - lambda_val) * shuffled_labels_one_hot
-    return cutmix_images, mixed_labels
+    
+    mixed_labels.set_shape([None, num_classes])
+    # Reconstruct output
+    if isinstance(batch_images, dict):
+        output_images = batch_images.copy()
+        output_images['rgb_input'] = cutmix_images
+        # Set shape for all tensors in dictionary
+        for _, tensor in output_images.items():
+            tensor.set_shape([None]+tensor.shape.as_list()[1:])
+        return output_images, mixed_labels
+    else:
+        # Set shape for single image tensor
+        cutmix_images.set_shape([None] + rgb_images.shape.as_list()[1:])
+        return cutmix_images, mixed_labels
 
 # Custom augmentation layers for overfitting prevention
 class RandomErasing(tf.keras.layers.Layer):
@@ -301,7 +362,8 @@ class GaussianNoise(tf.keras.layers.Layer):
 
 def load_classification_data(
     config: Dict,
-    max_samples_to_load: Optional[int] = None
+    max_samples_to_load: Optional[int] = None,
+    base_data_dir: Optional[str] = None # New parameter
 ) -> Tuple[
     Optional[tf.data.Dataset],
     Optional[tf.data.Dataset],
@@ -381,49 +443,25 @@ def load_classification_data(
             logger.warning(f"Skipping item due to missing path or label: {item}")
             continue
         
-        # Handle different path formats (Windows absolute, relative, etc.)
-        if relative_path.startswith(('E:', 'C:', 'D:', 'F:')):
-            # Count Windows paths for debugging
-            windows_path_count += 1
-            if windows_path_count <= 3:  # Log first few for debugging
-                logger.debug(f"Found Windows absolute path: {relative_path}")
-            
-            # Convert Windows absolute path to Kaggle input path
-            # E:\_MetaFood3D_new_RGBD_videos\RGBD_videos\Food\food_1\original\0.jpg -> 
-            # /kaggle/input/metafood3d/_MetaFood3D_new_RGBD_videos/RGBD_videos/Food/food_1/original/0.jpg
-            if 'RGBD_videos' in relative_path:
-                path_parts = relative_path.split('\\')
-                rgbd_index = next((i for i, part in enumerate(path_parts) if 'RGBD_videos' in part), -1)
-                if rgbd_index >= 0:
-                    # Take everything from RGBD_videos onwards
-                    kaggle_path_parts = path_parts[rgbd_index:]
-                    kaggle_path_str = '/'.join(kaggle_path_parts)
-                    # Use the exact Kaggle path structure
-                    full_image_path = Path('/kaggle/input/metafood3d/_MetaFood3D_new_RGBD_videos') / kaggle_path_str
-                    if windows_path_count <= 3:
-                        logger.info(f"Converting Windows path: {relative_path} -> {full_image_path}")
-                else:
-                    logger.warning(f"Could not convert Windows path to Kaggle path: {relative_path}")
-                    skipped_count += 1
-                    continue
-            else:
-                logger.warning(f"Unexpected Windows path format: {relative_path}")
-                skipped_count += 1
-                continue
-        elif relative_path.startswith('/kaggle/input/'):
-            # Direct Kaggle input path
-            full_image_path = Path(relative_path)
-        elif relative_path.startswith('input/'):
-            # Relative Kaggle input path
-            full_image_path = Path('/kaggle') / relative_path
+        # Construct full_image_path using base_data_dir if provided
+        if base_data_dir:
+            full_image_path = Path(base_data_dir) / relative_path
         else:
-            # Handle relative paths from project root
-            if relative_path.startswith(str(base_image_dir)):
-                relative_path = str(Path(relative_path).relative_to(base_image_dir))
-            full_image_path = base_image_dir / relative_path
+            full_image_path = Path(relative_path)
+
+        # Add detailed logging for the first few entries to debug path issues
+        if len(all_image_paths) < 5:
+            logger.info(f"DEBUG Path construction:")
+            logger.info(f"  base_data_dir: {base_data_dir}")
+            logger.info(f"  relative_path: {relative_path}")
+            logger.info(f"  full_image_path: {full_image_path}")
+            logger.info(f"  exists: {full_image_path.exists()}")
+            if base_data_dir and Path(base_data_dir).exists():
+                logger.info(f"  base_data_dir contents: {list(Path(base_data_dir).iterdir())[:5]}")
         
         if not full_image_path.exists():
-            logger.warning(f"Image file not found: {full_image_path}. Skipping.")
+            if skipped_count < 5:  # Only log first few missing files to avoid spam
+                logger.warning(f"Image file not found: {full_image_path}. Skipping.")
             skipped_count += 1
             continue
 
@@ -441,6 +479,7 @@ def load_classification_data(
     logger.info(f"  - Windows paths skipped: {windows_path_count}")
     logger.info(f"  - Total items skipped: {skipped_count}")
     logger.info(f"  - Valid images found: {len(all_image_paths)}")
+    logger.info(f"  - Success rate: {len(all_image_paths)/len(metadata_items)*100:.2f}%")
 
     if not all_image_paths:
         logger.error("No valid image paths found after processing metadata.")
@@ -448,6 +487,7 @@ def load_classification_data(
         logger.error("1. All paths in metadata are Windows absolute paths (E:, C:, etc.)")
         logger.error("2. Expected data is not in /kaggle/input/ or other accessible locations")
         logger.error("3. Dataset needs to be uploaded to Kaggle or paths need to be updated")
+        logger.error("4. base_data_dir was not provided when metadata contains relative paths.") # New error message
         return None, None, None, 0, 0, 0, class_names, num_classes
     
     logger.info(f"Collected {len(all_image_paths)} total image paths with labels.")
@@ -556,38 +596,218 @@ def load_classification_data(
     preprocess_input_fn = _get_preprocess_fn(architecture)
     augmentation_pipeline = _build_augmentation_pipeline(data_config) # Pass data_config
 
-    def load_and_preprocess_image(path: str, label: int) -> Tuple[tf.Tensor, int]:
+    # Helper function for tf.py_function - handles complex file I/O in Python
+    def _load_modalities_py(rgb_path_tensor, base_data_dir_tensor):
+        """Load depth and point cloud data given RGB path"""
         try:
-            img = tf.io.read_file(path)
-            img = tf.image.decode_image(img, channels=3, expand_animations=False)
-            img = tf.image.resize(img, image_size) 
-            return img, label 
+            # Convert tensors to Python strings for os.path operations
+            rgb_path_str = tf.compat.as_str_any(rgb_path_tensor)
+            base_data_dir_str = tf.compat.as_str_any(base_data_dir_tensor)
         except Exception as e:
-            logger.error(f"Error loading image {path}: {e}. Traceback: {traceback.format_exc()}")
-            dummy_img = tf.zeros([*image_size, 3], dtype=tf.float32)
-            dummy_label = tf.constant(0, dtype=tf.int32) 
-            return dummy_img, dummy_label
+            logger.error(f"Error converting tensors to strings: {e}")
+            # Return dummy data
+            num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
+            return np.zeros([*image_size, 1], dtype=np.uint8), np.zeros([num_points, 3], dtype=np.float32)
 
-    def configure_dataset(paths_np: np.ndarray, labels_np: np.ndarray, shuffle_ds: bool, augment_ds: bool, is_training_set_flag: bool) -> Optional[tf.data.Dataset]:
+        # Load depth map
+        try:
+            depth_dir_name = data_config.get('depth_map_dir_name', 'depth')
+            # Reconstruct the full path to the RGB image first
+            full_rgb_path = os.path.join(base_data_dir_str, rgb_path_str)
+
+            # Derive depth path from full_rgb_path
+            if '/original/' in full_rgb_path:
+                depth_path = full_rgb_path.replace('/original/', f'/{depth_dir_name}/')
+            else:
+                depth_path = full_rgb_path.replace('.jpg', '_depth.jpg').replace('.png', '_depth.png')
+            
+            logger.debug(f"Attempting to load depth map from: {depth_path}")
+            if os.path.exists(depth_path):
+                # Load depth image
+                with open(depth_path, 'rb') as f:
+                    depth_bytes = f.read()
+                depth_img = tf.image.decode_image(depth_bytes, channels=1, expand_animations=False)
+                depth_img = tf.image.resize(depth_img, image_size)
+                depth_np = depth_img.numpy().astype(np.uint8)
+                logger.debug(f"Successfully loaded depth map from: {depth_path}")
+            else:
+                logger.warning(f"Depth map file not found: {depth_path}. Using dummy.")
+                depth_np = np.zeros([*image_size, 1], dtype=np.uint8)
+        except Exception as e:
+            logger.error(f"Error loading depth map for {rgb_path_str}: {e}")
+            depth_np = np.zeros([*image_size, 1], dtype=np.uint8)
+        
+        # Load point cloud with correct path structure
+        try:
+            num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
+            
+            # The point_cloud_root_dir from config is already absolute (Kaggle path)
+            pc_root = data_config.get('point_cloud_root_dir')
+            sampling_rate = data_config.get('point_cloud_sampling_rate_dir')
+            suffix = data_config.get('point_cloud_suffix')
+
+            if pc_root and sampling_rate and suffix:
+                # Extract food_class and food_item from the relative rgb_path_str
+                # Example: Apple/apple_1/original/0.jpg
+                path_parts_relative = Path(rgb_path_str).parts
+                
+                # Assuming structure: ClassName/InstanceName/original/image.jpg
+                if len(path_parts_relative) >= 3: 
+                    food_class = path_parts_relative[0]
+                    food_item = path_parts_relative[1]
+                    
+                    pc_path = os.path.join(pc_root, sampling_rate, food_class, food_item, f"{food_item}{suffix}")
+                    
+                    logger.debug(f"Attempting to load point cloud from: {pc_path}") # Add debug log
+                    if os.path.exists(pc_path):
+                        # Load actual PLY file
+                        try:
+                            pc_data = []
+                            with open(pc_path, 'r') as f:
+                                lines = f.readlines()
+                                
+                            # Find where vertex data starts
+                            vertex_count = 0
+                            data_start = 0
+                            for i, line in enumerate(lines):
+                                if line.startswith('element vertex'):
+                                    vertex_count = int(line.split()[-1])
+                                elif line.startswith('end_header'):
+                                    data_start = i + 1
+                                    break
+                            
+                            # Read vertex coordinates
+                            for i in range(data_start, min(data_start + vertex_count, data_start + num_points)):
+                                if i < len(lines):
+                                    coords = lines[i].strip().split()
+                                    if len(coords) >= 3:
+                                        x, y, z = float(coords[0]), float(coords[1]), float(coords[2])
+                                        pc_data.append([x, y, z])
+                            
+                            # Convert to numpy and handle size
+                            if len(pc_data) > 0:
+                                pc_np = np.array(pc_data, dtype=np.float32)
+                                if len(pc_np) > num_points:
+                                    # Random sampling if too many points
+                                    indices = np.random.choice(len(pc_np), num_points, replace=False)
+                                    pc_np = pc_np[indices]
+                                elif len(pc_np) < num_points:
+                                    # Pad with zeros if too few points
+                                    padding = np.zeros((num_points - len(pc_np), 3), dtype=np.float32)
+                                    pc_np = np.vstack([pc_np, padding])
+                            else:
+                                pc_np = np.zeros([num_points, 3], dtype=np.float32)
+                                
+                            logger.debug(f"Loaded {len(pc_data)} points from: {pc_path}")
+                            
+                        except Exception as e:
+                            logger.warning(f"Error reading PLY file {pc_path}: {e}. Using dummy.")
+                            pc_np = np.zeros([num_points, 3], dtype=np.float32)
+                    else:
+                        logger.warning(f"Point cloud file not found: {pc_path}. Using dummy.")
+                        pc_np = np.zeros([num_points, 3], dtype=np.float32)
+                else:
+                    logger.warning(f"Could not parse food_class/food_item from relative path: {rgb_path_str}. Using dummy point cloud.")
+                    pc_np = np.zeros([num_points, 3], dtype=np.float32)
+            else:
+                logger.error("Point cloud configuration (root, sampling_rate, suffix) is incomplete. Using dummy.")
+                pc_np = np.zeros([num_points, 3], dtype=np.float32)
+                
+        except Exception as e:
+            logger.error(f"Error loading point cloud for {rgb_path_str}: {e}")
+            num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
+            pc_np = np.zeros([num_points, 3], dtype=np.float32)
+        
+        return depth_np, pc_np
+
+    def configure_dataset(paths_np: np.ndarray, labels_np: np.ndarray, shuffle_ds: bool, augment_ds: bool, is_training_set_flag: bool, base_data_dir_param: str = None) -> Optional[tf.data.Dataset]:
         if len(paths_np) == 0:
             return None
         try:
-            dataset = tf.data.Dataset.from_tensor_slices((list(paths_np), list(labels_np)))
-            dataset = dataset.map(load_and_preprocess_image, num_parallel_calls=tf.data.AUTOTUNE)
+            # Check if multimodal is enabled
+            use_depth_map = data_config.get('use_depth_map', False)
+            use_point_cloud = data_config.get('use_point_cloud', False)
+            is_multimodal = use_depth_map or use_point_cloud
             
-            def map_fn_wrapper(image, label):
-                image = tf.cast(image, tf.float32)
+            # Create dataset from paths and labels
+            dataset = tf.data.Dataset.from_tensor_slices((list(paths_np), list(labels_np)))
+            
+            # Single unified processing function
+            def load_and_process(path, label):
+                # Load RGB image
+                try:
+                    logger.debug(f"Attempting to read RGB image from: {tf.strings.as_string(path)}")
+                    image_data = tf.io.read_file(path)
+                    image = tf.image.decode_image(image_data, channels=3, expand_animations=False)
+                    image = tf.image.resize(image, image_size)
+                    image = tf.cast(image, tf.float32)
+                    logger.debug(f"Successfully loaded RGB image from: {tf.strings.as_string(path)}")
+                except Exception as e:
+                    logger.error(f"Error loading or decoding RGB image {tf.strings.as_string(path)}: {e}")
+                    # Return a dummy image to prevent pipeline from breaking
+                    image = tf.zeros((*image_size, 3), dtype=tf.float32)
+                
+                # Apply augmentation if enabled
                 if augmentation_pipeline is not None and augment_ds and is_training_set_flag:
                     # Add batch dimension for augmentation pipeline
                     image = tf.expand_dims(image, 0)
-                    image = augmentation_pipeline(image, training=True) # Pass training=True
+                    image = augmentation_pipeline(image, training=True)
                     # Remove batch dimension
                     image = tf.squeeze(image, 0)
-                if preprocess_input_fn:
-                    image = preprocess_input_fn(image)
-                return image, label
+                
+                if is_multimodal:
+                    # Load additional modalities using tf.py_function
+                    depth_data, pc_data = tf.py_function(
+                        func=_load_modalities_py,
+                        inp=[path, base_data_dir_param or ""],
+                        Tout=[tf.uint8, tf.float32]
+                    )
+                    
+                    # Set shapes for depth and point cloud data
+                    depth_data.set_shape([*image_size, 1])
+                    num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
+                    pc_data.set_shape([num_points, 3])
+                    
+                    # Normalize modalities robustly to prevent gradient explosion
+                    
+                    # 1. Normalize depth data to be in the [0, 255] range with proper clipping
+                    depth_data = tf.cast(depth_data, tf.float32)
+                    # Clip extreme depth values and normalize to [0, 255] range
+                    depth_data = tf.clip_by_value(depth_data, 0.0, 10000.0)  # Clip extreme depth values
+                    depth_min = tf.reduce_min(depth_data)
+                    depth_max = tf.reduce_max(depth_data)
+                    # Avoid division by zero
+                    depth_range = tf.maximum(depth_max - depth_min, 1e-8)
+                    depth_data = (depth_data - depth_min) / depth_range * 255.0
+                    
+                    # 2. Concatenate Depth map 3 times to mimic RGB channels
+                    depth_data_3_channel = tf.concat([depth_data, depth_data, depth_data], axis=-1)
 
-            dataset = dataset.map(map_fn_wrapper, num_parallel_calls=tf.data.AUTOTUNE)
+                    # 3. Apply the similar preprocessing to both RGB and Depth
+                    if preprocess_input_fn:
+                        image = preprocess_input_fn(image)
+                        depth_data_3_channel = preprocess_input_fn(depth_data_3_channel)
+                    
+                    # 4. Normalize Point Cloud data robustly with clipping
+                    # Clip extreme coordinates first, then normalize
+                    pc_data = tf.clip_by_value(pc_data, -1000.0, 1000.0)  # Clip extreme coordinates
+                    pc_data = tf.nn.l2_normalize(pc_data, axis=-1)
+                    
+                    # 5. Add final validation clipping to prevent any extreme values
+                    inputs_dict = {
+                        'rgb_input': tf.clip_by_value(image, -5.0, 5.0),
+                        'depth_input': tf.clip_by_value(depth_data_3_channel, -5.0, 5.0),  
+                        'point_cloud_input': tf.clip_by_value(pc_data, -2.0, 2.0)
+                    }
+                    
+                    return inputs_dict, label
+                else:
+                    # Apply preprocessing to RGB-only case
+                    if preprocess_input_fn:
+                        image = preprocess_input_fn(image)
+                    return image, label
+            
+            dataset = dataset.map(load_and_process, num_parallel_calls=tf.data.AUTOTUNE)
 
             if shuffle_ds:
                 buffer_size = data_config.get('shuffle_buffer_size', 1000)
@@ -596,11 +816,44 @@ def load_classification_data(
                 if actual_buffer_size > 0 : # Ensure buffer_size is positive
                     dataset = dataset.shuffle(actual_buffer_size, seed=data_config.get('random_seed', None))
             
-            dataset = dataset.batch(batch_size, drop_remainder=True)
+            dataset = dataset.batch(batch_size, drop_remainder=is_training_set_flag)
             
-            # Convert integer labels to one-hot encoding
+            # Convert integer labels to one-hot encoding with explicit shape handling
+            @tf.function
             def convert_to_one_hot(images, labels):
-                labels_one_hot = tf.one_hot(labels, depth=num_classes)
+                # Cast labels to int32 first to ensure compatibility
+                labels = tf.cast(labels, tf.int32)
+                
+                # Create one-hot encoding with explicit dtype
+                labels_one_hot = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
+
+                if is_multimodal:
+                    # Handle dictionary of inputs for multimodal case
+                    expected_shapes = {
+                        'rgb_input': [None, *image_size, 3],
+                        'depth_input': [None, *image_size, 3],
+                        'point_cloud_input': [None, data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096), 3]
+                    }
+                    
+                    # Set shape for each tensor in the dictionary
+                    for key, tensor in images.items():
+                        if key in expected_shapes:
+                            tensor.set_shape(expected_shapes[key])
+                else:
+                    # Handle single RGB input case
+                    if is_training_set_flag:
+                        # For training, batch size is fixed (due to drop_remainder=True)
+                        images.set_shape([batch_size, *image_size, 3])
+                    else:
+                        # For val/test, the last batch can be smaller
+                        images.set_shape([None, *image_size, 3])
+
+                # Set shape for the labels
+                if is_training_set_flag:
+                    labels_one_hot.set_shape([batch_size, num_classes])
+                else:
+                    labels_one_hot.set_shape([None, num_classes])
+                
                 return images, labels_one_hot
             
             dataset = dataset.map(convert_to_one_hot, num_parallel_calls=tf.data.AUTOTUNE)
@@ -633,15 +886,17 @@ def load_classification_data(
             dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
             return dataset
         except Exception as e:
+            import sys
+            print(f"!!!!!! EXCEPTION IN CONFIGURE_DATASET: {e}", file=sys.stderr)
             logger.error(f"Error configuring dataset: {e}. Traceback: {traceback.format_exc()}")
             return None
 
     augment_train = data_config.get('augmentation', {}).get('augment_training_data', True) and data_config.get('augmentation', {}).get('enabled', False)
     augment_val = data_config.get('augmentation', {}).get('augment_validation_data', False) and data_config.get('augmentation', {}).get('enabled', False)
 
-    train_dataset = configure_dataset(train_paths, train_labels, shuffle_ds=True, augment_ds=augment_train, is_training_set_flag=True)
-    val_dataset = configure_dataset(val_paths, val_labels, shuffle_ds=data_config.get('shuffle_validation_data', True), augment_ds=augment_val, is_training_set_flag=False)
-    test_dataset = configure_dataset(test_paths, test_labels, shuffle_ds=False, augment_ds=False, is_training_set_flag=False)
+    train_dataset = configure_dataset(train_paths, train_labels, shuffle_ds=True, augment_ds=augment_train, is_training_set_flag=True, base_data_dir_param=base_data_dir)
+    val_dataset = configure_dataset(val_paths, val_labels, shuffle_ds=data_config.get('shuffle_validation_data', True), augment_ds=augment_val, is_training_set_flag=False, base_data_dir_param=base_data_dir)
+    test_dataset = configure_dataset(test_paths, test_labels, shuffle_ds=False, augment_ds=False, is_training_set_flag=False, base_data_dir_param=base_data_dir)
 
     # Log dataset cardinalities with error handling
     if train_dataset:

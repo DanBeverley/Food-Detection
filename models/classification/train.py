@@ -35,18 +35,16 @@ class DebugCallback(tf.keras.callbacks.Callback):
         
     def on_train_batch_end(self, batch, logs=None):
         self.batch_count += 1
-        if self.batch_count % 100 == 0:
-            current_loss = logs.get('loss', 0)
-            current_acc = logs.get('categorical_accuracy', 0)
-            logger.info(f"Batch {self.batch_count}: Loss={current_loss:.4f}, Acc={current_acc:.4f}")
-            
-            # Check learning rate more robustly
-            try:
-                # K.get_value is safer for retrieving tensor values
-                lr_val = K.get_value(self.model.optimizer.learning_rate)
-                logger.info(f"Learning Rate: {float(lr_val)}")
-            except Exception as e:
-                logger.warning(f"Could not retrieve learning rate: {e}")
+        current_loss = logs.get('loss', 0)
+        current_acc = logs.get('categorical_accuracy', 0)
+        
+        # Check for NaN/infinite loss early
+        if tf.math.is_nan(current_loss) or tf.math.is_inf(current_loss):
+            logger.error(f"GRADIENT EXPLOSION DETECTED at batch {self.batch_count}! Loss: {current_loss}")
+            logger.error("Stopping training due to gradient explosion.")
+            self.model.stop_training = True
+            return            
+        pass
 
 from typing import Dict, Tuple, Any, List, Optional
 
@@ -156,16 +154,19 @@ def initialize_strategy() -> tf.distribute.Strategy:
     # Fallback to GPU/CPU
     logger.info("TPU initialization failed, falling back to GPU/CPU")
     gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:        
+    if gpus:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        
         if len(gpus) > 1:
             strategy = tf.distribute.MirroredStrategy()
-            logger.info(f"Multi-GPU strategy: {len(gpus)} GPUs")
+            logger.info(f"Multi-GPU strategy: {len(gpus)} GPUs detected. Using MirroredStrategy.")
         else:
-            strategy = tf.distribute.get_strategy()
-            logger.info(f"Single GPU strategy")
+            strategy = tf.distribute.OneDeviceStrategy(device="/gpu:0")
+            logger.info(f"Single GPU strategy: {len(gpus)} GPU detected. Using OneDeviceStrategy.")
         return strategy
     else:
-        logger.info("Using CPU strategy")
+        logger.info("No GPUs found. Using CPU strategy.")
         return tf.distribute.get_strategy()
 
 def set_mixed_precision_policy(config: Dict, strategy: tf.distribute.Strategy):
@@ -225,24 +226,6 @@ class DetailedLoggingCallback(callbacks.Callback):
             print(log_message, flush=True)
 
 def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.Model:
-    # Custom model class to handle mixed precision loss computation
-    class CustomModel(tf.keras.Model):
-        def compute_loss(self, x=None, y=None, y_pred=None, sample_weight=None):
-            # This method overrides the default loss computation to handle mixed precision
-            
-            # 1. Compute the main loss from the compiled loss function.
-            # This will be float32 because of our MixedPrecisionLoss wrapper.
-            main_loss = super().compute_loss(x, y, y_pred, sample_weight)
-
-            # 2. self.losses contains the regularization penalties from the layers.
-            # In mixed precision, these are float16. We must cast and sum them.
-            if self.losses:
-                # Cast each regularization loss to float32 before summing
-                reg_loss = tf.add_n([tf.cast(loss, tf.float32) for loss in self.losses])
-                # Add the float32 regularization loss to the float32 main loss
-                return main_loss + reg_loss
-            else:
-                return main_loss
     
     model_cfg = config.get('model', {})
     data_cfg = config.get('data', {})
@@ -259,9 +242,34 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     fine_tune_layers_rgb = model_cfg.get('fine_tune_layers', 10)
     weights = 'imagenet' if use_pretrained else None
 
-    # Determine if multi-modal input is configured
+    # Determine if multi-modal input is configured (backward compatibility)
     modalities_cfg = data_cfg.get('modalities_config', {})
-    is_multimodal_enabled = modalities_cfg.get('enabled', False)
+    
+    # Backward compatibility: Check old flags and create modalities_cfg if needed
+    use_depth_map = data_cfg.get('use_depth_map', False)
+    use_point_cloud = data_cfg.get('use_point_cloud', False)
+    
+    if use_depth_map or use_point_cloud:
+        is_multimodal_enabled = True
+        # Create modalities config from old flags and modalities_preprocessing
+        preprocessing_cfg = data_cfg.get('modalities_preprocessing', {})
+        
+        if use_depth_map:
+            modalities_cfg['depth'] = {
+                'enabled': True,
+                'normalize': preprocessing_cfg.get('depth', {}).get('normalize', False)
+            }
+        
+        if use_point_cloud:
+            modalities_cfg['point_cloud'] = {
+                'enabled': True,
+                'normalize': preprocessing_cfg.get('point_cloud', {}).get('normalize', False)
+            }
+            
+        logger.info("Using backward compatibility for old multimodal flags")
+    else:
+        is_multimodal_enabled = modalities_cfg.get('enabled', False)
+    
     logger.info(f"Multi-modal input enabled: {is_multimodal_enabled}")
 
     active_input_layers_list = []
@@ -355,10 +363,10 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     
     all_branch_features.append(pooled_rgb_features)
 
-    # --- Depth Branch (conditional on multi-modal AND specific depth config) ---
+    # Depth Branch (conditional on multi-modal AND specific depth config)
     use_depth = modalities_cfg.get('depth', {}).get('enabled', False) if is_multimodal_enabled else False
     if use_depth:
-        depth_input_shape_config = modalities_cfg.get('depth', {}).get('input_shape', [*image_size, 1])
+        depth_input_shape_config = modalities_cfg.get('depth', {}).get('input_shape', [*image_size, 3])
         depth_input_shape = tuple(depth_input_shape_config) # Ensure it's a tuple
         depth_input_tensor = layers.Input(shape=depth_input_shape, name='depth_input')
         active_input_layers_list.append(depth_input_tensor)
@@ -372,9 +380,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         depth_pooling_type = depth_arch_cfg.get('pooling', 'GlobalAveragePooling2D')
 
         depth_x = depth_input_tensor
-        # Pre-process depth: potentially scale to [0,1] or repeat channels if necessary for pretrained models expecting 3 channels
-        # For a custom CNN, ensure it's appropriate. Example: If depth_map is not [0,1], normalize it.
-        # Example: depth_x = layers.Rescaling(1./255)(depth_input_tensor) if values are 0-255
+        
         # If a pretrained model adapted for depth were used, it might expect 3 channels:
         # if depth_arch_cfg.get('repeat_channels_for_pretrained', False):
         #     logger.info("Repeating depth channel 3 times for potentially pretrained model input.")
@@ -405,7 +411,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     use_pc = modalities_cfg.get('point_cloud', {}).get('enabled', False) if is_multimodal_enabled else False
     if use_pc:
         pc_cfg = modalities_cfg.get('point_cloud', {})
-        num_points = pc_cfg.get('num_points', 1024)
+        num_points = pc_cfg.get('num_points', 4096) # Read from config, default to 4096
         pc_input_shape = (num_points, 3) # (Num points, 3 coords)
         pc_input_tensor = layers.Input(shape=pc_input_shape, name='point_cloud_input')
         active_input_layers_list.append(pc_input_tensor)
@@ -420,6 +426,13 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         pc_pooling_type = pc_arch_cfg.get('pooling', 'GlobalMaxPooling1D') # PointNet uses MaxPooling
 
         pc_x = pc_input_tensor
+        
+        pc_preprocessing_cfg = modalities_cfg.get('point_cloud', {})
+        if pc_preprocessing_cfg.get('normalize', False):
+            # Normalize point cloud coordinates to prevent large values causing NaN
+            logger.info("Applying LayerNormalization to point cloud input to prevent NaN")
+            pc_x = layers.LayerNormalization(axis=-1)(pc_x)
+        
         for i, layer_params in enumerate(pc_conv1d_layers):
             pc_x = layers.Conv1D(layer_params['filters'], 
                                 kernel_size=layer_params.get('kernel_size', 1), 
@@ -438,14 +451,48 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     elif is_multimodal_enabled and modalities_cfg.get('point_cloud', {}).get('enabled', False):
         logger.info("Point Cloud modality is configured but 'use_point_cloud' (old flag) or specific 'point_cloud.enabled' is effectively false. Point Cloud branch NOT added.")
 
-    # --- Fusion and Classification Head ---
-    if is_multimodal_enabled and len(all_branch_features) > 1:
-        logger.info(f"Fusing {len(all_branch_features)} feature branches.")
-        fused_features = layers.Concatenate(name='feature_fusion')(all_branch_features)
-    elif len(all_branch_features) == 1:
-        fused_features = all_branch_features[0] # Single branch, no concatenation needed
+    # Fusion and Classification Head
+    
+    # 1. Normalize each branch's feature vector before fusion
+    # This prevents one modality from numerically dominating the others.
+    norm_branch_features = []
+    branch_names = ['rgb', 'depth', 'pc']
+    for i, features in enumerate(all_branch_features):
+        branch_name = branch_names[i] if i < len(branch_names) else f'branch_{i}'
+        norm_features = layers.BatchNormalization(name=f'{branch_name}_features_bn')(features)
+        norm_branch_features.append(norm_features)
+
+    if is_multimodal_enabled and len(norm_branch_features) > 1:
+        logger.info(f"Fusing {len(norm_branch_features)} feature branches with Gated Mechanism.")
+        
+        # 2. Gated Fusion Mechanism
+        # Instead of simple concatenation, let the model learn the importance of each modality.
+        
+        # concatenate the normalized features to get a combined view.
+        combined_features = layers.Concatenate(name='combined_feature_view')(norm_branch_features)
+        
+        # Create a small gating network that looks at the combined features.
+        gate_x = layers.Dense(128, activation='relu', name='gate_dense')(combined_features)
+        
+        # The output of the gating network is a set of weights (one for each branch).
+        # Softmax ensures the weights sum to 1.
+        gate_weights = layers.Dense(len(norm_branch_features), activation='softmax', name='gate_softmax')(gate_x)
+        
+        # 3. Apply the learned weights to each branch
+        weighted_features = []
+        for i, branch_features in enumerate(norm_branch_features):
+            # Extract the weight for this specific branch
+            branch_weight = layers.Lambda(lambda x, idx=i: x[:, idx:idx+1], name=f'gate_weight_b{i}')(gate_weights)
+            # Multiply the branch's features by its learned weight
+            weighted_branch = layers.Multiply(name=f'weighted_features_b{i}')([branch_features, branch_weight])
+            weighted_features.append(weighted_branch)
+            
+        # 4. Concatenate the *weighted* features for the final fused vector
+        fused_features = layers.Concatenate(name='weighted_feature_fusion')(weighted_features)
+
+    elif len(norm_branch_features) == 1:
+        fused_features = norm_branch_features[0] # Single branch, no fusion needed
     else:
-        # This case should not be reached if RGB branch is always added.
         logger.error("No feature branches were created. Cannot build model head.")
         raise ValueError("Model construction failed: No feature branches were created.")
 
@@ -501,12 +548,19 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
                 activation=activation, 
                 kernel_regularizer=regularizer,
                 activity_regularizer=activity_regularizer,
+                kernel_initializer='he_normal',  # He initialization for ReLU
+                bias_initializer='zeros',
                 name=f'head_dense_{i+1}'
             )(x)
             
             # Add batch normalization if enabled
             if layer_batch_norm:
-                x = layers.BatchNormalization(momentum=batch_norm_momentum, name=f'head_bn_{i+1}')(x)
+                x = layers.BatchNormalization(
+                    momentum=batch_norm_momentum, 
+                    gamma_initializer='ones',
+                    beta_initializer='zeros',
+                    name=f'head_bn_{i+1}'
+                )(x)
             
             # Add layer-specific dropout
             if layer_dropout > 0:
@@ -532,6 +586,8 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         num_classes, 
         activation=output_activation, 
         kernel_regularizer=output_regularizer,
+        kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),  # Small weights for output
+        bias_initializer='zeros',
         name='output_layer'
     )(x)
     
@@ -550,49 +606,11 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     else:
         model_inputs = rgb_input_tensor # Single input: RGB only
 
-    # Custom model class to handle mixed precision regularization loss dtype conflicts
-    class CustomModel(tf.keras.Model):
-        def compute_loss(self, x=None, y=None, y_pred=None, sample_weight=None):
-            # The issue: Keras' parent compute_loss() tries to sum mixed dtype tensors
-            # Solution: Use the actual loss function directly, handle regularization separately
-            
-            if y is not None and y_pred is not None:
-                # 1. Cast inputs to float32 for consistent dtype
-                y_true = tf.cast(y, tf.float32)
-                y_pred = tf.cast(y_pred, tf.float32)
-                
-                # 2. Get the actual loss function from the compiled loss object
-                # This avoids recursion by not calling compute_loss methods
-                loss_fn = self.loss  # This should be our MixedPrecisionLoss wrapper
-                if loss_fn is not None:
-                    main_loss = loss_fn(y_true, y_pred)
-                    if sample_weight is not None:
-                        main_loss = main_loss * tf.cast(sample_weight, tf.float32)
-                    main_loss = tf.reduce_mean(tf.cast(main_loss, tf.float32))
-                else:
-                    # Fallback to categorical crossentropy
-                    main_loss = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
-                    main_loss = tf.reduce_mean(tf.cast(main_loss, tf.float32))
-                
-                # 3. Handle regularization losses separately
-                if self.losses:
-                    # Cast float16 regularization losses to float32 and sum them
-                    reg_loss = tf.add_n([tf.cast(loss, tf.float32) for loss in self.losses])
-                    return tf.cast(main_loss + reg_loss, tf.float32)
-                
-                return main_loss
-            else:
-                # Fallback case
-                return tf.constant(0.0, dtype=tf.float32)
 
-    # Check if we need to use CustomModel for mixed precision
-    training_cfg = config.get('training', {})
-    if training_cfg.get('use_mixed_precision') is True:
-        model = CustomModel(inputs=model_inputs, outputs=outputs)
-        logger.info("Created CustomModel for mixed precision training")
-    else:
-        model = models.Model(inputs=model_inputs, outputs=outputs)
-        logger.info("Created standard Model")
+    # Always use the standard tf.keras.Model
+    # The framework handles mixed precision and other features correctly
+    model = models.Model(inputs=model_inputs, outputs=outputs)
+    logger.info("Created standard tf.keras.Model")
 
     # Optimizer setup
     optimizer_name = optimizer_cfg.get('name', 'AdamW')  # Default to AdamW
@@ -633,12 +651,6 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
             clipnorm=clipnorm,
             clipvalue=clipvalue
         )
-    
-    # Apply loss scaling for mixed precision  
-    training_cfg = config.get('training', {})
-    if training_cfg.get('use_mixed_precision') is True:
-        optimizer_instance = mixed_precision.LossScaleOptimizer(optimizer_instance)
-        logger.info("Applied loss scaling for mixed precision training")
     
     # Log gradient clipping configuration
     if clipnorm is not None:
@@ -683,16 +695,40 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     # Test forward pass
     logger.info("Testing forward pass...")
     try:
-        dummy_batch = tf.random.normal((2, 224, 224, 3))
-        dummy_output = model(dummy_batch, training=False)
+        if is_multimodal_enabled:
+            # Create a dictionary of dummy inputs for multimodal model
+            dummy_inputs = {}
+            input_layers = model.inputs if isinstance(model.inputs, list) else [model.inputs]
+            
+            for input_tensor in input_layers:
+                input_name = input_tensor.name
+                input_shape = input_tensor.shape[1:]  # Exclude batch dimension
+                
+                logger.info(f"Creating dummy data for input '{input_name}' with shape {input_shape}")
+                
+                # Extract key name (remove ':0' suffix)
+                input_key = input_name.split(':')[0]
+                dummy_inputs[input_key] = tf.random.normal((2, *input_shape))
+            
+            logger.info(f"Testing forward pass with multimodal inputs: {list(dummy_inputs.keys())}")
+            dummy_output = model(dummy_inputs, training=False)
+        else:
+            # Single RGB input
+            dummy_batch = tf.random.normal((2, *image_size, 3))
+            logger.info("Testing forward pass with single RGB input")
+            dummy_output = model(dummy_batch, training=False)
+        
         logger.info(f"Forward pass successful. Output shape: {dummy_output.shape}")
         
         # Check if output is always the same (indicating frozen model)
-        dummy_output2 = model(dummy_batch, training=False)
+        if is_multimodal_enabled:
+            dummy_output2 = model(dummy_inputs, training=False)
+        else:
+            dummy_output2 = model(dummy_batch, training=False)
+        
         outputs_identical = tf.reduce_all(tf.equal(dummy_output, dummy_output2))
         logger.info(f"Repeated calls identical: {outputs_identical}")
         
-        # CRITICAL: Check optimizer learning rate
         actual_lr = model.optimizer.learning_rate
         if hasattr(actual_lr, 'numpy'):
             actual_lr_value = actual_lr.numpy()
@@ -701,10 +737,12 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         logger.info(f"Optimizer LR: {actual_lr_value}, Type: {type(model.optimizer).__name__}")
         
         if actual_lr_value < 1e-8:
-            logger.error(f"CRITICAL: Learning rate is too small: {actual_lr_value}")
+            logger.error(f"Learning rate is too small: {actual_lr_value}")
         
     except Exception as e:
         logger.error(f"Forward pass failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return
     
     # Optionally print model summary
@@ -738,80 +776,34 @@ def _create_optimizer(optimizer_name: str, learning_rate: float, clipnorm: Optio
 
 
 def _get_loss_function(loss_function_name: str, loss_params: Dict, num_classes: int, config: Dict) -> losses.Loss:
-    # Check if mixed precision is enabled
-    training_cfg = config.get('training', {})
-    reduction = tf.keras.losses.Reduction.AUTO
-    if training_cfg.get('use_mixed_precision') is True:
-        # Use SUM_OVER_BATCH_SIZE for mixed precision compatibility
-        reduction = tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
-    
-    if loss_function_name.lower() == 'categoricalcrossentropy' or loss_function_name.lower() == 'categorical_crossentropy':
-        # Create a custom loss wrapper for mixed precision compatibility
-        base_loss = losses.CategoricalCrossentropy(
+    # Use SUM_OVER_BATCH_SIZE which is the standard for most training scenarios
+    # This works well with distributed training and mixed precision
+    reduction = tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
+
+    if loss_function_name.lower() in ['categoricalcrossentropy', 'categorical_crossentropy']:
+        loss_instance = losses.CategoricalCrossentropy(
             label_smoothing=loss_params.get('label_smoothing', 0.0),
-            from_logits=loss_params.get('from_logits', False), # Usually False if softmax is last layer
-            reduction=reduction
-        )
-        
-        if training_cfg.get('use_mixed_precision') is True:
-            # Wrap loss to ensure dtype compatibility
-            class MixedPrecisionLoss(tf.keras.losses.Loss):
-                def __init__(self, base_loss):
-                    super().__init__(name=base_loss.name, reduction=base_loss.reduction)
-                    self.base_loss = base_loss
-                
-                def call(self, y_true, y_pred):
-                    # Ensure both tensors are float32 for loss computation
-                    y_true = tf.cast(y_true, tf.float32)
-                    y_pred = tf.cast(y_pred, tf.float32)
-                    return self.base_loss(y_true, y_pred)
-            
-            loss_instance = MixedPrecisionLoss(base_loss)
-        else:
-            loss_instance = base_loss
-    elif loss_function_name.lower() == 'sparsecategoricalcrossentropy' or loss_function_name.lower() == 'sparse_categorical_crossentropy':
-        # This branch should ideally not be hit if MixUp/CutMix are used, but handle for completeness
-        base_loss = losses.SparseCategoricalCrossentropy(
             from_logits=loss_params.get('from_logits', False),
-            reduction=reduction
+            reduction=reduction,
+            name='categorical_crossentropy'
         )
-        
-        if training_cfg.get('use_mixed_precision') is True:
-            class MixedPrecisionSparseLoss(tf.keras.losses.Loss):
-                def __init__(self, base_loss):
-                    super().__init__(name=base_loss.name, reduction=base_loss.reduction)
-                    self.base_loss = base_loss
-                
-                def call(self, y_true, y_pred):
-                    y_true = tf.cast(y_true, tf.float32)
-                    y_pred = tf.cast(y_pred, tf.float32)
-                    return self.base_loss(y_true, y_pred)
-            
-            loss_instance = MixedPrecisionSparseLoss(base_loss)
-        else:
-            loss_instance = base_loss
+    elif loss_function_name.lower() in ['sparsecategoricalcrossentropy', 'sparse_categorical_crossentropy']:
+        # This shouldn't be used with MixUp/CutMix, but handle for completeness
+        loss_instance = losses.SparseCategoricalCrossentropy(
+            from_logits=loss_params.get('from_logits', False),
+            reduction=reduction,
+            name='sparse_categorical_crossentropy'
+        )
     else:
         logger.error(f"Unsupported loss function: {loss_function_name}. Defaulting to CategoricalCrossentropy.")
-        base_loss = losses.CategoricalCrossentropy(
+        loss_instance = losses.CategoricalCrossentropy(
             label_smoothing=loss_params.get('label_smoothing', 0.0),
-            reduction=reduction
+            from_logits=loss_params.get('from_logits', False),
+            reduction=reduction,
+            name='categorical_crossentropy'
         )
-        
-        if training_cfg.get('use_mixed_precision') is True:
-            class MixedPrecisionLoss(tf.keras.losses.Loss):
-                def __init__(self, base_loss):
-                    super().__init__(name=base_loss.name, reduction=base_loss.reduction)
-                    self.base_loss = base_loss
-                
-                def call(self, y_true, y_pred):
-                    y_true = tf.cast(y_true, tf.float32)
-                    y_pred = tf.cast(y_pred, tf.float32)
-                    return self.base_loss(y_true, y_pred)
-            
-            loss_instance = MixedPrecisionLoss(base_loss)
-        else:
-            loss_instance = base_loss
 
+    logger.info(f"Using loss: {loss_instance.name} with reduction={loss_instance.reduction}")
     return loss_instance
 
 
@@ -1038,7 +1030,11 @@ def train_model(model: models.Model,
     # Debug tensor dtypes before training
     for batch in train_dataset.take(1):
         inputs, targets = batch
-        logger.info(f"Dataset inputs dtype: {inputs.dtype}")
+        if isinstance(inputs, dict):
+            for key, tensor in inputs.items():
+                logger.info(f"Dataset inputs dtype for '{key}': {tensor.dtype}")
+        else:
+            logger.info(f"Dataset inputs dtype: {inputs.dtype}")
         logger.info(f"Dataset targets dtype: {targets.dtype}")
         break
     
@@ -1048,15 +1044,38 @@ def train_model(model: models.Model,
     try:
         logger.info("=== DTYPE DEBUGGING INFO ===")
         logger.info(f"Mixed precision policy: {tf.keras.mixed_precision.global_policy().name}")
-        logger.info(f"Model input dtype: {model.input.dtype}")
+        
+        # Handle single vs. multiple inputs
+        if isinstance(model.input, list):
+            for i, inp in enumerate(model.input):
+                logger.info(f"Model input #{i} ({inp.name}) dtype: {inp.dtype}")
+        else:
+            logger.info(f"Model input dtype: {model.input.dtype}")
+            
         logger.info(f"Model output dtype: {model.output.dtype}")
         
         # Test a single batch to isolate the error
         logger.info("Testing single batch prediction...")
         test_batch = train_dataset.take(1)
         for test_images, test_labels in test_batch:
-            logger.info(f"Test batch input dtype: {test_images.dtype}")
+            # Handle single vs. multiple inputs (dictionary)
+            if isinstance(test_images, dict):
+                for name, tensor in test_images.items():
+                    logger.info(f"Test batch input tensor '{name}' dtype: {tensor.dtype}")
+            else:
+                logger.info(f"Test batch input dtype: {test_images.dtype}")
+                
             logger.info(f"Test batch label dtype: {test_labels.dtype}")
+            
+            # Add data sanity check
+            logger.info("Checking for NaNs in input data...")
+            if isinstance(test_images, dict):
+                for name, tensor in test_images.items():
+                    tf.debugging.check_numerics(tensor, f"NaN or Inf found in input tensor: {name}")
+            else:
+                tf.debugging.check_numerics(test_images, "NaN or Inf found in input images")
+            tf.debugging.check_numerics(test_labels, "NaN or Inf found in input labels")
+            logger.info("No NaNs found in input data. OK.")
             
             # Test forward pass
             try:
@@ -1177,9 +1196,30 @@ def main(args):
 
     # Load data using the function from data.py
     logger.info("Loading classification data...")
+    
+    # Check if base_data_dir is specified in config or environment
+    base_data_dir = data_cfg.get('base_data_dir', None)
+    if not base_data_dir:
+        # Try common Kaggle paths
+        kaggle_paths = [
+            "/kaggle/input/metafood3d/_MetaFood3D_new_RGBD_videos/RGBD_videos",
+            "/kaggle/input/metafood3d-dataset/RGBD_videos"
+        ]
+        for path in kaggle_paths:
+            if os.path.exists(path):
+                base_data_dir = path
+                logger.info(f"Auto-detected base_data_dir: {base_data_dir}")
+                break
+    
+    if base_data_dir:
+        logger.info(f"Using base_data_dir: {base_data_dir}")
+    else:
+        logger.warning("No base_data_dir found. Using relative paths from metadata.")
+    
     data_result = load_classification_data(
         config=config, 
-        max_samples_to_load=max_samples_for_loader
+        max_samples_to_load=max_samples_for_loader,
+        base_data_dir=base_data_dir
     )
     
     if data_result is None:
@@ -1187,6 +1227,21 @@ def main(args):
         return
     
     train_ds, val_ds, test_ds, num_train_samples, num_val_samples, num_test_samples, class_names, num_classes = data_result
+    
+    # Verify multi-modal data loading
+    logger.info("--- Verifying Multi-Modal Data ---")
+    if train_ds is not None:
+        for batch_inputs, _ in train_ds.take(1):
+            if isinstance(batch_inputs, dict):
+                for name, tensor in batch_inputs.items():
+                    mean_val = tf.reduce_mean(tf.cast(tensor, tf.float32))
+                    std_val = tf.math.reduce_std(tf.cast(tensor, tf.float32))
+                    logger.info(f"Input '{name}': Mean={mean_val.numpy():.4f}, StdDev={std_val.numpy():.4f}")
+                    if std_val.numpy() < 1e-6:
+                        logger.error(f"CRITICAL: Input '{name}' appears to be all zeros or constant! Check data loading.")
+            break
+    else:
+        logger.error("Training dataset is None, cannot verify data.")
     
     if num_train_samples == 0:
         logger.error("No training samples loaded. This typically means:")

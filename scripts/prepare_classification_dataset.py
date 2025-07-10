@@ -26,7 +26,8 @@ def create_dataset_metadata(source_rgbd_base_dir_path: str, output_metadata_dir_
     output_meta_dir = Path(output_metadata_dir_path)
     metadata_file_path = output_meta_dir / "metadata.json"
 
-    if not source_dir.is_dir():
+    print(f"Checking for source directory: {source_dir}")
+    if not os.path.isdir(source_dir):
         logging.error(f"Source directory not found: {source_dir}")
         return
 
@@ -39,6 +40,7 @@ def create_dataset_metadata(source_rgbd_base_dir_path: str, output_metadata_dir_
     total_images_referenced = 0
 
     logging.info(f"Scanning source directory: {source_dir} to generate metadata (no images will be copied).")
+    source_dir = Path(source_dir)
     class_folders = [d for d in source_dir.iterdir() if d.is_dir()]
     if not class_folders:
         logging.error(f"No class subdirectories found in {source_dir}")
@@ -78,7 +80,7 @@ def create_dataset_metadata(source_rgbd_base_dir_path: str, output_metadata_dir_
                 try:
                     # Reference the original image directly
                     metadata_entry = {
-                        "image_path": str(img_path.resolve()), # Absolute path to original image
+                        "image_path": str(img_path.relative_to(source_dir)), # Store path relative to source_dir
                         "class_name": class_name,
                         "instance_name": instance_folder.name
                     }

@@ -145,7 +145,7 @@ training:
   debug_epochs: 3  # Fast debug epochs
   debug_mode: false  # Disabled for production training
   use_mixed_precision: true
-  use_tpu: true  # Enabled for TPU v3-8 training
+  use_tpu: false
   
   # Production IoU metric configuration
   metrics: ["binary_accuracy", "binary_iou", "dice_coefficient", "precision", "recall"] 

@@ -1,24 +1,26 @@
 data:
   metadata_path: "data/classification/metadata.json" 
   image_size: [224, 224] 
-  batch_size: 128  # Optimal for T4x2 GPU (2 GPUs × 64 per GPU)
+  batch_size: 32  # Adjusted for single GPU
   split_ratio: 0.2
-  debug_max_total_samples: null # Disabled for production - use all samples
+  # debug_max_total_samples: 100 # Commented out to use full dataset
+  
+  # Base directory for Kaggle dataset
+  base_data_dir: "/kaggle/input/metafood3d/_MetaFood3D_new_RGBD_videos/RGBD_videos"
 
   # Data splits for better validation
   validation_split: 0.2
   test_split: 0.1
   random_seed: 42
 
-  use_depth_map: true  # Enable for production testing
+  use_depth_map: true
   depth_map_dir_name: "depth" 
 
-  use_point_cloud: true  # Enable for production testing
+  use_point_cloud: true
   point_cloud_root_dir: "/kaggle/input/metafood3d-pointcloud/_MetaFood3D_new_Point_cloud/Point_cloud" 
   point_cloud_sampling_rate_dir: "4096" 
   point_cloud_suffix: "_sampled_1.ply" 
 
-  # Production augmentation settings
   augmentation:
     enabled: true
     augment_training_data: true
@@ -51,14 +53,12 @@ data:
 
   # Advanced augmentation techniques (applied after batching)
   advanced_augmentation:
-    # MixUp Augmentation
     mixup:
       enabled: true
       alpha: 0.4
 
-    # CutMix Augmentation
     cutmix:
-      enabled: true
+      enabled: false
       alpha: 1.0
     
     # Label smoothing equivalent through augmentation
@@ -77,8 +77,8 @@ model:
   architecture: "MobileNetV3Small" 
   use_pretrained_weights: true 
   fine_tune: true 
-  fine_tune_layers: -1  # Unfreeze ALL layers (-1 means all)
-
+  fine_tune_layers: 50  
+  
   # Production Classification Head with Regularization
   classification_head:
     pooling: "GlobalAveragePooling2D" 
@@ -95,9 +95,9 @@ model:
     activation: "relu" 
     final_activation: "softmax"
     
-    # Regularization
-    kernel_l2_factor: 0.002
-    activity_l2_factor: 0.001
+    # DISABLED for debugging
+    kernel_l2_factor: 0.0
+    activity_l2_factor: 0.0
 
     # Batch normalization
     use_batch_norm: true
@@ -106,11 +106,10 @@ model:
 # Production Optimizer Configuration
 optimizer:
   name: "AdamW"
-  learning_rate: 0.0005  # Optimal for T4x2 GPU with batch_size 128
-  weight_decay: 0.01  # Standard weight decay for GPU training
-  clipnorm: 5.0  # Optimal gradient clipping for T4x2 GPU
+  learning_rate: 0.0005
+  weight_decay: 0.01 
+  clipnorm: 1.0  
   
-  # Learning rate scheduling - DISABLED for debugging
   schedule:
     enabled: false
     type: "cosine_decay_restarts"
@@ -124,21 +123,21 @@ optimizer:
 loss:
   name: "CategoricalCrossentropy" 
   params:
-    label_smoothing: 0.0  # DISABLED to test if this is causing stuck loss
+    label_smoothing: 0.1
     from_logits: false
 
 # Metrics Configuration
-metrics: ["accuracy", "precision", "recall"] 
+metrics: ["accuracy"] 
 
 # Production Training Configuration
 training:
   epochs: 30 
   debug_epochs: 3  
-  use_mixed_precision: true  # Enable for T4x2 GPU efficiency
-  use_tpu: false  # Disable TPU for GPU training  
+  use_mixed_precision: true
+  use_tpu: false  
   
-  # Class weights for imbalanced datasets
-  use_class_weights: true
+  # DISABLED for debugging
+  use_class_weights: false
   
   # Advanced augmentation parameters
   mixup_alpha: 0.4
