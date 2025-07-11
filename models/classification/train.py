@@ -97,9 +97,20 @@ def initialize_strategy() -> tf.distribute.Strategy:
         logger.info(f"COLAB_TPU_ADDR found: {colab_tpu_addr}")
         resolver_address = colab_tpu_addr
     else:
-        # For Kaggle TPU, try empty string first (standard approach)
-        resolver_address = ''
-        logger.info("No TPU environment variables found, trying empty string resolver for Kaggle TPU")
+        # For Kaggle TPU, try automatic detection first
+        try:
+            resolver = tf.distribute.cluster_resolver.TPUClusterResolver()
+            logger.info("Kaggle TPU detected via automatic resolver")
+            tf.config.experimental_connect_to_cluster(resolver)
+            tf.tpu.experimental.initialize_tpu_system(resolver)
+            strategy = tf.distribute.TPUStrategy(resolver)
+            logger.info(f"TPU Strategy successfully initialized: {strategy}")
+            logger.info(f"Number of TPU cores: {strategy.num_replicas_in_sync}")
+            return strategy
+        except Exception as e:
+            logger.info(f"Automatic TPU detection failed: {e}")
+            resolver_address = ''
+            logger.info("Falling back to empty string resolver for Kaggle TPU")
     
     # Try TPU detection with retry mechanism
     for attempt in range(3):
