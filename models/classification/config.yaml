@@ -13,13 +13,6 @@ data:
   test_split: 0.1
   random_seed: 42
 
-  use_depth_map: true
-  depth_map_dir_name: "depth" 
-
-  use_point_cloud: true
-  point_cloud_root_dir: "/kaggle/input/metafood3d-pointcloud/_MetaFood3D_new_Point_cloud/Point_cloud" 
-  point_cloud_sampling_rate_dir: "4096" 
-  point_cloud_suffix: "_sampled_1.ply" 
 
   augmentation:
     enabled: false
@@ -64,13 +57,6 @@ data:
     # Label smoothing equivalent through augmentation
     label_smoothing_equivalent: 0.1
 
-  modalities_preprocessing:
-    depth:
-      normalize: true
-
-    point_cloud:
-      num_points: 4096 
-      normalize: true   
 
 # Production Model Configuration
 model:
