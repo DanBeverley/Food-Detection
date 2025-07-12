@@ -173,9 +173,11 @@ def _apply_segmentation_augmentations_impl(
     num_rgb_channels = rgb_image.shape[-1]
     
     depth_included_in_geom = False
+    depth_channels = 0
     if aug_config_dict.get('apply_geometric_to_depth', False) and 'depth_input' in augmented_inputs:
         tensors_to_transform_geom.append(augmented_inputs['depth_input'])
         depth_included_in_geom = True
+        depth_channels = 3  # Updated for 3-channel depth
 
     tensors_to_transform_geom.append(current_mask) # Mask always gets geometric augmentations
     
@@ -187,8 +189,8 @@ def _apply_segmentation_augmentations_impl(
         split_indices = [num_rgb_channels]
         current_offset = num_rgb_channels
         if depth_included_in_geom:
-            split_indices.append(augmented_inputs['depth_input'].shape[-1])
-            current_offset += augmented_inputs['depth_input'].shape[-1]
+            split_indices.append(depth_channels)
+            current_offset += depth_channels
         # The rest is the mask
 
         # tf.split needs sizes, not indices
@@ -367,12 +369,13 @@ def load_and_preprocess_segmentation(
                 depth_normalized = tf.clip_by_value(depth_normalized, 0.0, 1.0)
             else: 
                 depth_normalized = depth_image_float / 255.0 
-            depth_normalized.set_shape([target_size_py[0], target_size_py[1], 1]) 
-            return depth_normalized
+            # Convert single channel to 3-channel for backbone compatibility
+            depth_3_channel = tf.concat([depth_normalized, depth_normalized, depth_normalized], axis=-1)
+            depth_3_channel.set_shape([target_size_py[0], target_size_py[1], 3]) 
+            return depth_3_channel
 
         def zeros_for_depth_fn():
-            # return tf.zeros(tf.concat([target_size_tensor, tf.constant([1], dtype=target_size_tensor.dtype)], axis=0), dtype=tf.float32)
-            return tf.zeros([target_size_py[0], target_size_py[1], 1], dtype=tf.float32) # Use python shape here
+            return tf.zeros([target_size_py[0], target_size_py[1], 3], dtype=tf.float32) # 3-channel zeros
         
         depth_input_tensor_val = tf.cond(tf.logical_and(use_depth_map_tensor, tf.strings.length(depth_path_tensor) > 0),
                                     load_and_process_depth_fn,
@@ -424,7 +427,7 @@ def load_and_preprocess_segmentation(
         logger.error(f"Exception in TF graph load_and_preprocess_segmentation for {image_path_tensor}, {mask_path_tensor}: {e}", exc_info=True)
         # Fallback: return zero tensors
         dummy_image_shape = [target_size_py[0], target_size_py[1], 3]
-        dummy_depth_shape = [target_size_py[0], target_size_py[1], 1]
+        dummy_depth_shape = [target_size_py[0], target_size_py[1], 3]  # Updated to 3-channel
         dummy_mask_shape  = [target_size_py[0], target_size_py[1], 1]
         dummy_pc_num_points = int(pc_prep_cfg_dict.get('num_points', 4096) if pc_prep_cfg_dict else 4096)
         dummy_pc_shape = [dummy_pc_num_points, 3]
