@@ -68,24 +68,16 @@ models:
 
 # Production Model Configuration
 model:
-  name: 'unet' # Options: 'unet', 'pspnet', 'deeplabv3plus'
-  backbone: 'efficientnetb0' # Use pretrained backbone for production
-  trainable_backbone: true
+  name: 'fused_encoder_decoder' # Multi-modal encoder-decoder with feature fusion
+  backbone: 'EfficientNetB0' # RGB backbone
+  depth_backbone: 'MobileNetV3Small' # Depth backbone
+  backbone_trainable: true
   
   # Fine-tuning strategy
   freeze_backbone_epochs: 3  # Freeze backbone for first N epochs
   gradual_unfreezing: true   # Gradually unfreeze layers
   
-  encoder_output_layer_name: 'top_activation' # Should be ~8x8 for 256x256 input
-  skip_connection_layer_names: # 5 skips for 5 decoder stages (from ~8x8 to 256x256)
-    - 'block4c_add'                # For 8x8 -> 16x16 stage (skip is ~16x16 from EfficientNetB0)
-    - 'block3b_add'                # For 16x16 -> 32x32 stage (skip is ~32x32)
-    - 'block2b_add'                # For 32x32 -> 64x64 stage (skip is ~64x64)
-    - 'stem_activation'            # For 64x64 -> 128x128 stage (skip is ~128x128)
-    - 'MODEL_INPUT'                # Special: For 64x64 -> 128x128 stage (skip is original 128x128 model input)
-  
-  # Enhanced decoder with regularization - debug optimized
-  decoder_filters: [128, 64, 32, 16, 8] # Smaller filters for faster debug training
+  # Decoder configuration
   decoder_dropout: 0.3  # Keep dropout for production-like training
   decoder_batch_norm: true  # Keep batch normalization
   
@@ -108,6 +100,8 @@ model:
 optimizer:
   name: "AdamW"  # Use AdamW for production
   learning_rate: 0.001  # Higher learning rate for production
+  stage1_learning_rate: 0.001   # For pre-training new branches
+  stage2_learning_rate: 0.00001 # For fine-tuning all branches
   weight_decay: 0.01  # L2 regularization through optimizer
   clipnorm: 1.0  # Gradient clipping
   
@@ -141,7 +135,8 @@ loss:
 
 # Debug Training Configuration
 training:
-  epochs: 20  # Optimized epochs for faster training
+  epochs: 30  # Total epochs
+  stage1_epochs: 5  # Pre-training epochs
   debug_epochs: 3  # Fast debug epochs
   debug_mode: false  # Disabled for production training
   use_mixed_precision: true
