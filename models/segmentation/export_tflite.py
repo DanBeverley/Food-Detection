@@ -130,7 +130,7 @@ def export_model(config_path: str):
             if "lambda" in str(ve):
                 logger.warning("Model contains lambda functions that can't be loaded. Creating inference model...")
                 # Load model architecture and weights separately
-                from train import unet_model
+                from train import build_fused_encoder_decoder_model
                 
                 # Get model config to rebuild architecture
                 model_config = config.get('model', {})
@@ -140,7 +140,7 @@ def export_model(config_path: str):
                 output_channels = data_config.get('num_classes', 1)
                 image_size = tuple(data_config.get('image_size', [128, 128])[:2])
                 
-                model = unet_model(
+                model = build_fused_encoder_decoder_model(
                     output_channels=output_channels,
                     image_size=image_size,
                     model_config=model_config,
