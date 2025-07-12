@@ -128,189 +128,62 @@ def _load_and_preprocess_point_cloud_py_seg(pc_path_bytes: bytes, num_points_tar
         return np.zeros((num_points_target, 3), dtype=np.float32)
 
 
-def _build_geometric_augmentation_layer(aug_config_dict: Dict, target_height: int, target_width: int) -> tf.keras.Sequential:
-    """Builds a Keras Sequential model for geometric augmentations."""
-    geometric_augs = tf.keras.Sequential(name="geometric_augmentations")
-    
-    if aug_config_dict.get("horizontal_flip", False):
-        geometric_augs.add(layers.RandomFlip("horizontal"))
-    
-    rotation_factor = aug_config_dict.get("rotation_range", 0) / 360.0 # Convert degrees to factor of 2*pi
-    if rotation_factor > 0:
-        geometric_augs.add(layers.RandomRotation(factor=rotation_factor))
 
-    height_factor = aug_config_dict.get("height_shift_range", 0.0)
-    width_factor = aug_config_dict.get("width_shift_range", 0.0)
-    if height_factor > 0.0 or width_factor > 0.0:
-        geometric_augs.add(layers.RandomTranslation(height_factor=height_factor, width_factor=width_factor, fill_mode='reflect'))
-
-    zoom_range = aug_config_dict.get("zoom_range", 0.0)
-    if zoom_range > 0.0:
-        # Keras RandomZoom takes (min_zoom, max_zoom) relative to 1.0
-        # e.g. zoom_range=0.1 means zoom between [0.9, 1.1]
-        geometric_augs.add(layers.RandomZoom(height_factor=(-zoom_range, zoom_range), width_factor=(-zoom_range, zoom_range), fill_mode='reflect'))
-
-    return geometric_augs
-
-def _apply_segmentation_augmentations_impl(
-    inputs_dict: Dict[str, tf.Tensor], 
-    mask_tensor: tf.Tensor, 
-    aug_config_dict: Dict,
-    geometric_aug_layer: tf.keras.Sequential # ADDED: Pass pre-built layer
-) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
-    """Applies configured augmentations. Geometric augmentations are applied consistently to RGB, Depth (if enabled), and Mask."""
-    
-    augmented_inputs = inputs_dict.copy()
-    rgb_image = augmented_inputs['rgb_input']
-    current_mask = mask_tensor
-
-    target_height = tf.shape(rgb_image)[0]
-    target_width = tf.shape(rgb_image)[1]
-
-    # --- Apply Geometric Augmentations Consistently ---
-    # Concatenate tensors that need consistent geometric transformation
-    tensors_to_transform_geom = [rgb_image]
-    num_rgb_channels = rgb_image.shape[-1]
-    
-    depth_included_in_geom = False
-    depth_channels = 0
-    if aug_config_dict.get('apply_geometric_to_depth', False) and 'depth_input' in augmented_inputs:
-        tensors_to_transform_geom.append(augmented_inputs['depth_input'])
-        depth_included_in_geom = True
-        depth_channels = 3  # Updated for 3-channel depth
-
-    tensors_to_transform_geom.append(current_mask) # Mask always gets geometric augmentations
-    
-    if len(geometric_aug_layer.layers) > 0:
-        concatenated_for_geom_aug = layers.concatenate(tensors_to_transform_geom, axis=-1)
-        augmented_concatenated_geom = geometric_aug_layer(concatenated_for_geom_aug, training=True) # training=True to enable random ops
-        
-        # Split back
-        split_indices = [num_rgb_channels]
-        current_offset = num_rgb_channels
-        if depth_included_in_geom:
-            split_indices.append(depth_channels)
-            current_offset += depth_channels
-        # The rest is the mask
-
-        # tf.split needs sizes, not indices
-        sizes_for_split = []
-        start_idx = 0
-        for ch_count in split_indices:
-            sizes_for_split.append(ch_count)
-            start_idx += ch_count
-        sizes_for_split.append(augmented_concatenated_geom.shape[-1] - start_idx) # Remaining channels for mask
-        
-        split_tensors_geom = tf.split(augmented_concatenated_geom, num_or_size_splits=sizes_for_split, axis=-1)
-        
-        augmented_inputs['rgb_input'] = split_tensors_geom[0]
-        idx_offset = 1
-        if depth_included_in_geom:
-            augmented_inputs['depth_input'] = split_tensors_geom[idx_offset]
-            idx_offset += 1
-        current_mask = split_tensors_geom[idx_offset]
-
-    # --- Color Augmentations (Applied only to RGB image) ---
-    rgb_image_after_geom = augmented_inputs['rgb_input']
-    
-    # Brightness
-    brightness_config = aug_config_dict.get("brightness_range", 0.0)
-    if isinstance(brightness_config, list) and len(brightness_config) == 2:
-        # Handle [min, max] format - convert to delta from 1.0
-        brightness_delta = max(abs(1.0 - brightness_config[0]), abs(brightness_config[1] - 1.0))
-    else:
-        # Handle single float format
-        brightness_delta = brightness_config
-    
-    if brightness_delta > 0.0:
-        rgb_image_after_geom = tf.image.random_brightness(rgb_image_after_geom, max_delta=brightness_delta * 255.0)
-        rgb_image_after_geom = tf.clip_by_value(rgb_image_after_geom, 0.0, 255.0)
-
-    # Contrast
-    contrast_config = aug_config_dict.get("contrast_range", [1.0, 1.0])
-    if isinstance(contrast_config, list) and len(contrast_config) == 2:
-        contrast_factor_lower, contrast_factor_upper = contrast_config
-    else:
-        # Fallback to old format
-        contrast_factor_lower = aug_config_dict.get("contrast_range_lower", 1.0)
-        contrast_factor_upper = aug_config_dict.get("contrast_range_upper", 1.0)
-    
-    if contrast_factor_lower < contrast_factor_upper : # Check if contrast is enabled
-         rgb_image_after_geom = tf.image.random_contrast(rgb_image_after_geom, lower=contrast_factor_lower, upper=contrast_factor_upper)
-         rgb_image_after_geom = tf.clip_by_value(rgb_image_after_geom, 0.0, 255.0)
-
-    # Saturation
-    saturation_config = aug_config_dict.get("saturation_range", [1.0, 1.0])
-    if isinstance(saturation_config, list) and len(saturation_config) == 2:
-        saturation_factor_lower, saturation_factor_upper = saturation_config
-    else:
-        # Fallback to old format
-        saturation_factor_lower = aug_config_dict.get("saturation_range_lower", 1.0)
-        saturation_factor_upper = aug_config_dict.get("saturation_range_upper", 1.0)
-    
-    if saturation_factor_lower < saturation_factor_upper:
-        rgb_image_after_geom = tf.image.random_saturation(rgb_image_after_geom, lower=saturation_factor_lower, upper=saturation_factor_upper)
-        rgb_image_after_geom = tf.clip_by_value(rgb_image_after_geom, 0.0, 255.0)
-
-    # Hue
-    hue_delta = aug_config_dict.get("hue_delta", aug_config_dict.get("hue_range", 0.0)) # Support both formats
-    if hue_delta > 0.0:
-        rgb_image_after_geom = tf.image.random_hue(rgb_image_after_geom, max_delta=hue_delta)
-        rgb_image_after_geom = tf.clip_by_value(rgb_image_after_geom, 0.0, 255.0)
-
-    augmented_inputs['rgb_input'] = rgb_image_after_geom
-
-    # Point cloud augmentations (e.g., jitter, random rotation around Z) can be added here if needed
-    # For now, pc_input passes through if it exists in augmented_inputs
-
-    return augmented_inputs, current_mask
 
 
 # Orchestrates conditional augmentation and model-specific preprocessing for segmentation
-def _augment_preprocess_segmentation_conditionally(
-    inputs_for_aug: Dict[str, tf.Tensor], 
-    mask_normalized: tf.Tensor, 
-    should_augment: tf.Tensor, 
-    aug_config: Dict,
-    model_preprocess_fn: Optional[Callable],
-    prebuilt_geometric_layer: tf.keras.Sequential
-) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
-    """TPU-compatible augmentation and preprocessing."""
+def build_and_apply_augmentations(inputs_dict: Dict[str, tf.Tensor], mask: tf.Tensor, aug_config: Dict) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
+    """Builds and applies a unified, TPU-friendly augmentation pipeline."""
     
-    # Always apply preprocessing to RGB (more TPU-friendly than tf.cond)
-    processed_inputs = inputs_for_aug.copy()
-    if model_preprocess_fn is not None and 'rgb_input' in processed_inputs:
-        processed_inputs['rgb_input'] = model_preprocess_fn(processed_inputs['rgb_input'])
+    # Ensure mask has a channel dimension for concatenation
+    mask_with_channel = tf.expand_dims(mask, axis=-1)
+
+    # Concatenate all image-like inputs that need the same geometric transformations
+    image_and_mask = layers.concatenate([inputs_dict['rgb_input'], inputs_dict['depth_input'], mask_with_channel], axis=-1)
+
+    # Geometric augmentations using TPU-native Keras layers
+    if aug_config.get("horizontal_flip", False):
+        image_and_mask = layers.RandomFlip("horizontal")(image_and_mask)
+    if aug_config.get("rotation_range", 0) > 0:
+        image_and_mask = layers.RandomRotation(aug_config["rotation_range"] / 360.0)(image_and_mask)
+    if aug_config.get("zoom_range", 0) > 0:
+        zoom = aug_config["zoom_range"]
+        image_and_mask = layers.RandomZoom(height_factor=(-zoom, zoom))(image_and_mask)
+
+    # Split back the geometrically augmented tensors
+    augmented_rgb = image_and_mask[..., :3]
+    augmented_depth = image_and_mask[..., 3:6]
+    augmented_mask = tf.squeeze(image_and_mask[..., 6:], axis=-1)
+
+    # Color augmentations on RGB only using TPU-native layers
+    if aug_config.get("brightness_range", [1.0, 1.0]) != [1.0, 1.0]:
+        factor = max(abs(1.0 - aug_config["brightness_range"][0]), abs(aug_config["brightness_range"][1] - 1.0))
+        augmented_rgb = layers.RandomBrightness(factor=factor)(augmented_rgb)
     
-    # For TPU compatibility, apply augmentations directly without tf.cond
-    # This is simpler and avoids complex control flow that TPUs struggle with
-    if aug_config.get('enabled', True):
-        # Apply basic augmentations that are TPU-friendly
-        rgb_image = processed_inputs['rgb_input']
-        
-        # Simple random flip (TPU-compatible)
-        if aug_config.get('horizontal_flip', False):
-            rgb_image = tf.image.random_flip_left_right(rgb_image)
-            mask_normalized = tf.image.random_flip_left_right(tf.expand_dims(mask_normalized, -1))
-            mask_normalized = tf.squeeze(mask_normalized, -1)
-        
-        processed_inputs['rgb_input'] = rgb_image
+    if aug_config.get("contrast_range", [1.0, 1.0]) != [1.0, 1.0]:
+        contrast_factor = aug_config.get("contrast_factor", 0.2)
+        augmented_rgb = layers.RandomContrast(factor=contrast_factor)(augmented_rgb)
+
+    augmented_inputs = {
+        'rgb_input': augmented_rgb,
+        'depth_input': augmented_depth,
+        'pc_input': inputs_dict['pc_input']
+    }
     
-    return processed_inputs, mask_normalized
+    return augmented_inputs, augmented_mask
 
 def load_and_preprocess_segmentation(
-    input_paths_tuple: Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor], # rgb_path, depth_path, pc_path, mask_path
-    target_size_py: tuple, # NEW: Python tuple (H, W)
+    input_paths_tuple: Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor],
+    target_size_py: tuple,
     target_size_tensor: tf.Tensor, 
     num_classes_tensor: tf.Tensor, 
-    augment_tensor: tf.Tensor, # This is the 'should_augment' boolean tensor
-    captured_preprocess_input_fn: Optional[Callable], # This is 'model_preprocess_fn'
-    captured_aug_config_dict: Optional[Dict], # This is 'aug_config'
+    augment_tensor: tf.Tensor,
+    captured_preprocess_input_fn: Optional[Callable],
+    captured_aug_config_dict: Optional[Dict],
     use_depth_map_tensor: tf.Tensor,
     depth_prep_cfg_dict: Dict, 
     use_point_cloud_tensor: tf.Tensor,
-    pc_prep_cfg_dict: Dict,
-    prebuilt_geometric_layer: tf.keras.Sequential # ADDED: Pass pre-built layer
+    pc_prep_cfg_dict: Dict
 ) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
     # Unpack the tensor elements. In graph mode, input_paths_tuple is a 1D tensor.
     image_path_tensor = input_paths_tuple[0]
@@ -344,8 +217,6 @@ def load_and_preprocess_segmentation(
         mask_float32_normalized = tf.cond(tf.cast(current_max_mask_val, tf.int32) > target_max_mask_value,
                                           lambda: normalize_mask_branch(mask_uint8),
                                           lambda: passthrough_mask_branch(mask_uint8))
-        
-        inputs_for_aug = {'rgb_input': image_float_for_aug} 
         
         # --- Depth Map Processing ---
         def load_and_process_depth_fn():
@@ -381,7 +252,6 @@ def load_and_preprocess_segmentation(
         depth_input_tensor_val = tf.cond(tf.logical_and(use_depth_map_tensor, tf.strings.length(depth_path_tensor) > 0),
                                     load_and_process_depth_fn,
                                     zeros_for_depth_fn)
-        inputs_for_aug['depth_input'] = depth_input_tensor_val
 
         # --- Point Cloud Processing ---
         def load_and_process_pc_fn():
@@ -400,16 +270,28 @@ def load_and_preprocess_segmentation(
         pc_input_tensor_val = tf.cond(tf.logical_and(use_point_cloud_tensor, tf.strings.length(pc_path_tensor) > 0),
                                  load_and_process_pc_fn,
                                  zeros_for_pc_fn)
-        inputs_for_aug['pc_input'] = pc_input_tensor_val
         
-        final_processed_inputs, final_mask = _augment_preprocess_segmentation_conditionally(
-            inputs_for_aug, 
-            mask_float32_normalized, 
-            augment_tensor, 
-            captured_aug_config_dict if captured_aug_config_dict is not None else {},
-            captured_preprocess_input_fn,
-            prebuilt_geometric_layer # MODIFIED: Pass layer
+        inputs_for_processing = {
+            'rgb_input': image_float_for_aug,
+            'depth_input': depth_input_tensor_val,
+            'pc_input': pc_input_tensor_val
+        }
+
+        def augment_fn():
+            return build_and_apply_augmentations(inputs_for_processing, mask_float32_normalized, captured_aug_config_dict if captured_aug_config_dict else {})
+        
+        def no_augment_fn():
+            return inputs_for_processing, mask_float32_normalized
+
+        final_processed_inputs, final_mask = tf.cond(
+            augment_tensor,
+            true_fn=augment_fn,
+            false_fn=no_augment_fn
         )
+        
+        if captured_preprocess_input_fn:
+            final_processed_inputs['rgb_input'] = captured_preprocess_input_fn(final_processed_inputs['rgb_input'])
+            final_processed_inputs['depth_input'] = captured_preprocess_input_fn(final_processed_inputs['depth_input'])
         
         # Ensure mask has correct shape [H, W] instead of [H, W, 1]
         if len(final_mask.shape) == 3 and final_mask.shape[-1] == 1:
@@ -619,14 +501,8 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         model_arch = model_cfg.get('backbone', 'UNet') # from model config
         captured_preprocess_input_fn_seg = _get_segmentation_preprocess_fn(model_arch)
 
-        # Build the geometric augmentation layer ONCE
-        # Use a default empty dict if aug_cfg is None, though it should be present from config
-        _aug_cfg_for_build = captured_aug_config if captured_aug_config is not None else {}
-        prebuilt_geometric_layer = _build_geometric_augmentation_layer(
-            _aug_cfg_for_build, 
-            target_size_py[0], 
-            target_size_py[1]
-        )
+        # Geometric augmentation is now handled within build_and_apply_augmentations
+        # No need to pre-build layers
 
         # Convert boolean flags to tensors for tf.cond inside map_fn
         use_depth_map_tensor = tf.constant(use_depth, dtype=tf.bool)
@@ -635,7 +511,7 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         # Note: depth_prep_cfg and pc_prep_cfg are already Python dicts, suitable for passing directly
 
         # Partial function for mapping
-        def _map_fn(paths_tuple, label_dummy, augment_flag, geometric_layer_instance): # MODIFIED: Add geometric_layer_instance
+        def _map_fn(paths_tuple, label_dummy, augment_flag):
             return load_and_preprocess_segmentation(
                 paths_tuple, 
                 target_size_py, 
@@ -647,26 +523,25 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                 use_depth_map_tensor,
                 depth_prep_cfg, 
                 use_point_cloud_tensor,
-                pc_prep_cfg,
-                geometric_layer_instance # MODIFIED: Pass instance
+                pc_prep_cfg
             )
 
         # Create datasets
         train_dataset = tf.data.Dataset.from_tensor_slices((train_paths, [0]*len(train_paths))) # Dummy labels for slice structure
         train_dataset = train_dataset.shuffle(buffer_size=len(train_paths), seed=random_seed, reshuffle_each_iteration=True)
-        train_dataset = train_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(True), prebuilt_geometric_layer), num_parallel_calls=tf.data.AUTOTUNE) # MODIFIED: Pass layer
+        train_dataset = train_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(True)), num_parallel_calls=tf.data.AUTOTUNE)
         train_dataset = train_dataset.batch(batch_size)
         train_dataset = train_dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
 
         val_dataset = tf.data.Dataset.from_tensor_slices((val_paths, [0]*len(val_paths)))
-        val_dataset = val_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(False), prebuilt_geometric_layer), num_parallel_calls=tf.data.AUTOTUNE) # MODIFIED: Pass layer
+        val_dataset = val_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(False)), num_parallel_calls=tf.data.AUTOTUNE)
         val_dataset = val_dataset.batch(batch_size)
         val_dataset = val_dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
 
         test_dataset = None
         if test_paths:
             test_dataset = tf.data.Dataset.from_tensor_slices((test_paths, [0]*len(test_paths)))
-            test_dataset = test_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(False), prebuilt_geometric_layer), num_parallel_calls=tf.data.AUTOTUNE) # MODIFIED: Pass layer
+            test_dataset = test_dataset.map(lambda p, l: _map_fn(p, l, tf.constant(False)), num_parallel_calls=tf.data.AUTOTUNE)
             test_dataset = test_dataset.batch(batch_size)
             test_dataset = test_dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
 
