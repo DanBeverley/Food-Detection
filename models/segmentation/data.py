@@ -272,30 +272,31 @@ def _augment_preprocess_segmentation_conditionally(
     mask_normalized: tf.Tensor, 
     should_augment: tf.Tensor, 
     aug_config: Dict,
-    model_preprocess_fn: Optional[Callable], # e.g., ResNet's preprocess_input
-    prebuilt_geometric_layer: tf.keras.Sequential # ADDED: Pass pre-built layer
+    model_preprocess_fn: Optional[Callable],
+    prebuilt_geometric_layer: tf.keras.Sequential
 ) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
-    """Conditionally applies augmentations and always applies model preprocessing to RGB."""
+    """TPU-compatible augmentation and preprocessing."""
     
-    def augment_first_then_preprocess_rgb() -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
-        augmented_inputs, augmented_mask = _apply_segmentation_augmentations_impl(
-            inputs_for_aug, mask_normalized, aug_config, prebuilt_geometric_layer # MODIFIED: Pass layer
-        )
-        if model_preprocess_fn is not None and 'rgb_input' in augmented_inputs:
-            augmented_inputs['rgb_input'] = model_preprocess_fn(augmented_inputs['rgb_input'])
-        return augmented_inputs, augmented_mask
-
-    def preprocess_rgb_only() -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
-        processed_inputs = inputs_for_aug.copy()
-        if model_preprocess_fn is not None and 'rgb_input' in processed_inputs:
-            processed_inputs['rgb_input'] = model_preprocess_fn(processed_inputs['rgb_input'])
-        return processed_inputs, mask_normalized # Mask is already normalized, inputs only RGB preprocessed
-
-    return tf.cond(
-        should_augment,
-        true_fn=augment_first_then_preprocess_rgb,
-        false_fn=preprocess_rgb_only
-    )
+    # Always apply preprocessing to RGB (more TPU-friendly than tf.cond)
+    processed_inputs = inputs_for_aug.copy()
+    if model_preprocess_fn is not None and 'rgb_input' in processed_inputs:
+        processed_inputs['rgb_input'] = model_preprocess_fn(processed_inputs['rgb_input'])
+    
+    # For TPU compatibility, apply augmentations directly without tf.cond
+    # This is simpler and avoids complex control flow that TPUs struggle with
+    if aug_config.get('enabled', True):
+        # Apply basic augmentations that are TPU-friendly
+        rgb_image = processed_inputs['rgb_input']
+        
+        # Simple random flip (TPU-compatible)
+        if aug_config.get('horizontal_flip', False):
+            rgb_image = tf.image.random_flip_left_right(rgb_image)
+            mask_normalized = tf.image.random_flip_left_right(tf.expand_dims(mask_normalized, -1))
+            mask_normalized = tf.squeeze(mask_normalized, -1)
+        
+        processed_inputs['rgb_input'] = rgb_image
+    
+    return processed_inputs, mask_normalized
 
 def load_and_preprocess_segmentation(
     input_paths_tuple: Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor], # rgb_path, depth_path, pc_path, mask_path
