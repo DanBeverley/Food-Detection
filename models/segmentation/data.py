@@ -131,46 +131,54 @@ def _load_and_preprocess_point_cloud_py_seg(pc_path_bytes: bytes, num_points_tar
 
 
 
-# Orchestrates conditional augmentation and model-specific preprocessing for segmentation
-def build_and_apply_augmentations(inputs_dict: Dict[str, tf.Tensor], mask: tf.Tensor, aug_config: Dict) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
-    """Builds and applies a unified, TPU-friendly augmentation pipeline."""
-    
-    # Concatenate all image-like inputs that need the same geometric transformations
-    image_and_mask = layers.concatenate([inputs_dict['rgb_input'], inputs_dict['depth_input'], mask], axis=-1)
+class SegmentationAugmentation(tf.keras.Model):
+    def __init__(self, aug_config, **kwargs):
+        super().__init__(**kwargs)
+        self.aug_config = aug_config
+        
+        # Create all layers ONCE in the constructor
+        self.geometric_layers = []
+        if self.aug_config.get("horizontal_flip", False):
+            self.geometric_layers.append(layers.RandomFlip("horizontal"))
+        if self.aug_config.get("rotation_range", 0) > 0:
+            self.geometric_layers.append(layers.RandomRotation(self.aug_config["rotation_range"] / 360.0))
+        if self.aug_config.get("zoom_range", 0) > 0:
+            zoom = self.aug_config["zoom_range"]
+            self.geometric_layers.append(layers.RandomZoom(height_factor=(-zoom, zoom)))
 
-    # Geometric augmentations using TPU-native Keras layers
-    if aug_config.get("horizontal_flip", False):
-        image_and_mask = layers.RandomFlip("horizontal")(image_and_mask)
-    if aug_config.get("rotation_range", 0) > 0:
-        image_and_mask = layers.RandomRotation(aug_config["rotation_range"] / 360.0)(image_and_mask)
-    if aug_config.get("zoom_range", 0) > 0:
-        zoom = aug_config["zoom_range"]
-        image_and_mask = layers.RandomZoom(height_factor=(-zoom, zoom))(image_and_mask)
+        self.color_layers = []
+        if self.aug_config.get("brightness_range", [1.0, 1.0]) != [1.0, 1.0]:
+            factor = max(abs(1.0 - self.aug_config["brightness_range"][0]), abs(self.aug_config["brightness_range"][1] - 1.0))
+            self.color_layers.append(layers.RandomBrightness(factor=factor))
+        if self.aug_config.get("contrast_range", [1.0, 1.0]) != [1.0, 1.0]:
+            contrast_factor = self.aug_config.get("contrast_factor", 0.2)
+            self.color_layers.append(layers.RandomContrast(factor=contrast_factor))
 
-    # Split back the geometrically augmented tensors
-    augmented_rgb = image_and_mask[..., :3]
-    augmented_depth = image_and_mask[..., 3:6]
-    augmented_mask = image_and_mask[..., 6:]
+    def call(self, inputs):
+        inputs_dict, mask = inputs
+        
+        # Concatenate for geometric transformations
+        image_and_mask = layers.concatenate([inputs_dict['rgb_input'], inputs_dict['depth_input'], mask], axis=-1)
+        
+        # Apply geometric layers
+        for layer in self.geometric_layers:
+            image_and_mask = layer(image_and_mask)
 
-    # Color augmentations on RGB only using TPU-native layers
-    if aug_config.get("brightness_range", [1.0, 1.0]) != [1.0, 1.0]:
-        factor = max(abs(1.0 - aug_config["brightness_range"][0]), abs(aug_config["brightness_range"][1] - 1.0))
-        augmented_rgb = layers.RandomBrightness(factor=factor)(augmented_rgb)
-    
-    if aug_config.get("contrast_range", [1.0, 1.0]) != [1.0, 1.0]:
-        contrast_factor = aug_config.get("contrast_factor", 0.2)
-        augmented_rgb = layers.RandomContrast(factor=contrast_factor)(augmented_rgb)
-
-    augmented_inputs = {
-        'rgb_input': augmented_rgb,
-        'depth_input': augmented_depth,
-        'pc_input': inputs_dict['pc_input']
-    }
-    
-    # Squeeze the channel dimension out of the mask
-    augmented_mask = tf.squeeze(augmented_mask, axis=-1)
-    
-    return augmented_inputs, augmented_mask
+        # Split back
+        augmented_rgb = image_and_mask[..., :3]
+        augmented_depth = image_and_mask[..., 3:6]
+        augmented_mask = tf.squeeze(image_and_mask[..., 6:], axis=-1)
+        
+        # Apply color layers to RGB only
+        for layer in self.color_layers:
+            augmented_rgb = layer(augmented_rgb)
+        
+        augmented_inputs = {
+            'rgb_input': augmented_rgb,
+            'depth_input': augmented_depth,
+            'pc_input': inputs_dict['pc_input']
+        }
+        return augmented_inputs, augmented_mask
 
 def load_and_preprocess_segmentation(
     input_paths_tuple: Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor],
@@ -179,7 +187,7 @@ def load_and_preprocess_segmentation(
     num_classes_tensor: tf.Tensor, 
     augment_tensor: tf.Tensor,
     captured_preprocess_input_fn: Optional[Callable],
-    captured_aug_config_dict: Optional[Dict],
+    augmentation_pipeline: Optional[SegmentationAugmentation],
     use_depth_map_tensor: tf.Tensor,
     depth_prep_cfg_dict: Dict, 
     use_point_cloud_tensor: tf.Tensor,
@@ -278,7 +286,11 @@ def load_and_preprocess_segmentation(
         }
 
         def augment_fn():
-            return build_and_apply_augmentations(inputs_for_processing, mask_float32_normalized, captured_aug_config_dict if captured_aug_config_dict else {})
+            if augmentation_pipeline is not None:
+                return augmentation_pipeline((inputs_for_processing, mask_float32_normalized))
+            else:
+                squeezed_mask = tf.squeeze(mask_float32_normalized, axis=-1)
+                return inputs_for_processing, squeezed_mask
         
         def no_augment_fn():
             squeezed_mask = tf.squeeze(mask_float32_normalized, axis=-1)
@@ -492,31 +504,24 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
             logger.error("No training samples after splitting. Check dataset size, debug settings, and split ratios.")
             return None, None, None, num_train_samples, num_val_samples, num_test_samples, num_classes
 
-        # Capture configurations for the mapping function (to avoid issues with non-tensor args in tf.data.Dataset.map)
-        # These are Python dicts/values, not Tensors yet.
-        captured_aug_config = aug_cfg.copy() # aug_cfg comes from the main config dict
-        model_arch = model_cfg.get('backbone', 'UNet') # from model config
+        captured_aug_config = aug_cfg.copy()
+        model_arch = model_cfg.get('backbone', 'UNet')
         captured_preprocess_input_fn_seg = _get_segmentation_preprocess_fn(model_arch)
 
-        # Geometric augmentation is now handled within build_and_apply_augmentations
-        # No need to pre-build layers
+        augmentation_pipeline = SegmentationAugmentation(captured_aug_config)
 
-        # Convert boolean flags to tensors for tf.cond inside map_fn
         use_depth_map_tensor = tf.constant(use_depth, dtype=tf.bool)
         use_point_cloud_tensor = tf.constant(use_pc, dtype=tf.bool)
-        
-        # Note: depth_prep_cfg and pc_prep_cfg are already Python dicts, suitable for passing directly
 
-        # Partial function for mapping
         def _map_fn(paths_tuple, label_dummy, augment_flag):
             return load_and_preprocess_segmentation(
                 paths_tuple, 
                 target_size_py, 
                 target_size_tensor, 
                 num_classes_tensor, 
-                augment_flag, # This will be tf.constant(True) or tf.constant(False)
+                augment_flag,
                 captured_preprocess_input_fn_seg, 
-                captured_aug_config,
+                augmentation_pipeline,
                 use_depth_map_tensor,
                 depth_prep_cfg, 
                 use_point_cloud_tensor,
