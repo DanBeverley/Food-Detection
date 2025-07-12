@@ -135,11 +135,8 @@ def _load_and_preprocess_point_cloud_py_seg(pc_path_bytes: bytes, num_points_tar
 def build_and_apply_augmentations(inputs_dict: Dict[str, tf.Tensor], mask: tf.Tensor, aug_config: Dict) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
     """Builds and applies a unified, TPU-friendly augmentation pipeline."""
     
-    # Ensure mask has a channel dimension for concatenation
-    mask_with_channel = tf.expand_dims(mask, axis=-1)
-
     # Concatenate all image-like inputs that need the same geometric transformations
-    image_and_mask = layers.concatenate([inputs_dict['rgb_input'], inputs_dict['depth_input'], mask_with_channel], axis=-1)
+    image_and_mask = layers.concatenate([inputs_dict['rgb_input'], inputs_dict['depth_input'], mask], axis=-1)
 
     # Geometric augmentations using TPU-native Keras layers
     if aug_config.get("horizontal_flip", False):
@@ -153,7 +150,7 @@ def build_and_apply_augmentations(inputs_dict: Dict[str, tf.Tensor], mask: tf.Te
     # Split back the geometrically augmented tensors
     augmented_rgb = image_and_mask[..., :3]
     augmented_depth = image_and_mask[..., 3:6]
-    augmented_mask = tf.squeeze(image_and_mask[..., 6:], axis=-1)
+    augmented_mask = image_and_mask[..., 6:]
 
     # Color augmentations on RGB only using TPU-native layers
     if aug_config.get("brightness_range", [1.0, 1.0]) != [1.0, 1.0]:
@@ -169,6 +166,9 @@ def build_and_apply_augmentations(inputs_dict: Dict[str, tf.Tensor], mask: tf.Te
         'depth_input': augmented_depth,
         'pc_input': inputs_dict['pc_input']
     }
+    
+    # Squeeze the channel dimension out of the mask
+    augmented_mask = tf.squeeze(augmented_mask, axis=-1)
     
     return augmented_inputs, augmented_mask
 
@@ -281,7 +281,8 @@ def load_and_preprocess_segmentation(
             return build_and_apply_augmentations(inputs_for_processing, mask_float32_normalized, captured_aug_config_dict if captured_aug_config_dict else {})
         
         def no_augment_fn():
-            return inputs_for_processing, mask_float32_normalized
+            squeezed_mask = tf.squeeze(mask_float32_normalized, axis=-1)
+            return inputs_for_processing, squeezed_mask
 
         final_processed_inputs, final_mask = tf.cond(
             augment_tensor,
@@ -292,10 +293,6 @@ def load_and_preprocess_segmentation(
         if captured_preprocess_input_fn:
             final_processed_inputs['rgb_input'] = captured_preprocess_input_fn(final_processed_inputs['rgb_input'])
             final_processed_inputs['depth_input'] = captured_preprocess_input_fn(final_processed_inputs['depth_input'])
-        
-        # Ensure mask has correct shape [H, W] instead of [H, W, 1]
-        if len(final_mask.shape) == 3 and final_mask.shape[-1] == 1:
-            final_mask = tf.squeeze(final_mask, axis=-1)
         
         return final_processed_inputs, final_mask
 
