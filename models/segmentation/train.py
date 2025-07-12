@@ -528,12 +528,18 @@ def main():
     config = load_config(args.config)
     set_mixed_precision_policy(config, strategy)
 
-    # --- Data Loading (once, with augmentations configured) ---
+    # --- Data Loading (OUTSIDE strategy scope to avoid TPU compilation issues) ---
     logger.info("Loading data for training...")
     train_ds, val_ds, test_ds, num_train, num_val, num_test, num_classes = load_segmentation_data(config)
     if train_ds is None:
         logger.error("Data loading failed. Exiting.")
         return
+
+    # --- Distribute datasets to TPU devices ---
+    train_ds = strategy.experimental_distribute_dataset(train_ds)
+    val_ds = strategy.experimental_distribute_dataset(val_ds) if val_ds else None
+    test_ds = strategy.experimental_distribute_dataset(test_ds) if test_ds else None
+    logger.info("✅ Datasets distributed to TPU strategy.")
 
     # --- Calculate Steps ---
     data_cfg = config.get('data', {})
