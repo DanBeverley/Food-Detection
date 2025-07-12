@@ -284,7 +284,7 @@ def build_fused_encoder_decoder_model(output_channels: int, image_size: tuple, m
     depth_base_model._name = "depth_backbone"
     depth_base_model.trainable = True
     
-    depth_features = depth_base_model.get_layer('multiply_12').output
+    depth_features = depth_base_model.output
     depth_features = layers.GlobalAveragePooling2D(name='depth_gap')(depth_features)
     logger.info(f"Depth features extracted. Shape: {depth_features.shape}")
 
