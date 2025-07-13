@@ -21,12 +21,18 @@ for attr, value in numpy_compat_attrs.items():
     if not hasattr(np.core.multiarray, attr):
         setattr(np.core.multiarray, attr, value)
 
-# Fix dtype.bits compatibility for numpy 2.0+
-for dtype_name in ['BoolDType', 'IntDType', 'UIntDType', 'FloatDType', 'ComplexDType']:
-    if hasattr(np.dtypes, dtype_name):
-        dtype_class = getattr(np.dtypes, dtype_name)
-        if not hasattr(dtype_class, 'bits'):
-            dtype_class.bits = property(lambda self: self.itemsize * 8)
+# Patch numpy._type_aliases._bits_of for compatibility
+try:
+    import numpy.core._type_aliases as ta
+    original_bits_of = ta._bits_of
+    def _bits_of_patched(obj):
+        try:
+            return original_bits_of(obj)
+        except AttributeError:
+            return np.dtype(obj).itemsize * 8
+    ta._bits_of = _bits_of_patched
+except (ImportError, AttributeError):
+    pass
 import trimesh 
 from tensorflow.keras import layers # Import Keras layers
 
