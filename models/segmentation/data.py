@@ -10,30 +10,7 @@ import json
 import traceback 
 import sys
 import math 
-numpy_compat_attrs = {
-    'fastCopyAndTranspose': np.transpose,
-    'set_numeric_ops': lambda **kwargs: None,
-    '_using_numpy2_behavior': lambda: False,
-    'get_handler_name': lambda obj: 'default',
-    'get_handler_version': lambda obj: (1, 0)
-}
-for attr, value in numpy_compat_attrs.items():
-    if not hasattr(np.core.multiarray, attr):
-        setattr(np.core.multiarray, attr, value)
-
-# Patch numpy._type_aliases._bits_of for compatibility
-try:
-    import numpy.core._type_aliases as ta
-    original_bits_of = ta._bits_of
-    def _bits_of_patched(obj):
-        try:
-            return original_bits_of(obj)
-        except AttributeError:
-            return np.dtype(obj).itemsize * 8
-    ta._bits_of = _bits_of_patched
-except (ImportError, AttributeError):
-    pass
-import trimesh 
+ 
 from tensorflow.keras import layers # Import Keras layers
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -96,9 +73,9 @@ def _load_and_preprocess_point_cloud_py_seg(pc_path_bytes: bytes, num_points_tar
         A NumPy array of shape (num_points_target, 3) dtype=np.float32.
     """
     try:
+        import trimesh
         pc_path = pc_path_bytes.decode('utf-8')
         if not pc_path or not os.path.exists(pc_path):
-            # logger.debug(f"Point cloud path is empty or does not exist: {pc_path}. Returning zeros.") # Reduce verbosity
             return np.zeros((num_points_target, 3), dtype=np.float32)
 
         mesh_or_points = trimesh.load(pc_path, process=False) 
