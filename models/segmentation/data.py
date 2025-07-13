@@ -10,10 +10,16 @@ import json
 import traceback 
 import sys
 import math 
-if not hasattr(np.core.multiarray, 'fastCopyAndTranspose'):
-    np.core.multiarray.fastCopyAndTranspose = np.transpose
-if not hasattr(np.core.multiarray, 'set_numeric_ops'):
-    np.core.multiarray.set_numeric_ops = lambda **kwargs: None
+numpy_compat_attrs = {
+    'fastCopyAndTranspose': np.transpose,
+    'set_numeric_ops': lambda **kwargs: None,
+    '_using_numpy2_behavior': lambda: False,
+    'get_handler_name': lambda obj: 'default',
+    'get_handler_version': lambda obj: (1, 0)
+}
+for attr, value in numpy_compat_attrs.items():
+    if not hasattr(np.core.multiarray, attr):
+        setattr(np.core.multiarray, attr, value)
 import trimesh 
 from tensorflow.keras import layers # Import Keras layers
 
