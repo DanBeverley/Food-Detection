@@ -4,10 +4,10 @@ A comprehensive Python-based pipeline for food detection, volume estimation, and
 
 ## Current Status: Production-Ready Pipeline
 
-**Latest Update (June 2025)**: Complete end-to-end food analysis pipeline with optimized codebase and resolved training compatibility issues.
+**Latest Update (July 2025)**: Complete end-to-end food analysis pipeline with TPU/GPU training support and multimodal segmentation model.
 
 ### Completed Features
-- **Food Segmentation**: U-Net with EfficientNet backbone (256×256, TFLite optimized)
+- **Food Segmentation**: Fused encoder-decoder with multimodal inputs (RGB + depth + point cloud)
 - **Food Classification**: MobileNetV3Small for 108 food classes (224×224, TFLite optimized)
 - **Volume Estimation**: Depth-based point cloud voxelization with 123.25 cm³ accuracy
 - **Nutritional Analysis**: USDA API integration with custom database
@@ -26,9 +26,9 @@ Processing Time: 14.65 seconds
 ## Core Components
 
 ### Deep Learning Pipeline
-- **Segmentation Model**: U-Net + EfficientNet backbone with combined loss (BCE + Dice + Focal)
+- **Segmentation Model**: Fused encoder-decoder with parallel backbones (EfficientNetB0, MobileNetV3Small, PointNet-style)
 - **Classification Model**: MobileNetV3Small with advanced augmentation (MixUp, CutMix)
-- **Training Features**: Mixed precision, progressive resizing, attention mechanisms
+- **Training Features**: TPU/GPU support, mixed precision, staged training, multimodal fusion
 - **Mobile Optimization**: TFLite export with INT8 quantization
 
 ### Volume Estimation System
@@ -89,19 +89,27 @@ source venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 ```
 
-### Production Training
+### Training Options
+
+#### GPU Training (Local)
 ```bash
-# Full pipeline - all data, production settings
+python models/segmentation/train.py
+python models/classification/train.py
+```
+
+#### TPU Training (Kaggle/Colab)
+```bash
+# Upload notebook files to Kaggle with TPU runtime
+# Models automatically detect and use TPU when available
+# Data loading optimized for TPU with distributed datasets
+```
+
+#### Production Pipeline
+```bash
 python main.py --prepare-all-data --train-all --export-all-tflite \
   --classification_input_dir "path/to/MetaFood3D/RGBD_videos" \
   --segmentation_rgbd_input_dir "path/to/MetaFood3D/RGBD_videos" \
   --segmentation_pointcloud_input_dir "path/to/MetaFood3D/Point_cloud"
-```
-
-### Debug Training
-```bash
-# Quick validation (3 epochs, limited samples)
-python main.py --train-all --debug
 ```
 
 ### Food Analysis Inference
@@ -180,17 +188,17 @@ results = analyze_food_item(
 
 ## Recent Improvements
 
-### Code Optimization (June 2025)
-- **Fixed mixed precision training compatibility** - Resolved dtype conflicts in augmentation
-- **Centralized configuration** - Moved hardcoded values to config files
-- **Cleaned codebase** - Removed redundant files and improved modularity
-- **Enhanced error handling** - Better pipeline robustness
+### Multimodal Segmentation (July 2025)
+- **Fused encoder-decoder architecture** - Replaced U-Net with parallel backbones for RGB, depth, and point cloud inputs
+- **TPU/GPU training support** - Optimized data pipeline for distributed training with automatic hardware detection
+- **Staged training strategy** - Two-phase training (freeze backbones, then fine-tune) for better convergence
+- **Numpy compatibility fixes** - Resolved trimesh import issues with newer numpy versions
 
-### Training Compatibility
-- **MixUp/CutMix support** with mixed precision training
-- **Dynamic path configuration** from centralized config
-- **Improved label map handling** in export pipeline
-- **Optimized memory usage** in data loading
+### Training Infrastructure
+- **TPU-native data pipeline** - CPU data loading with TPU distribution for optimal performance  
+- **Stateful augmentation layers** - Fixed tf.Variable creation errors in tf.data pipeline
+- **Mixed precision training** - bfloat16 support for TPU and GPU acceleration
+- **Robust error handling** - Graceful fallbacks for missing point cloud data
 
 ## Contributing
 
