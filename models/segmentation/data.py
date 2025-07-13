@@ -10,6 +10,8 @@ import json
 import traceback 
 import sys
 import math 
+if not hasattr(np.core.multiarray, 'fastCopyAndTranspose'):
+    np.core.multiarray.fastCopyAndTranspose = np.transpose
 import trimesh 
 from tensorflow.keras import layers # Import Keras layers
 
