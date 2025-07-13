@@ -12,6 +12,8 @@ import sys
 import math 
 if not hasattr(np.core.multiarray, 'fastCopyAndTranspose'):
     np.core.multiarray.fastCopyAndTranspose = np.transpose
+if not hasattr(np.core.multiarray, 'set_numeric_ops'):
+    np.core.multiarray.set_numeric_ops = lambda **kwargs: None
 import trimesh 
 from tensorflow.keras import layers # Import Keras layers
 
