@@ -2,7 +2,9 @@ import os
 import json
 import argparse
 import logging
+import numpy as np
 from pathlib import Path
+from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -13,14 +15,70 @@ DEPTH_MAP_FOLDER_NAME = "depth"
 DEPTH_MAP_EXTENSIONS = ['.jpg'] 
 POINT_CLOUD_EXTENSIONS = ['.ply'] 
 
-# Set to True if mask name is image_name + "_mask" + extension
-# Set to False if mask name is exactly the same as image name
 MASK_HAS_SUFFIX = False 
-MASK_SUFFIX = "_mask" 
+MASK_SUFFIX = "_mask"
+
+def _load_and_process_point_cloud(pc_path_str: str, num_points_target: int, normalization_method_str: str) -> np.ndarray:
+    """
+    Loads a point cloud from a file path, processes it, and returns a NumPy array.
+    This is the pure Python version for preprocessing.
+    """
+    try:
+        import trimesh
+        
+        if not pc_path_str or not os.path.exists(pc_path_str):
+            return np.zeros((num_points_target, 3), dtype=np.float32)
+
+        mesh_or_points = trimesh.load(pc_path_str, process=False) 
+
+        if isinstance(mesh_or_points, trimesh.Trimesh):
+            points = mesh_or_points.vertices
+        elif isinstance(mesh_or_points, trimesh.points.PointCloud):
+            points = mesh_or_points.vertices
+        else:
+            return np.zeros((num_points_target, 3), dtype=np.float32)
+
+        if points.shape[0] == 0:
+            return np.zeros((num_points_target, 3), dtype=np.float32)
+
+        points = points.astype(np.float32)
+        
+        current_num_points = points.shape[0]
+        if current_num_points > num_points_target:
+            indices = np.random.choice(current_num_points, num_points_target, replace=False)
+            points = points[indices]
+        elif current_num_points < num_points_target:
+            if current_num_points == 0:
+                return np.zeros((num_points_target, 3), dtype=np.float32)
+            padding_indices = np.random.choice(current_num_points, num_points_target - current_num_points, replace=True)
+            points = np.vstack((points, points[padding_indices]))
+        
+        if normalization_method_str != 'none':
+            points_mean = np.mean(points, axis=0)
+            points_centered = points - points_mean
+            if normalization_method_str == 'unit_sphere':
+                max_dist = np.max(np.linalg.norm(points_centered, axis=1))
+                points_normalized = points_centered / (max_dist + 1e-6)
+            elif normalization_method_str == 'unit_cube':
+                max_abs_coord = np.max(np.abs(points_centered))
+                points_normalized = points_centered / (max_abs_coord + 1e-6)
+            elif normalization_method_str == 'centered_only':
+                points_normalized = points_centered
+            else:
+                points_normalized = points_centered
+            points = points_normalized
+        
+        return points.astype(np.float32)
+
+    except Exception as e:
+        logging.error(f"Error processing point cloud {pc_path_str}: {e}")
+        return np.zeros((num_points_target, 3), dtype=np.float32) 
 
 def create_segmentation_metadata(source_rgbd_base_dir_path: str, 
                                  output_metadata_dir_path: str, 
-                                 source_point_cloud_base_dir_path: str = None):
+                                 source_point_cloud_base_dir_path: str = None,
+                                 num_points_target: int = 4096,
+                                 pc_normalization: str = 'unit_sphere'):
     """
     Scans a source directory for image-mask-depth-pointcloud tuples based on a nested structure
     and generates a metadata.json file containing absolute paths to these items.
@@ -47,6 +105,11 @@ def create_segmentation_metadata(source_rgbd_base_dir_path: str,
     output_meta_dir = Path(output_metadata_dir_path)
     source_pc_base_dir = Path(source_point_cloud_base_dir_path) if source_point_cloud_base_dir_path else None
     metadata_file_path = output_meta_dir / "metadata.json"
+    
+    # Create directory for preprocessed point clouds
+    preprocessed_pc_dir = output_meta_dir / "preprocessed_point_clouds"
+    preprocessed_pc_dir.mkdir(parents=True, exist_ok=True)
+    logging.info(f"Pre-processed point clouds will be saved to: {preprocessed_pc_dir}")
 
     if not source_dir.is_dir():
         logging.error(f"Source directory not found: {source_dir}")
@@ -95,13 +158,30 @@ def create_segmentation_metadata(source_rgbd_base_dir_path: str,
                 logging.warning(f"  Class '{class_name}', Instance '{instance_name}': Missing '{ORIGINAL_IMAGE_FOLDER_NAME}' folder. Skipping instance.")
                 continue
             
-            instance_point_cloud_path_str = None
+            instance_point_cloud_npy_path_str = None
             if current_pc_instance_dir and current_pc_instance_dir.is_dir():
                 found_pc_file_for_instance = False
                 for item in current_pc_instance_dir.iterdir():
                     if item.is_file() and item.name.lower().endswith("_sampled_1.ply"):
-                        instance_point_cloud_path_str = str(item.resolve())
-                        logging.debug(f"  Found point cloud for instance '{instance_name}' (file: {item.name}): {instance_point_cloud_path_str}")
+                        original_ply_path_str = str(item.resolve())
+                        logging.debug(f"  Found point cloud for instance '{instance_name}' (file: {item.name}): {original_ply_path_str}")
+                        
+                        # Process the point cloud
+                        processed_points = _load_and_process_point_cloud(
+                            original_ply_path_str,
+                            num_points_target,
+                            pc_normalization
+                        )
+                        
+                        # Save the result as a .npy file
+                        npy_filename = f"{class_name}_{instance_name}_{item.stem}.npy"
+                        npy_save_path = preprocessed_pc_dir / npy_filename
+                        np.save(npy_save_path, processed_points)
+                        
+                        # Store the absolute path for now, will convert to relative later
+                        instance_point_cloud_npy_path_str = str(npy_save_path.resolve())
+                        logging.debug(f"  Processed and saved point cloud to: {npy_save_path}")
+                        
                         found_pc_file_for_instance = True
                         break # Found the unique _sampled_1.ply for this instance
                 
@@ -113,7 +193,7 @@ def create_segmentation_metadata(source_rgbd_base_dir_path: str,
             else:
                 logging.debug(f"  Point cloud processing disabled. Point clouds will be null for instance '{instance_name}'.")
 
-            # Masks, depth folders check (original logic)
+            # Masks, depth folders check 
             if not mask_folder.is_dir():
                 logging.warning(f"  Class '{class_name}', Instance '{instance_name}': Missing '{SEGMENTATION_MASK_FOLDER_NAME}' folder. Masks will be null for this instance.")
             if not depth_folder.is_dir(): 
@@ -127,7 +207,7 @@ def create_segmentation_metadata(source_rgbd_base_dir_path: str,
                 total_images_scanned += 1
                 img_stem = img_path.stem
                 
-                # Find Mask (original logic)
+                # Find Mask 
                 found_mask_path_str = None
                 if mask_folder.is_dir():
                     expected_mask_stem = img_stem + MASK_SUFFIX if MASK_HAS_SUFFIX else img_stem
@@ -140,7 +220,7 @@ def create_segmentation_metadata(source_rgbd_base_dir_path: str,
                     missing_mask_count += 1
                     logging.debug(f"  Missing corresponding mask for image: {img_path} (looked for stem '{expected_mask_stem}' in {mask_folder})")
 
-                # Find Depth Map (New)
+                # Find Depth Map 
                 found_depth_path_str = None
                 if depth_folder.is_dir():
                     for depth_ext in DEPTH_MAP_EXTENSIONS:
@@ -152,22 +232,19 @@ def create_segmentation_metadata(source_rgbd_base_dir_path: str,
                     missing_depth_count += 1
                     logging.debug(f"  Missing corresponding depth map for image: {img_path} (looked for stem '{img_stem}' in {depth_folder})")
 
-                # Point cloud path is now taken from the instance-level find (New)
-                # No per-image search needed for point cloud anymore
-                if not instance_point_cloud_path_str and not current_pc_instance_dir.is_dir():
-                    # This log will only trigger if the PC dir was missing for the instance AND we didn't find PC
-                    # Incrementing here is slightly redundant given instance-level warning, but shows impact per image.
+                # Point cloud path is now taken from the instance-level find 
+                # No per-image search needed for point cloud 
+                if not instance_point_cloud_npy_path_str and current_pc_instance_dir and not current_pc_instance_dir.is_dir():
                     missing_point_cloud_count +=1 
-                elif not instance_point_cloud_path_str and current_pc_instance_dir.is_dir():
-                    # This means the PC dir existed, but the specific _sampled_1.ply was not found.
+                elif not instance_point_cloud_npy_path_str and current_pc_instance_dir and current_pc_instance_dir.is_dir():
                     missing_point_cloud_count +=1 
 
                 try:
                     entry = {
-                        "image_path": str(img_path.resolve()),
-                        "mask_path": found_mask_path_str, # Can be None
-                        "depth_map_path": found_depth_path_str, # New, can be None
-                        "point_cloud_path": instance_point_cloud_path_str, # Changed to instance-level path
+                        "image_path": str(img_path.relative_to(output_meta_dir)),
+                        "mask_path": str(Path(found_mask_path_str).relative_to(output_meta_dir)) if found_mask_path_str else None,
+                        "depth_map_path": str(Path(found_depth_path_str).relative_to(output_meta_dir)) if found_depth_path_str else None,
+                        "point_cloud_path": str(Path(instance_point_cloud_npy_path_str).relative_to(output_meta_dir)) if instance_point_cloud_npy_path_str else None,
                         "class_name": class_name,
                         "instance_name": instance_name
                     }
@@ -206,6 +283,11 @@ if __name__ == '__main__':
                         help="Base directory for point cloud files (e.g., E:/_MetaFood3D_new_Point_cloud/Point_cloud/4096). "
                              "Expected structure: <source_point_cloud_dir>/<ClassName>/<InstanceName>/<DerivedPCFileName>.ply. "
                              "Optional - if not provided, point cloud paths will be set to null.")
+    parser.add_argument('--num_points', type=int, default=4096,
+                        help="Target number of points for point cloud preprocessing (default: 4096)")
+    parser.add_argument('--pc_normalization', type=str, default='unit_sphere',
+                        choices=['unit_sphere', 'unit_cube', 'centered_only', 'none'],
+                        help="Point cloud normalization method (default: unit_sphere)")
 
     args = parser.parse_args()
 
@@ -216,4 +298,6 @@ if __name__ == '__main__':
 
     create_segmentation_metadata(args.source_dir, 
                                  str(resolved_output_metadata_dir),
-                                 args.source_point_cloud_dir)
+                                 args.source_point_cloud_dir,
+                                 args.num_points,
+                                 args.pc_normalization)

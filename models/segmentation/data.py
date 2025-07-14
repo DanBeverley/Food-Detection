@@ -60,67 +60,7 @@ def _get_segmentation_preprocess_fn(architecture: Optional[str]):
     _SEG_PREPROCESS_FN_CACHE[architecture] = preprocess_input_fn
     return preprocess_input_fn
 
-def _load_and_preprocess_point_cloud_py_seg(pc_path_bytes: bytes, num_points_target: int, normalization_method_str: str) -> np.ndarray:
-    """Loads a point cloud, samples/pads to num_points_target, and normalizes.
-    Args:
-        pc_path_bytes: Path to the point cloud file, as bytes.
-        num_points_target: Target number of points.
-        normalization_method_str: String specifying normalization ('unit_sphere', 'unit_cube', 'centered_only', or 'none').
-    Returns:
-        A NumPy array of shape (num_points_target, 3) dtype=np.float32.
-    """
-    try:
-        import trimesh
-        pc_path = pc_path_bytes.decode('utf-8')
-        if not pc_path or not os.path.exists(pc_path):
-            return np.zeros((num_points_target, 3), dtype=np.float32)
-
-        mesh_or_points = trimesh.load(pc_path, process=False) 
-
-        if isinstance(mesh_or_points, trimesh.Trimesh):
-            points = mesh_or_points.vertices
-        elif isinstance(mesh_or_points, trimesh.points.PointCloud):
-            points = mesh_or_points.vertices
-        else:
-            return np.zeros((num_points_target, 3), dtype=np.float32)
-
-        if points.shape[0] == 0:
-            return np.zeros((num_points_target, 3), dtype=np.float32)
-
-        points = points.astype(np.float32)
-
-        current_num_points = points.shape[0]
-        if current_num_points > num_points_target:
-            indices = np.random.choice(current_num_points, num_points_target, replace=False)
-            points = points[indices]
-        elif current_num_points < num_points_target:
-            if current_num_points == 0: 
-                return np.zeros((num_points_target, 3), dtype=np.float32)
-            padding_indices = np.random.choice(current_num_points, num_points_target - current_num_points, replace=True)
-            points = np.vstack((points, points[padding_indices]))
-        
-        if normalization_method_str != 'none':
-            points_mean = np.mean(points, axis=0)
-            points_centered = points - points_mean
-
-            if normalization_method_str == 'unit_sphere':
-                max_dist = np.max(np.linalg.norm(points_centered, axis=1))
-                points_normalized = points_centered / (max_dist + 1e-6) 
-            elif normalization_method_str == 'unit_cube':
-                max_abs_coord = np.max(np.abs(points_centered))
-                points_normalized = points_centered / (max_abs_coord + 1e-6) 
-            elif normalization_method_str == 'centered_only':
-                points_normalized = points_centered
-            else: 
-                points_normalized = points_centered 
-            points = points_normalized
-        
-        return points.astype(np.float32)
-
-    except Exception as e:
-        path_str = pc_path_bytes.decode('utf-8', errors='ignore') 
-        logger.error(f"Error processing point cloud {path_str}: {e}")
-        return np.zeros((num_points_target, 3), dtype=np.float32)
+# Removed _load_and_preprocess_point_cloud_py_seg function as point clouds are now preprocessed offline
 
 
 
@@ -135,12 +75,8 @@ def segmentation_data_generator(metadata_list, data_cfg, paths_cfg):
     depth_map_dir_name = data_cfg.get('depth_map_dir_name', 'depth')
     
     use_pc = data_cfg.get('use_point_cloud', False)
-    pc_root_dir = data_cfg.get('point_cloud_root_dir', '')
-    pc_sampling_rate_dir = data_cfg.get('point_cloud_sampling_rate_dir', '')
-    pc_suffix = data_cfg.get('point_cloud_suffix', '')
     pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
     num_points_target = pc_prep_cfg.get('num_points', 4096)
-    pc_norm_method = pc_prep_cfg.get('normalization', 'unit_sphere')
 
     while True:
         np.random.shuffle(metadata_list)
@@ -187,29 +123,22 @@ def segmentation_data_generator(metadata_list, data_cfg, paths_cfg):
                         depth_string = tf.io.read_file(depth_path_str)
                         depth_decoded = tf.image.decode_image(depth_string, channels=1).numpy()
                 
-                # Load Point Cloud - derive path from RGB path
+                # Load Point Cloud - from preprocessed .npy file
                 pc_data = np.zeros((num_points_target, 3), dtype=np.float32)
-                if use_pc and pc_root_dir and pc_sampling_rate_dir and pc_suffix:
-                    pc_path_str = ""
-                    try:
-                        rel_path_parts = pathlib.Path(rgb_rel_path).parts
-                        if len(rel_path_parts) >= 2:
-                            food_category_pc = rel_path_parts[-2]
-                            image_id_pc = pathlib.Path(rgb_rel_path).stem
-                            
-                            potential_pc_path = pathlib.Path(pc_root_dir) / food_category_pc / image_id_pc / pc_sampling_rate_dir / (image_id_pc + pc_suffix)
-                            
-                            if potential_pc_path.exists():
-                                pc_path_str = str(potential_pc_path)
-                    except Exception:
-                        pass
-                    
-                    if pc_path_str:
-                        pc_data = _load_and_preprocess_point_cloud_py_seg(
-                            pc_path_str.encode('utf-8'), 
-                            num_points_target, 
-                            pc_norm_method
-                        )
+                if use_pc:
+                    pc_rel_path = item_data.get('point_cloud_path')
+                    if pc_rel_path:
+                        try:
+                            full_pc_path = metadata_dir / pc_rel_path
+                            if full_pc_path.exists() and full_pc_path.suffix == '.npy':
+                                pc_data = np.load(str(full_pc_path)).astype(np.float32)
+                                # Ensure correct shape
+                                if pc_data.shape != (num_points_target, 3):
+                                    logger.warning(f"Point cloud shape mismatch for {full_pc_path}: expected ({num_points_target}, 3), got {pc_data.shape}")
+                                    pc_data = np.zeros((num_points_target, 3), dtype=np.float32)
+                        except Exception as e:
+                            logger.warning(f"Error loading preprocessed point cloud {pc_rel_path}: {e}")
+                            pc_data = np.zeros((num_points_target, 3), dtype=np.float32)
                 
                 yield {
                     "rgb_input": image_decoded.astype(np.float32),
