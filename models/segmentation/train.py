@@ -17,6 +17,7 @@ from datetime import datetime
 import traceback
 import argparse 
 import numpy as np
+from tqdm import tqdm
 
 def _get_project_root() -> Path:
     """Assumes this script is in Food-Detection/models/segmentation/"""
@@ -138,7 +139,22 @@ SEGMENTATION_CONFIG_PATH = os.path.join(_get_project_root(), "models", "segmenta
 
 from tensorflow.keras.callbacks import Callback
 from tensorflow.keras.applications import EfficientNetB0, ResNet50V2, MobileNetV3Small # Add more as needed
-from tensorflow.keras import layers 
+from tensorflow.keras import layers
+
+class TqdmProgressCallback(tf.keras.callbacks.Callback):
+    """Custom callback for robust progress tracking and logging during training."""
+    
+    def on_epoch_begin(self, epoch, logs=None):
+        self.pbar = tqdm(total=self.params['steps'], desc=f"Epoch {epoch + 1}/{self.params['epochs']}", unit="step")
+
+    def on_epoch_end(self, epoch, logs=None):
+        self.pbar.close()
+        log_str = " - ".join([f"{key}: {value:.4f}" for key, value in logs.items()])
+        print(f"Epoch {epoch + 1} Summary: {log_str}")
+
+    def on_batch_end(self, batch, logs=None):
+        self.pbar.update(1)
+        self.pbar.set_postfix({key: f"{value:.4f}" for key, value in logs.items()}) 
 
 def load_config(config_path: str) -> dict:
     """Loads the YAML configuration file."""
@@ -623,17 +639,18 @@ def main():
     model_dir_abs.mkdir(parents=True, exist_ok=True)
     
     stage1_callbacks = [
+        TqdmProgressCallback(),
         tf.keras.callbacks.ModelCheckpoint(
             filepath=str(model_dir_abs / f'stage1_best_{timestamp}.h5'),
             monitor='val_binary_iou',
             save_best_only=True,
-            verbose=1
+            verbose=0
         ),
         tf.keras.callbacks.EarlyStopping(
             monitor='val_binary_iou',
             patience=3,
             restore_best_weights=True,
-            verbose=1
+            verbose=0
         )
     ]
     
@@ -643,7 +660,8 @@ def main():
         epochs=stage1_epochs,
         steps_per_epoch=steps_per_epoch,
         validation_steps=validation_steps,
-        callbacks=stage1_callbacks
+        callbacks=stage1_callbacks,
+        verbose=0
     )
 
     #  STAGE 2: Fine-tune Entire Model
@@ -668,24 +686,25 @@ def main():
     
     # Setup callbacks for Stage 2
     stage2_callbacks = [
+        TqdmProgressCallback(),
         tf.keras.callbacks.ModelCheckpoint(
             filepath=str(model_dir_abs / f'stage2_best_{timestamp}.h5'),
             monitor='val_binary_iou',
             save_best_only=True,
-            verbose=1
+            verbose=0
         ),
         tf.keras.callbacks.EarlyStopping(
             monitor='val_binary_iou',
             patience=10,
             restore_best_weights=True,
-            verbose=1
+            verbose=0
         ),
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor='val_binary_iou',
             factor=0.5,
             patience=5,
             min_lr=1e-7,
-            verbose=1
+            verbose=0
         )
     ]
     
@@ -696,7 +715,8 @@ def main():
         initial_epoch=stage1_epochs,
         steps_per_epoch=steps_per_epoch,
         validation_steps=validation_steps,
-        callbacks=stage2_callbacks
+        callbacks=stage2_callbacks,
+        verbose=0
     )
 
     logger.info("🎉 Training finished.")
