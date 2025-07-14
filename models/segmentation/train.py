@@ -145,16 +145,18 @@ class TqdmProgressCallback(tf.keras.callbacks.Callback):
     """Custom callback for robust progress tracking and logging during training."""
     
     def on_epoch_begin(self, epoch, logs=None):
-        self.pbar = tqdm(total=self.params['steps'], desc=f"Epoch {epoch + 1}/{self.params['epochs']}", unit="step")
+        self.pbar = tqdm(total=self.params['steps'], desc=f"Epoch {epoch + 1}/{self.params['epochs']}", unit="step", file=sys.stdout)
 
     def on_epoch_end(self, epoch, logs=None):
         self.pbar.close()
         log_str = " - ".join([f"{key}: {value:.4f}" for key, value in logs.items()])
-        print(f"Epoch {epoch + 1} Summary: {log_str}")
+        print(f"\nEpoch {epoch + 1} Summary: {log_str}")
+        sys.stdout.flush()
 
     def on_batch_end(self, batch, logs=None):
         self.pbar.update(1)
-        self.pbar.set_postfix({key: f"{value:.4f}" for key, value in logs.items()}) 
+        if logs:
+            self.pbar.set_postfix({key: f"{value:.4f}" for key, value in logs.items()}) 
 
 def load_config(config_path: str) -> dict:
     """Loads the YAML configuration file."""
