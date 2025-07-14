@@ -1,6 +1,6 @@
 data:
   image_size: [256, 256]  
-  batch_size: 64  # Optimized for TPU v3-8  
+  batch_size: 64  
   split_ratios:
     train: 0.7
     val: 0.15
@@ -22,108 +22,48 @@ data:
       normalization: "min_max_local" 
     point_cloud:
       num_points: 4096 
-      normalization: "unit_sphere" # Options: 'unit_sphere', 'unit_cube', 'centered_only', 'none'
+      normalization: "unit_sphere"
 
-  # Enhanced Data Augmentation for Production Training
   augmentation:
     enabled: true
-    
-    # Geometric augmentations (applied to both image and mask) - production settings
     horizontal_flip: true
-    vertical_flip: false  # Usually not good for food images
-    rotation_range: 20  # Restored to production value
-    width_shift_range: 0.15  # Restored to production value
-    height_shift_range: 0.15  # Restored to production value
-    zoom_range: 0.2  # Restored to production value
-    shear_range: 0.1  # Enabled for production
-    
-    # Photometric augmentations (applied only to image) - production settings
-    brightness_range: [0.7, 1.3]  # Expanded range for robustness
-    contrast_range: [0.8, 1.2]    # Expanded range
-    saturation_range: [0.8, 1.2]  # Expanded range
-    hue_range: 0.05  # Restored to production value
-    
-    # Advanced augmentations for robustness - enabled for production
-    gaussian_noise_std: 0.01  # Enabled
-    gaussian_blur_sigma: [0.0, 1.0]  # Enabled
-    
-    # Cutout/Random erasing for regularization - enabled for production
-    random_erasing:
-      enabled: true  # Enabled for production
-      probability: 0.3
-      area_ratio_range: [0.02, 0.25]
-      aspect_ratio_range: [0.3, 3.3]
-    
-    # Apply geometric transformations to depth maps as well
-    apply_geometric_to_depth: true 
-    
-    # Elastic deformation for medical-style augmentation - can be enabled
-    elastic_deformation:
-      enabled: false  # Keep disabled for food segmentation
-      alpha: 50
-      sigma: 5
+    rotation_range: 20
+    zoom_range: 0.2
+    brightness_range: [0.7, 1.3]
+    contrast_factor: 0.2
+    apply_geometric_to_depth: true
 
-models:
-  # segmentation_tflite: "trained_models/segmentation/exported/segmentation_model.tflite" # Commented out for dynamic finding
-
-# Production Model Configuration
+# Model Configuration
 model:
-  name: 'fused_encoder_decoder' # Multi-modal encoder-decoder with feature fusion
-  backbone: 'EfficientNetB0' # RGB backbone
-  depth_backbone: 'MobileNetV3Small' # Depth backbone
+  name: 'fused_encoder_decoder' 
+  backbone: 'EfficientNetB0' 
+  depth_backbone: 'MobileNetV3Small'
   backbone_trainable: true
   
-  # Fine-tuning strategy
-  freeze_backbone_epochs: 3  # Freeze backbone for first N epochs
-  gradual_unfreezing: true   # Gradually unfreeze layers
+  decoder_dropout: 0.3
+  decoder_batch_norm: true
   
-  # Decoder configuration
-  decoder_dropout: 0.3  # Keep dropout for production-like training
-  decoder_batch_norm: true  # Keep batch normalization
+  load_weights: false
+  weights_path: 'path/to/your/weights.h5'
   
-  # Attention mechanisms - enabled for production
-  attention:
-    enabled: true  # Enabled for production
-    type: "spatial"  # Options: 'spatial', 'channel', 'cbam'
-  
-  load_weights: false # Set to true to load weights from weights_path
-  weights_path: '__THIS_FILE_SHOULD_DEFINITELY_NOT_EXIST_ANYWHERE__.h5' # Path to pre-trained model weights if load_weights is true
-  activation: 'sigmoid' # 'sigmoid' for binary, 'softmax' for multi-class (last layer)
-  input_shape: [128, 128, 3]  # Updated for debug image size
-  num_classes: 1 
-  
-  # Model regularization - production settings
-  l2_regularization: 0.001  # Increased regularization
-  spatial_dropout: 0.2  # Increased dropout
+  activation: 'sigmoid'
+  num_classes: 1  
 
-# Production Optimizer Configuration 
 optimizer:
-  name: "AdamW"  # Use AdamW for production
-  learning_rate: 0.001  # Higher learning rate for production
-  stage1_learning_rate: 0.001   # For pre-training new branches
-  stage2_learning_rate: 0.00001 # For fine-tuning all branches
-  weight_decay: 0.01  # L2 regularization through optimizer
-  clipnorm: 1.0  # Gradient clipping
+  name: "AdamW"  
   
-  # Learning rate scheduling - enabled for production
-  schedule:
-    enabled: true  # Enabled for production
-    type: "cosine_decay_restarts"
-    initial_learning_rate: 0.001
-    first_decay_steps: 500
-    t_mul: 2.0
-    m_mul: 1.0
-    alpha: 0.0
+  stage1_learning_rate: 0.001   
+  stage2_learning_rate: 0.00001
+  weight_decay: 0.01 
+  clipnorm: 1.0  
+  
 
-# Production Loss Function Configuration 
 loss:
-  # Use combined loss for production training
-  name: "combined_loss"  # Production loss function
+  name: "combined_loss"  
   
-  # Individual loss components
   binary_crossentropy:
     weight: 0.5
-    label_smoothing: 0.1  # Label smoothing for regularization
+    label_smoothing: 0.1 
     from_logits: false
   dice_loss:
     weight: 0.3
@@ -133,41 +73,15 @@ loss:
     alpha: 0.25
     gamma: 2.0
 
-# Debug Training Configuration
 training:
-  epochs: 30  # Total epochs
-  stage1_epochs: 5  # Pre-training epochs
-  debug_epochs: 3  # Fast debug epochs
-  debug_mode: false  # Disabled for production training
+  epochs: 30
+  stage1_epochs: 5
+  debug_mode: false
   use_mixed_precision: true
-  use_tpu: false
   
-  # Production IoU metric configuration
   metrics: ["binary_accuracy", "binary_iou", "dice_coefficient", "precision", "recall"] 
   
-  # Class balancing
-  class_weights:
-    enabled: true
-    auto_compute: true  # Automatically compute from training data
-    manual_weights: [1.0, 2.0]  # Manual weights if auto_compute is false
   
-  # Advanced training strategies
-  strategies:
-    # Progressive resizing
-    progressive_resizing:
-      enabled: false  # Can be enabled for large datasets
-      size_schedule: [[128, 128], [192, 192], [256, 256]]
-      epoch_schedule: [0, 8, 15]
-    
-    # Curriculum learning
-    curriculum_learning:
-      enabled: false
-      difficulty_metric: "mask_complexity"
-      
-    # Test-time augmentation
-    tta:
-      enabled: true
-      num_augmentations: 8  # Increased for production
 
   callbacks:
     model_checkpoint:
@@ -182,74 +96,39 @@ training:
       enabled: true
       monitor: "val_binary_iou"
       mode: "max"
-      patience: 10  # Optimized patience
+      patience: 10  
       restore_best_weights: true
       min_delta: 0.001
 
     reduce_lr_on_plateau:
-      enabled: true  # Enabled for production
+      enabled: true  
       monitor: "val_binary_iou"
       mode: "max"
       factor: 0.5
-      patience: 6  # Optimized patience
+      patience: 6  
       min_lr: 0.00001
       cooldown: 3
 
     tensorboard:
       enabled: true
       log_dir: "logs/segmentation/"
-      histogram_freq: 1  # Enabled for production monitoring
-      write_graph: true  # Enabled for production
+      histogram_freq: 1  
+      write_graph: true  
       update_freq: "epoch"
-      write_images: true  # Enabled for production visualization
+      write_images: true 
 
-    lr_scheduler:
-      enabled: true  # Enabled for production
-      name: "cosine_decay_restarts"
-      alpha: 0.0
-      
-    # Custom callbacks for segmentation - enabled for production
-    segmentation_visualizer:
-      enabled: true  # Enabled for production monitoring
-      log_frequency: 5  # Log predictions every 5 epochs
-      num_samples: 4    # Number of samples to visualize
-      
-    # Overfitting monitor - enabled for production
-    overfitting_monitor:
-      enabled: true  # Enabled for production
-      patience: 10
-      min_delta: 0.05  # Threshold for overfitting detection
+  
 
-# Evaluation Configuration 
-evaluation:
-  # Optional: Specify model for evaluation, defaults to best checkpoint or final model
-  # keras_model_filename: "unet_best_model.h5"
-  batch_size: 16
-  
-  # Evaluation metrics
-  metrics:
-    - "binary_iou"
-    - "dice_coefficient"
-    - "binary_accuracy"
-    - "precision"
-    - "recall"
-    - "f1_score"
-  
-  # Test-time augmentation for evaluation
-  use_tta: true
-  tta_steps: 8
 
 # Paths Configuration 
 paths:
   model_save_dir: "trained_models/segmentation/"
   log_dir: "logs/segmentation/"
-  tflite_export_dir: "trained_models/segmentation/exported/"
   metadata_dir: "data/segmentation"
   metadata_filename: "metadata.json"
 
 # Export Configuration
 export:
-  # keras_model_filename: "unet_segmentation_final_20250521-121802.h5" # Let script auto-discover available models
   tflite_filename: "segmentation_model_final.tflite"
 
   quantization:
