@@ -1,8 +1,5 @@
 
 import os
-
-# TPU-specific environment configuration
-# Allow TPU library loading for universal compatibility
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'  # Reduce TensorFlow logging
 import sys
 import yaml
@@ -18,16 +15,14 @@ except AttributeError:
 from pathlib import Path
 from datetime import datetime
 import traceback
-import argparse # Add argparse
+import argparse 
 import numpy as np
 
-# Add _get_project_root function definition
 def _get_project_root() -> Path:
     """Assumes this script is in Food-Detection/models/segmentation/"""
     return Path(__file__).resolve().parent.parent.parent
 
-# Assuming data.py is in the same directory or accessible in PYTHONPATH
-from data import load_segmentation_data # Use relative import
+from data import load_segmentation_data 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -77,10 +72,8 @@ def initialize_strategy() -> tf.distribute.Strategy:
     
     logger.info("Initializing distributed strategy...")
     
-    # Clear TensorFlow session for subprocess compatibility
     tf.keras.backend.clear_session()
     
-    # Check for TPU environment variables first
     tpu_name = os.environ.get('TPU_NAME')
     if tpu_name:
         logger.info(f"TPU_NAME environment variable found: {tpu_name}")
@@ -89,7 +82,6 @@ def initialize_strategy() -> tf.distribute.Strategy:
         resolver_address = 'local'
         logger.info("TPU_NAME not found, trying 'local' resolver")
     
-    # Try TPU detection with retry mechanism
     for attempt in range(3):
         try:
             logger.info(f"TPU initialization attempt {attempt + 1}/3")
@@ -108,7 +100,7 @@ def initialize_strategy() -> tf.distribute.Strategy:
             
         except Exception as e:
             logger.info(f"TPU initialization attempt {attempt + 1} failed: {e}")
-            if attempt < 2:  # Don't sleep on last attempt
+            if attempt < 2: 
                 time.sleep(2)
     
     # If TPU fails, try alternative resolver addresses
@@ -142,13 +134,11 @@ def initialize_strategy() -> tf.distribute.Strategy:
         logger.info("Using CPU strategy")
         return tf.distribute.get_strategy()
 
-# Path to the specific config file for segmentation training
 SEGMENTATION_CONFIG_PATH = os.path.join(_get_project_root(), "models", "segmentation", "config.yaml")
 
 from tensorflow.keras.callbacks import Callback
-# Import Keras applications for backbones
 from tensorflow.keras.applications import EfficientNetB0, ResNet50V2, MobileNetV3Small # Add more as needed
-from tensorflow.keras import layers # Explicitly import layers for clarity
+from tensorflow.keras import layers 
 
 def load_config(config_path: str) -> dict:
     """Loads the YAML configuration file."""
@@ -232,7 +222,7 @@ def build_fused_encoder_decoder_model(output_channels: int, image_size: tuple, m
     Returns:
         A Keras encoder-decoder model with fused features.
     """
-    # --- Input Layers (Define with explicit names) ---
+    # Input Layers
     rgb_input = layers.Input(shape=[*image_size, 3], name='rgb_input')
     depth_input = layers.Input(shape=[*image_size, 3], name='depth_input')
     
@@ -249,7 +239,7 @@ def build_fused_encoder_decoder_model(output_channels: int, image_size: tuple, m
     
 
 
-    # --- Branch 1: RGB Backbone (Pre-trained) ---
+    # Branch 1: RGB Backbone (Pre-trained) 
     rgb_backbone_name = model_config.get('backbone', 'EfficientNetB0')
     logger.info(f"Building RGB branch with pre-trained {rgb_backbone_name}...")
     
@@ -273,7 +263,7 @@ def build_fused_encoder_decoder_model(output_channels: int, image_size: tuple, m
     rgb_features = layers.GlobalAveragePooling2D(name='rgb_gap')(rgb_features)
     logger.info(f"RGB features extracted. Shape: {rgb_features.shape}")
 
-    # --- Branch 2: Depth Backbone (Trained from Scratch) ---
+    # Branch 2: Depth Backbone 
     depth_backbone_name = model_config.get('depth_backbone', 'MobileNetV3Small')
     logger.info(f"Building Depth branch with {depth_backbone_name} (trained from scratch)...")
     
@@ -284,11 +274,11 @@ def build_fused_encoder_decoder_model(output_channels: int, image_size: tuple, m
     depth_base_model._name = "depth_backbone"
     depth_base_model.trainable = True
     
-    depth_features = depth_base_model.output
+    depth_features = depth_base_model.get_layer('multiply_12').output
     depth_features = layers.GlobalAveragePooling2D(name='depth_gap')(depth_features)
     logger.info(f"Depth features extracted. Shape: {depth_features.shape}")
 
-    # --- Branch 3: Point Cloud Backbone (PointNet-style) ---
+    # Branch 3: Point Cloud Backbone (PointNet-style)
     logger.info("Building Point Cloud branch (PointNet-style)...")
     def conv_bn(x, filters):
         x = layers.Conv1D(filters, kernel_size=1, padding="valid")(x)
@@ -302,7 +292,7 @@ def build_fused_encoder_decoder_model(output_channels: int, image_size: tuple, m
     pc_features = layers.GlobalMaxPooling1D(name='pc_gmp')(pc_x)
     logger.info(f"Point Cloud features extracted. Shape: {pc_features.shape}")
     
-    # --- Fusion ---
+    # Fusion 
     logger.info("Fusing features from all three branches...")
     
     rgb_features_norm = layers.BatchNormalization(name='rgb_feat_norm')(rgb_features)
@@ -315,7 +305,7 @@ def build_fused_encoder_decoder_model(output_channels: int, image_size: tuple, m
         pc_features_norm
     ])
     
-    # --- Decoder (simpler, as we are not building a U-Net anymore) ---
+    # Decoder 
     logger.info("Building decoder to reconstruct mask from fused features...")
 
     # Start by creating a small spatial map from the 1D vector
@@ -347,8 +337,7 @@ def build_fused_encoder_decoder_model(output_channels: int, image_size: tuple, m
     model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
     logger.info(f"Built fused encoder-decoder model with output shape: {model.output_shape}")
 
-    # Save model summary to a file
-    summary_file_path = "model_summary.txt" # Will be saved in the CWD of train.py
+    summary_file_path = "model_summary.txt" 
     try:
         with open(summary_file_path, 'w') as f:
             model.summary(print_fn=lambda x: f.write(x + '\n'))
@@ -356,7 +345,6 @@ def build_fused_encoder_decoder_model(output_channels: int, image_size: tuple, m
     except Exception as e:
         logger.error(f"Could not save model summary to {summary_file_path}: {e}")
 
-    # Log model summary if verbosity is high enough
     if logger.getEffectiveLevel() <= logging.DEBUG:
         model.summary(print_fn=logger.info)
 
@@ -515,7 +503,6 @@ def combined_loss(y_true, y_pred, bce_weight=0.5, dice_weight=0.3, focal_weight=
     return bce_weight * bce + dice_weight * dice + focal_weight * focal
 
 def main():
-    # --- Setup (Unchanged) ---
     project_root = _get_project_root()
     strategy = initialize_strategy()
     logger.info(f"Training will use strategy: {strategy.__class__.__name__}")
@@ -528,20 +515,14 @@ def main():
     config = load_config(args.config)
     set_mixed_precision_policy(config, strategy)
 
-    # --- Data Loading (OUTSIDE strategy scope to avoid TPU compilation issues) ---
+    # Data Loading
     logger.info("Loading data for training...")
     train_ds, val_ds, test_ds, num_train, num_val, num_test, num_classes = load_segmentation_data(config)
     if train_ds is None:
         logger.error("Data loading failed. Exiting.")
         return
 
-    # --- Distribute datasets to TPU devices ---
-    train_ds = strategy.experimental_distribute_dataset(train_ds)
-    val_ds = strategy.experimental_distribute_dataset(val_ds) if val_ds else None
-    test_ds = strategy.experimental_distribute_dataset(test_ds) if test_ds else None
-    logger.info("✅ Datasets distributed to TPU strategy.")
-
-    # --- Calculate Steps ---
+    # Calculate Steps
     data_cfg = config.get('data', {})
     training_cfg = config.get('training', {})
     optimizer_cfg = config.get('optimizer', {})
@@ -551,7 +532,6 @@ def main():
     steps_per_epoch = num_train // per_replica_batch_size
     validation_steps = num_val // per_replica_batch_size if val_ds else None
 
-    # Enhanced Loss Function Configuration
     loss_fn_name = loss_cfg.get('name', 'binary_crossentropy').lower()
     
     if loss_fn_name == 'binary_crossentropy': 
@@ -589,7 +569,6 @@ def main():
         logger.warning(f"Unsupported loss function: {loss_fn_name}. Defaulting to binary crossentropy.")
         loss_function = tf.keras.losses.BinaryCrossentropy(from_logits=False)
 
-    # Enhanced Metrics Configuration
     metrics_cfg = training_cfg.get('metrics', ['binary_accuracy'])
     metrics_list = []
     for m_name in metrics_cfg:
@@ -607,9 +586,9 @@ def main():
 
     logger.info(f"Using metrics: {[m.name if hasattr(m, 'name') else str(m) for m in metrics_list]}")
 
-    # =================================================================
-    #                  STAGE 1: Pre-train New Branches
-    # =================================================================
+    
+    # Pre-train New Branches
+    
     logger.info("\n" + "="*60 + "\n=== STAGE 1: Pre-training Depth & Point Cloud Branches ===\n" + "="*60)
     
     with strategy.scope():
@@ -667,9 +646,7 @@ def main():
         callbacks=stage1_callbacks
     )
 
-    # =================================================================
-    #                  STAGE 2: Fine-tune Entire Model
-    # =================================================================
+    #  STAGE 2: Fine-tune Entire Model
     logger.info("\n" + "="*60 + "\n=== STAGE 2: Fine-tuning all branches together ===\n" + "="*60)
     
     with strategy.scope():
@@ -745,6 +722,5 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logger.error("Exception in main execution:", exc_info=True)
-        # Ensure the traceback is printed to stderr as well for visibility
         traceback.print_exc() 
-        sys.exit(1) # Exit with a non-zero code to indicate failure
+        sys.exit(1) 
