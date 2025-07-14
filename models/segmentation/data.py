@@ -364,7 +364,7 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                 output_signature=output_signature
             )
 
-            def preprocess_and_augment(sample):
+            def map_fn(sample):
                 rgb = tf.image.resize(sample['rgb_input'], target_size_py)
                 depth = tf.image.resize(sample['depth_input'], target_size_py)
                 depth_3_channel = tf.concat([depth, depth, depth], axis=-1)
@@ -376,22 +376,20 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                     "pc_input": sample['pc_input']
                 }
 
-                if is_training:
-                    inputs, final_mask_with_channel = augmentation_pipeline((inputs, mask))
-                else:
-                    final_mask_with_channel = mask
+                if is_training and augmentation_pipeline is not None:
+                    inputs, mask = augmentation_pipeline((inputs, mask))
                 
                 if preprocess_fn:
                     inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
                     inputs['depth_input'] = preprocess_fn(inputs['depth_input'])
 
-                final_mask = tf.squeeze(final_mask_with_channel, axis=-1)
+                final_mask = tf.squeeze(mask, axis=-1)
                 return inputs, final_mask
 
             if is_training:
                 dataset = dataset.shuffle(buffer_size=min(len(metadata_subset), 1000))
             
-            dataset = dataset.map(preprocess_and_augment, num_parallel_calls=tf.data.AUTOTUNE)
+            dataset = dataset.map(map_fn, num_parallel_calls=tf.data.AUTOTUNE)
             dataset = dataset.batch(batch_size)
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
             
