@@ -257,7 +257,7 @@ class SegmentationAugmentation(tf.keras.Model):
         # Split back
         augmented_rgb = image_and_mask[..., :3]
         augmented_depth = image_and_mask[..., 3:6]
-        augmented_mask = tf.squeeze(image_and_mask[..., 6:], axis=-1)
+        augmented_mask = image_and_mask[..., 6:]
         
         # Apply color layers to RGB only
         for layer in self.color_layers:
@@ -377,13 +377,15 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                 }
 
                 if is_training and augmentation_pipeline is not None:
-                    inputs, mask = augmentation_pipeline((inputs, mask))
+                    inputs, final_mask_with_channel = augmentation_pipeline((inputs, mask))
+                else:
+                    final_mask_with_channel = mask
                 
                 if preprocess_fn:
                     inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
                     inputs['depth_input'] = preprocess_fn(inputs['depth_input'])
 
-                final_mask = tf.squeeze(mask, axis=-1)
+                final_mask = tf.squeeze(final_mask_with_channel, axis=-1)
                 return inputs, final_mask
 
             if is_training:
