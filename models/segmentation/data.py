@@ -111,26 +111,70 @@ def data_generator(metadata_list: List[Dict], data_cfg: Dict, paths_cfg: Dict):
         np.random.shuffle(metadata_list)
         for item_data in metadata_list:
             try:
-                # Path Construction
-                rgb_rel_path = item_data.get('image_path')
-                mask_rel_path = item_data.get('mask_path')
-                depth_rel_path = item_data.get('depth_map_path')
-                pc_rel_path = item_data.get('point_cloud_path')
+                # Path Construction - handle both absolute and relative paths
+                rgb_path = item_data.get('image_path')
+                mask_path = item_data.get('mask_path')
+                depth_path = item_data.get('depth_map_path')
+                pc_path = item_data.get('point_cloud_path')
 
-                if not (rgb_rel_path and mask_rel_path):
+                if not (rgb_path and mask_path):
                     continue
+
+                def get_full_path(path_str, metadata_dir):
+                    """Convert path to full path, handling both absolute and relative paths"""
+                    if not path_str:
+                        return None
+                    
+                    path_obj = pathlib.Path(path_str)
+                    
+                    # If it's already a relative path, just join with metadata_dir
+                    if not path_obj.is_absolute():
+                        return str(metadata_dir / path_str)
+                    
+                    # For absolute paths (Windows paths), extract the relevant parts
+                    # Pattern: E:\_MetaFood3D_new_RGBD_videos\RGBD_videos\Class\Instance\folder\file.ext
+                    parts = path_obj.parts
+                    
+                    # Find the class and instance from the path
+                    if len(parts) >= 3:
+                        # Look for the pattern after RGBD_videos
+                        try:
+                            rgbd_idx = None
+                            for i, part in enumerate(parts):
+                                if 'RGBD_videos' in part:
+                                    rgbd_idx = i
+                                    break
+                            
+                            if rgbd_idx is not None and len(parts) > rgbd_idx + 3:
+                                class_name = parts[rgbd_idx + 1]
+                                instance_name = parts[rgbd_idx + 2] 
+                                folder_name = parts[rgbd_idx + 3]  # 'original', 'masks', 'depth'
+                                filename = parts[-1]
+                                
+                                # Reconstruct the relative path
+                                relative_path = pathlib.Path(class_name) / instance_name / folder_name / filename
+                                return str(metadata_dir / relative_path)
+                        except (IndexError, ValueError):
+                            pass
+                    
+                    # Fallback: just use the filename
+                    return str(metadata_dir / path_obj.name)
 
                 # Loading raw data as NumPy arrays using standard Python IO
                 from PIL import Image
 
                 # Load RGB
-                full_rgb_path = str(metadata_dir / rgb_rel_path)
+                full_rgb_path = get_full_path(rgb_path, metadata_dir)
+                if not full_rgb_path or not os.path.exists(full_rgb_path):
+                    continue
                 with open(full_rgb_path, 'rb') as f:
                     rgb_img = Image.open(f).convert('RGB')
                     rgb_np = np.array(rgb_img, dtype=np.float32)
 
                 # Load Mask
-                full_mask_path = str(metadata_dir / mask_rel_path)
+                full_mask_path = get_full_path(mask_path, metadata_dir)
+                if not full_mask_path or not os.path.exists(full_mask_path):
+                    continue
                 with open(full_mask_path, 'rb') as f:
                     mask_img = Image.open(f).convert('L')
                     mask_np = np.array(mask_img, dtype=np.float32)
@@ -138,9 +182,9 @@ def data_generator(metadata_list: List[Dict], data_cfg: Dict, paths_cfg: Dict):
 
                 # Load Depth
                 depth_np = np.zeros_like(mask_np, dtype=np.float32)
-                if use_depth and depth_rel_path:
-                    full_depth_path = str(metadata_dir / depth_rel_path)
-                    if os.path.exists(full_depth_path):
+                if use_depth and depth_path:
+                    full_depth_path = get_full_path(depth_path, metadata_dir)
+                    if full_depth_path and os.path.exists(full_depth_path):
                         with open(full_depth_path, 'rb') as f:
                             depth_img = Image.open(f).convert('L')
                             depth_np = np.array(depth_img, dtype=np.float32)
@@ -148,9 +192,9 @@ def data_generator(metadata_list: List[Dict], data_cfg: Dict, paths_cfg: Dict):
 
                 # Load pre-processed Point Cloud (.npy)
                 pc_np = np.zeros((num_points_target, 3), dtype=np.float32)
-                if use_pc and pc_rel_path:
-                    full_pc_path = str(metadata_dir / pc_rel_path)
-                    if os.path.exists(full_pc_path):
+                if use_pc and pc_path:
+                    full_pc_path = get_full_path(pc_path, metadata_dir)
+                    if full_pc_path and os.path.exists(full_pc_path):
                         pc_np = np.load(full_pc_path).astype(np.float32)
                 
                 yield {
