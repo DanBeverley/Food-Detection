@@ -7,10 +7,6 @@ from typing import Tuple, Dict, Optional, List, Any, Callable
 from sklearn.model_selection import train_test_split
 import pathlib
 import json
-import traceback 
-import sys
-import math 
- 
 from tensorflow.keras import layers 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -19,137 +15,36 @@ logger = logging.getLogger(__name__)
 _SEG_PREPROCESS_FN_CACHE = {}
 
 def _get_project_root() -> pathlib.Path:
-    """Find the project root directory."""
     return pathlib.Path(__file__).resolve().parent.parent.parent
 
 def _get_segmentation_preprocess_fn(architecture: Optional[str]):
-    """Dynamically imports and returns the correct preprocess_input function for segmentation model backbones."""
-    global _SEG_PREPROCESS_FN_CACHE
-    if not architecture or architecture.lower() == 'none' or architecture.lower() == 'unet': 
-        logger.info(f"No specific backbone ('{architecture}') requiring Keras preprocess_input. Using generic scaling (image/127.5 - 1.0).")
-        return lambda x: (x / 127.5) - 1.0 
-
-    if architecture in _SEG_PREPROCESS_FN_CACHE:
-        return _SEG_PREPROCESS_FN_CACHE[architecture]
-
+    if architecture is None:
+        return None
+    
+    arch_key = architecture.lower()
+    if arch_key in _SEG_PREPROCESS_FN_CACHE:
+        return _SEG_PREPROCESS_FN_CACHE[arch_key]
+    
     preprocess_input_fn = None
     try:
-        if architecture.startswith("EfficientNetV2"):
-            from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as pi
-            preprocess_input_fn = pi
-        elif architecture.startswith("EfficientNet"):
-            from tensorflow.keras.applications.efficientnet import preprocess_input as pi
-            preprocess_input_fn = pi
-        elif architecture.startswith("ResNet"):
-            module_name = f"tensorflow.keras.applications.{architecture.lower().split('v')[0]}" # e.g., resnet, resnet50
-            base_module = __import__(module_name, fromlist=['preprocess_input'])
-            preprocess_input_fn = base_module.preprocess_input
-        elif architecture.startswith("MobileNetV2"):
-            from tensorflow.keras.applications.mobilenet_v2 import preprocess_input as pi
-            preprocess_input_fn = pi
-        elif architecture.startswith("MobileNet"):
-            from tensorflow.keras.applications.mobilenet import preprocess_input as pi
-            preprocess_input_fn = pi
+        if 'efficientnet' in arch_key:
+            from tensorflow.keras.applications.efficientnet import preprocess_input as efficientnet_preprocess
+            preprocess_input_fn = efficientnet_preprocess
+        elif 'resnet' in arch_key:
+            from tensorflow.keras.applications.resnet_v2 import preprocess_input as resnet_preprocess
+            preprocess_input_fn = resnet_preprocess
+        elif 'mobilenet' in arch_key:
+            from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as mobilenet_preprocess
+            preprocess_input_fn = mobilenet_preprocess
         else:
-            logger.warning(f"Unsupported backbone '{architecture}' for specific preprocess_input. Using generic scaling (image/127.5 - 1.0).")
-            preprocess_input_fn = lambda x: (x / 127.5) - 1.0 
-    except ImportError:
-        logger.error(f"Could not import preprocess_input for backbone {architecture}. Using generic scaling.", exc_info=True)
-        preprocess_input_fn = lambda x: (x / 127.5) - 1.0 
+            logger.warning(f"Unknown architecture '{architecture}' for preprocessing. Using identity function.")
+            preprocess_input_fn = lambda x: x
+    except ImportError as e:
+        logger.error(f"Could not import preprocessing function for '{architecture}': {e}")
+        preprocess_input_fn = lambda x: x
     
-    _SEG_PREPROCESS_FN_CACHE[architecture] = preprocess_input_fn
+    _SEG_PREPROCESS_FN_CACHE[arch_key] = preprocess_input_fn
     return preprocess_input_fn
-
-# Removed _load_and_preprocess_point_cloud_py_seg function as point clouds are now preprocessed offline
-
-
-
-
-
-def segmentation_data_generator(metadata_list, data_cfg, paths_cfg):
-    """Pure Python generator that loads and yields single samples as NumPy arrays."""
-    project_root = _get_project_root()
-    metadata_dir = project_root / paths_cfg['metadata_dir']
-    
-    use_depth = data_cfg.get('use_depth_map', False)
-    depth_map_dir_name = data_cfg.get('depth_map_dir_name', 'depth')
-    
-    use_pc = data_cfg.get('use_point_cloud', False)
-    pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
-    num_points_target = pc_prep_cfg.get('num_points', 4096)
-
-    while True:
-        np.random.shuffle(metadata_list)
-        
-        for item_data in metadata_list:
-            try:
-                rgb_rel_path = item_data.get('image_path')
-                mask_rel_path = item_data.get('mask_path')
-                if not rgb_rel_path or not mask_rel_path:
-                    continue
-
-                full_rgb_path = str(metadata_dir / rgb_rel_path)
-                full_mask_path = str(metadata_dir / mask_rel_path)
-
-                if not os.path.exists(full_rgb_path) or not os.path.exists(full_mask_path):
-                    continue
-
-                # Load RGB
-                image_string = tf.io.read_file(full_rgb_path)
-                image_decoded = tf.image.decode_image(image_string, channels=3, expand_animations=False).numpy()
-
-                # Load Mask
-                mask_string = tf.io.read_file(full_mask_path)
-                mask_decoded = tf.image.decode_image(mask_string, channels=1, expand_animations=False).numpy()
-                
-                # Load Depth - derive path from RGB path
-                depth_decoded = np.zeros_like(mask_decoded, dtype=np.uint8)
-                if use_depth:
-                    rgb_parent_dir = pathlib.Path(full_rgb_path).parent
-                    depth_img_name = pathlib.Path(full_rgb_path).name
-                    potential_depth_path = rgb_parent_dir / depth_map_dir_name / depth_img_name
-                    
-                    depth_path_str = ""
-                    if potential_depth_path.exists():
-                        depth_path_str = str(potential_depth_path)
-                    else:
-                        for ext in ['.png', '.jpg', '.jpeg', '.tif']:
-                            potential_depth_path_ext = potential_depth_path.with_suffix(ext)
-                            if potential_depth_path_ext.exists():
-                                depth_path_str = str(potential_depth_path_ext)
-                                break
-
-                    if depth_path_str:
-                        depth_string = tf.io.read_file(depth_path_str)
-                        depth_decoded = tf.image.decode_image(depth_string, channels=1).numpy()
-                
-                # Load Point Cloud - from preprocessed .npy file
-                pc_data = np.zeros((num_points_target, 3), dtype=np.float32)
-                if use_pc:
-                    pc_rel_path = item_data.get('point_cloud_path')
-                    if pc_rel_path:
-                        try:
-                            full_pc_path = metadata_dir / pc_rel_path
-                            if full_pc_path.exists() and full_pc_path.suffix == '.npy':
-                                pc_data = np.load(str(full_pc_path)).astype(np.float32)
-                                # Ensure correct shape
-                                if pc_data.shape != (num_points_target, 3):
-                                    logger.warning(f"Point cloud shape mismatch for {full_pc_path}: expected ({num_points_target}, 3), got {pc_data.shape}")
-                                    pc_data = np.zeros((num_points_target, 3), dtype=np.float32)
-                        except Exception as e:
-                            logger.warning(f"Error loading preprocessed point cloud {pc_rel_path}: {e}")
-                            pc_data = np.zeros((num_points_target, 3), dtype=np.float32)
-                
-                yield {
-                    "rgb_input": image_decoded.astype(np.float32),
-                    "depth_input": depth_decoded.astype(np.float32),
-                    "pc_input": pc_data,
-                    "mask": mask_decoded.astype(np.float32)
-                }
-
-            except Exception as e:
-                logger.warning(f"Skipping sample {item_data.get('image_path')} due to generator error: {e}")
-                continue
 
 class SegmentationAugmentation(tf.keras.Model):
     def __init__(self, aug_config, **kwargs):
@@ -169,9 +64,8 @@ class SegmentationAugmentation(tf.keras.Model):
         if self.aug_config.get("brightness_range", [1.0, 1.0]) != [1.0, 1.0]:
             factor = max(abs(1.0 - self.aug_config["brightness_range"][0]), abs(self.aug_config["brightness_range"][1] - 1.0))
             self.color_layers.append(layers.RandomBrightness(factor=factor))
-        if self.aug_config.get("contrast_range", [1.0, 1.0]) != [1.0, 1.0]:
-            contrast_factor = self.aug_config.get("contrast_factor", 0.2)
-            self.color_layers.append(layers.RandomContrast(factor=contrast_factor))
+        if self.aug_config.get("contrast_factor", 0) > 0:
+            self.color_layers.append(layers.RandomContrast(factor=self.aug_config["contrast_factor"]))
 
     def call(self, inputs):
         inputs_dict, mask = inputs
@@ -199,6 +93,75 @@ class SegmentationAugmentation(tf.keras.Model):
         }
         return augmented_inputs, augmented_mask
 
+def data_generator(metadata_list: List[Dict], data_cfg: Dict, paths_cfg: Dict):
+    """
+    A pure Python generator. It loads everything using standard libraries,
+    and yields NumPy arrays. This is the part that runs on the CPU.
+    """
+    project_root = _get_project_root()
+    metadata_dir = project_root / paths_cfg['metadata_dir']
+    
+    use_depth = data_cfg.get('use_depth_map', False)
+    use_pc = data_cfg.get('use_point_cloud', False)
+    
+    pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
+    num_points_target = pc_prep_cfg.get('num_points', 4096)
+
+    while True:
+        np.random.shuffle(metadata_list)
+        for item_data in metadata_list:
+            try:
+                # Path Construction
+                rgb_rel_path = item_data.get('image_path')
+                mask_rel_path = item_data.get('mask_path')
+                depth_rel_path = item_data.get('depth_map_path')
+                pc_rel_path = item_data.get('point_cloud_path')
+
+                if not (rgb_rel_path and mask_rel_path):
+                    continue
+
+                # Loading raw data as NumPy arrays using standard Python IO
+                from PIL import Image
+
+                # Load RGB
+                full_rgb_path = str(metadata_dir / rgb_rel_path)
+                with open(full_rgb_path, 'rb') as f:
+                    rgb_img = Image.open(f).convert('RGB')
+                    rgb_np = np.array(rgb_img, dtype=np.float32)
+
+                # Load Mask
+                full_mask_path = str(metadata_dir / mask_rel_path)
+                with open(full_mask_path, 'rb') as f:
+                    mask_img = Image.open(f).convert('L')
+                    mask_np = np.array(mask_img, dtype=np.float32)
+                    mask_np = np.expand_dims(mask_np, axis=-1)
+
+                # Load Depth
+                depth_np = np.zeros_like(mask_np, dtype=np.float32)
+                if use_depth and depth_rel_path:
+                    full_depth_path = str(metadata_dir / depth_rel_path)
+                    if os.path.exists(full_depth_path):
+                        with open(full_depth_path, 'rb') as f:
+                            depth_img = Image.open(f).convert('L')
+                            depth_np = np.array(depth_img, dtype=np.float32)
+                            depth_np = np.expand_dims(depth_np, axis=-1)
+
+                # Load pre-processed Point Cloud (.npy)
+                pc_np = np.zeros((num_points_target, 3), dtype=np.float32)
+                if use_pc and pc_rel_path:
+                    full_pc_path = str(metadata_dir / pc_rel_path)
+                    if os.path.exists(full_pc_path):
+                        pc_np = np.load(full_pc_path).astype(np.float32)
+                
+                yield {
+                    "rgb_input": rgb_np,
+                    "depth_input": depth_np,
+                    "pc_input": pc_np,
+                    "mask": mask_np
+                }
+            except Exception as e:
+                logger.warning(f"Skipping sample {item_data.get('image_path')} due to generator error: {e}")
+                continue
 
 def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, int, int, int]:
     try:
@@ -208,59 +171,45 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         training_cfg = config.get('training', {})
         aug_cfg = data_cfg.get('augmentation', {})
 
-        target_size_py = tuple(data_cfg.get('image_size', (256, 256))) 
-        target_size_tensor = tf.constant(target_size_py, dtype=tf.int32)   
+        target_size = tuple(data_cfg.get('image_size', (256, 256))) 
         batch_size = data_cfg['batch_size']
         num_classes = data_cfg['num_classes']
-        num_classes_tensor = tf.constant(num_classes, dtype=tf.int32)
         split_ratios = data_cfg['split_ratios']
         random_seed = data_cfg.get('random_seed', 42)
 
-        # Debug settings from config
-        is_debug_mode_active = training_cfg.get('runtime_is_debug_mode', False)
-        debug_max_samples = data_cfg.get('debug_max_samples', None)
-
-        use_depth = data_cfg.get('use_depth_map', False)
-        depth_map_dir_name = data_cfg.get('depth_map_dir_name', 'depth')
-        depth_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('depth_map', {})
-
-        use_pc = data_cfg.get('use_point_cloud', False)
-        pc_root_dir = data_cfg.get('point_cloud_root_dir', '')
-        pc_sampling_rate_dir = data_cfg.get('point_cloud_sampling_rate_dir', '')
-        pc_suffix = data_cfg.get('point_cloud_suffix', '')
-        pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
+        debug_settings = config.get('debug', {})
+        debug_mode = debug_settings.get('enabled', False) or training_cfg.get('debug_mode', False)
+        debug_max_samples = debug_settings.get('max_samples_per_split') or data_cfg.get('debug_max_samples')
 
         project_root = _get_project_root()
         metadata_dir = project_root / paths_cfg['metadata_dir']
-        metadata_file = metadata_dir / paths_cfg['metadata_filename']
+        metadata_path = metadata_dir / paths_cfg['metadata_filename']
 
-        if not metadata_file.exists():
-            logger.error(f"Metadata file not found: {metadata_file}")
-            return None, None, None, 0, 0, 0, 0
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
 
-        with open(metadata_file, 'r') as f:
-            metadata = json.load(f)
+        with open(metadata_path, 'r') as f:
+            all_metadata = json.load(f)
 
-        # Directly use the loaded list if it's not empty
-        if not isinstance(metadata, list) or not metadata:
-            logger.error(f"Metadata file {metadata_file} does not contain a valid list of items or is empty.")
-            return None, None, None, 0, 0, 0, 0
+        if debug_mode and debug_max_samples:
+            all_metadata = all_metadata[:debug_max_samples]
+            logger.info(f"Debug mode: Limited dataset to {len(all_metadata)} samples")
 
-        # Debug Sampling Logic
-        if is_debug_mode_active and debug_max_samples is not None and isinstance(debug_max_samples, int):
-            if 0 < debug_max_samples < len(metadata):
-                logger.info(f"SEGMENTATION DEBUG MODE: Limiting to {debug_max_samples} samples out of {len(metadata)} total.")
-                np.random.seed(random_seed) 
-                np.random.shuffle(metadata)
-                metadata = metadata[:debug_max_samples]
-            else:
-                logger.warning(f"SEGMENTATION DEBUG MODE: debug_max_samples ({debug_max_samples}) is invalid or not smaller than total samples ({len(metadata)}). Using full dataset for debug run.")
-        elif is_debug_mode_active:
-            logger.info("SEGMENTATION DEBUG MODE: runtime_is_debug_mode is True, but debug_max_samples not set or invalid in data_config. Using full dataset for debug run.")
-
-        train_meta, temp_meta = train_test_split(metadata, test_size=1-split_ratios['train'], random_state=random_seed)
-        val_prop_in_remainder = split_ratios['val'] / (split_ratios['val'] + split_ratios['test'])
-        val_meta, test_meta = train_test_split(temp_meta, train_size=val_prop_in_remainder, random_state=random_seed)
+        # Split data
+        train_meta, temp_meta = train_test_split(
+            all_metadata, 
+            test_size=(1 - split_ratios['train']), 
+            random_state=random_seed,
+            shuffle=True
+        )
+        
+        val_size = split_ratios['val'] / (split_ratios['val'] + split_ratios['test'])
+        val_meta, test_meta = train_test_split(
+            temp_meta,
+            test_size=(1 - val_size),
+            random_state=random_seed,
+            shuffle=True
+        )
 
         num_train_samples = len(train_meta)
         num_val_samples = len(val_meta)
@@ -268,19 +217,18 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
 
         logger.info(f"Dataset split: Train {num_train_samples}, Val {num_val_samples}, Test {num_test_samples}")
 
-        if num_train_samples == 0:
-            logger.error("No training samples after splitting. Check dataset size, debug settings, and split ratios.")
-            return None, None, None, num_train_samples, num_val_samples, num_test_samples, num_classes
-
+        # Create augmentation pipeline and preprocessing
         augmentation_pipeline = SegmentationAugmentation(aug_cfg)
-        preprocess_fn = _get_segmentation_preprocess_fn(model_cfg.get('backbone', 'efficientnetb0'))
+        preprocess_fn = _get_segmentation_preprocess_fn(model_cfg.get('backbone'))
         
+        pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
         num_points_target = pc_prep_cfg.get('num_points', 4096)
 
         def create_dataset(metadata_subset, is_training):
             if not metadata_subset:
                 return None
 
+            # Define the shapes and types of the NumPy arrays yielded by the generator
             output_signature = {
                 "rgb_input": tf.TensorSpec(shape=(None, None, 3), dtype=tf.float32),
                 "depth_input": tf.TensorSpec(shape=(None, None, 1), dtype=tf.float32),
@@ -288,16 +236,20 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                 "mask": tf.TensorSpec(shape=(None, None, 1), dtype=tf.float32),
             }
 
+            # Create the dataset from the pure Python generator
             dataset = tf.data.Dataset.from_generator(
-                lambda: segmentation_data_generator(metadata_subset, data_cfg, paths_cfg),
+                lambda: data_generator(metadata_subset, data_cfg, paths_cfg),
                 output_signature=output_signature
             )
 
-            def map_fn(sample):
-                rgb = tf.image.resize(sample['rgb_input'], target_size_py)
-                depth = tf.image.resize(sample['depth_input'], target_size_py)
+            # This map function contains ONLY pure TensorFlow operations
+            def tf_map_fn(sample):
+                rgb = tf.image.resize(sample['rgb_input'], target_size)
+                depth = tf.image.resize(sample['depth_input'], target_size)
+                mask = tf.image.resize(sample['mask'], target_size, method='nearest')
+
+                # Convert depth to 3-channel for the model backbone
                 depth_3_channel = tf.concat([depth, depth, depth], axis=-1)
-                mask = tf.image.resize(sample['mask'], target_size_py, method='nearest')
                 
                 inputs = {
                     "rgb_input": rgb,
@@ -305,22 +257,22 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                     "pc_input": sample['pc_input']
                 }
 
-                if is_training and augmentation_pipeline is not None:
-                    inputs, final_mask_with_channel = augmentation_pipeline((inputs, mask))
-                else:
-                    final_mask_with_channel = mask
+                # Apply augmentations if this is the training set
+                if is_training and aug_cfg.get('enabled', False):
+                    inputs, mask = augmentation_pipeline((inputs, mask))
                 
+                # Apply backbone-specific preprocessing
                 if preprocess_fn:
                     inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
                     inputs['depth_input'] = preprocess_fn(inputs['depth_input'])
 
-                final_mask = tf.squeeze(final_mask_with_channel, axis=-1)
-                return inputs, final_mask
+                # Final squeeze of the mask for the loss function
+                return inputs, tf.squeeze(mask, axis=-1)
 
             if is_training:
-                dataset = dataset.shuffle(buffer_size=min(len(metadata_subset), 1000))
+                dataset = dataset.shuffle(buffer_size=min(len(metadata_subset), 1024))
             
-            dataset = dataset.map(map_fn, num_parallel_calls=tf.data.AUTOTUNE)
+            dataset = dataset.map(tf_map_fn, num_parallel_calls=tf.data.AUTOTUNE)
             dataset = dataset.batch(batch_size)
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
             
