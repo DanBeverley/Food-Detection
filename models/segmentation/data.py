@@ -121,27 +121,33 @@ def data_generator(metadata_list: List[Dict], data_cfg: Dict, paths_cfg: Dict):
             def get_full_path_debug(path_str, metadata_dir):
                 if not path_str:
                     return None
+                
                 path_obj = pathlib.Path(path_str)
+                
                 if not path_obj.is_absolute():
                     return str(metadata_dir / path_str)
-                parts = path_obj.parts
-                if len(parts) >= 3:
-                    try:
-                        rgbd_idx = None
-                        for j, part in enumerate(parts):
-                            if 'RGBD_videos' in part:
-                                rgbd_idx = j
-                                break
-                        if rgbd_idx is not None and len(parts) > rgbd_idx + 3:
-                            class_name = parts[rgbd_idx + 1]
-                            instance_name = parts[rgbd_idx + 2] 
-                            folder_name = parts[rgbd_idx + 3]
-                            filename = parts[-1]
-                            relative_path = pathlib.Path(class_name) / instance_name / folder_name / filename
-                            return str(metadata_dir / relative_path)
-                    except (IndexError, ValueError):
-                        pass
-                return str(metadata_dir / path_obj.name)
+                
+                try:
+                    path_str_normalized = str(path_obj).replace('\\', '/')
+                    
+                    if 'RGBD_videos' in path_str_normalized:
+                        rgbd_idx = path_str_normalized.find('_MetaFood3D_new_RGBD_videos')
+                        if rgbd_idx != -1:
+                            relative_part = path_str_normalized[rgbd_idx:]
+                            kaggle_path = pathlib.Path('/kaggle/input/metafood3d') / relative_part
+                            return str(kaggle_path)
+                    
+                    elif 'Point_cloud' in path_str_normalized:
+                        pc_idx = path_str_normalized.find('_MetaFood3D_new_Point_cloud')
+                        if pc_idx != -1:
+                            relative_part = path_str_normalized[pc_idx:]
+                            kaggle_path = pathlib.Path('/kaggle/input/metafood3d-pointcloud') / relative_part
+                            return str(kaggle_path)
+                
+                except (IndexError, ValueError):
+                    pass
+                
+                return None
             
             resolved_rgb = get_full_path_debug(rgb_path, metadata_dir)
             resolved_mask = get_full_path_debug(mask_path, metadata_dir)
