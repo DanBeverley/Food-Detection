@@ -107,9 +107,58 @@ def data_generator(metadata_list: List[Dict], data_cfg: Dict, paths_cfg: Dict):
     pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
     num_points_target = pc_prep_cfg.get('num_points', 4096)
 
+    logger.info(f"Data generator started. Metadata dir: {metadata_dir}")
+    logger.info(f"Total metadata samples: {len(metadata_list)}")
+    
+    # Debug: Test first few samples
+    if len(metadata_list) > 0:
+        logger.info("Testing first few samples...")
+        for i in range(min(3, len(metadata_list))):
+            sample = metadata_list[i]
+            rgb_path = sample.get('image_path')
+            mask_path = sample.get('mask_path')
+            
+            def get_full_path_debug(path_str, metadata_dir):
+                if not path_str:
+                    return None
+                path_obj = pathlib.Path(path_str)
+                if not path_obj.is_absolute():
+                    return str(metadata_dir / path_str)
+                parts = path_obj.parts
+                if len(parts) >= 3:
+                    try:
+                        rgbd_idx = None
+                        for j, part in enumerate(parts):
+                            if 'RGBD_videos' in part:
+                                rgbd_idx = j
+                                break
+                        if rgbd_idx is not None and len(parts) > rgbd_idx + 3:
+                            class_name = parts[rgbd_idx + 1]
+                            instance_name = parts[rgbd_idx + 2] 
+                            folder_name = parts[rgbd_idx + 3]
+                            filename = parts[-1]
+                            relative_path = pathlib.Path(class_name) / instance_name / folder_name / filename
+                            return str(metadata_dir / relative_path)
+                    except (IndexError, ValueError):
+                        pass
+                return str(metadata_dir / path_obj.name)
+            
+            resolved_rgb = get_full_path_debug(rgb_path, metadata_dir)
+            resolved_mask = get_full_path_debug(mask_path, metadata_dir)
+            
+            logger.info(f"Sample {i}: RGB original: {rgb_path}")
+            logger.info(f"Sample {i}: RGB resolved: {resolved_rgb}")
+            logger.info(f"Sample {i}: RGB exists: {os.path.exists(resolved_rgb) if resolved_rgb else False}")
+            logger.info(f"Sample {i}: Mask original: {mask_path}")
+            logger.info(f"Sample {i}: Mask resolved: {resolved_mask}")
+            logger.info(f"Sample {i}: Mask exists: {os.path.exists(resolved_mask) if resolved_mask else False}")
+    
+    samples_yielded = 0
+    samples_skipped = 0
+    
     while True:
         np.random.shuffle(metadata_list)
-        for item_data in metadata_list:
+        for i, item_data in enumerate(metadata_list):
             try:
                 # Path Construction - handle both absolute and relative paths
                 rgb_path = item_data.get('image_path')
@@ -166,6 +215,9 @@ def data_generator(metadata_list: List[Dict], data_cfg: Dict, paths_cfg: Dict):
                 # Load RGB
                 full_rgb_path = get_full_path(rgb_path, metadata_dir)
                 if not full_rgb_path or not os.path.exists(full_rgb_path):
+                    samples_skipped += 1
+                    if samples_skipped % 1000 == 0:
+                        logger.warning(f"Skipped {samples_skipped} samples so far. Last RGB path: {rgb_path}")
                     continue
                 with open(full_rgb_path, 'rb') as f:
                     rgb_img = Image.open(f).convert('RGB')
@@ -174,6 +226,7 @@ def data_generator(metadata_list: List[Dict], data_cfg: Dict, paths_cfg: Dict):
                 # Load Mask
                 full_mask_path = get_full_path(mask_path, metadata_dir)
                 if not full_mask_path or not os.path.exists(full_mask_path):
+                    samples_skipped += 1
                     continue
                 with open(full_mask_path, 'rb') as f:
                     mask_img = Image.open(f).convert('L')
@@ -196,6 +249,10 @@ def data_generator(metadata_list: List[Dict], data_cfg: Dict, paths_cfg: Dict):
                     full_pc_path = get_full_path(pc_path, metadata_dir)
                     if full_pc_path and os.path.exists(full_pc_path):
                         pc_np = np.load(full_pc_path).astype(np.float32)
+                
+                samples_yielded += 1
+                if samples_yielded % 100 == 0:
+                    logger.info(f"Data generator: yielded {samples_yielded} samples, skipped {samples_skipped}")
                 
                 yield {
                     "rgb_input": rgb_np,
