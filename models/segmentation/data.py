@@ -175,75 +175,70 @@ def data_generator(metadata_list: List[Dict], data_cfg: Dict, paths_cfg: Dict):
                 if not (rgb_path and mask_path):
                     continue
 
-                def get_full_path(path_str, metadata_dir):
+                def get_full_path(path_str):
                     if not path_str:
                         return None
                     
-                    path_obj = pathlib.Path(path_str)
+                    if path_str.startswith('/kaggle/input/'):
+                        return path_str
                     
-                    if not path_obj.is_absolute():
+                    if path_str.startswith('preprocessed_point_clouds/'):
                         return str(metadata_dir / path_str)
                     
+                    path_parts = path_str.replace('\\', '/').split('/')
                     try:
-                        path_str_normalized = str(path_obj).replace('\\', '/')
+                        if '_MetaFood3D_new_RGBD_videos' in path_str:
+                            base_folder = '_MetaFood3D_new_RGBD_videos'
+                            start_index = path_parts.index(base_folder)
+                            rel_path = '/'.join(path_parts[start_index:])
+                            return f"/kaggle/input/metafood3d/{rel_path}"
                         
-                        if 'RGBD_videos' in path_str_normalized:
-                            rgbd_idx = path_str_normalized.find('_MetaFood3D_new_RGBD_videos')
-                            if rgbd_idx != -1:
-                                relative_part = path_str_normalized[rgbd_idx:]
-                                kaggle_path = pathlib.Path('/kaggle/input/metafood3d') / relative_part
-                                return str(kaggle_path)
+                        elif '_MetaFood3D_new_Point_cloud' in path_str:
+                            base_folder = '_MetaFood3D_new_Point_cloud'
+                            start_index = path_parts.index(base_folder)
+                            rel_path = '/'.join(path_parts[start_index:])
+                            return f"/kaggle/input/metafood3d-pointcloud/{rel_path}"
                         
-                        elif 'Point_cloud' in path_str_normalized:
-                            pc_idx = path_str_normalized.find('_MetaFood3D_new_Point_cloud')
-                            if pc_idx != -1:
-                                relative_part = path_str_normalized[pc_idx:]
-                                kaggle_path = pathlib.Path('/kaggle/input/metafood3d-pointcloud') / relative_part
-                                return str(kaggle_path)
-                    
-                    except (IndexError, ValueError) as e:
-                        logger.debug(f"Path parsing error for {path_str}: {e}")
-                    
-                    return None
+                        else:
+                            return f"/kaggle/input/metafood3d/_MetaFood3D_new_RGBD_videos/RGBD_videos/{path_str}"
+
+                    except ValueError:
+                        return str(metadata_dir / path_str)
 
                 # Loading raw data as NumPy arrays using standard Python IO
                 from PIL import Image
 
-                # Load RGB
-                full_rgb_path = get_full_path(rgb_path, metadata_dir)
-                if not full_rgb_path or not os.path.exists(full_rgb_path):
+                full_rgb_path = get_full_path(rgb_path)
+                full_mask_path = get_full_path(mask_path)
+                
+                if not (full_rgb_path and os.path.exists(full_rgb_path) and 
+                        full_mask_path and os.path.exists(full_mask_path)):
                     samples_skipped += 1
                     if samples_skipped % 1000 == 0:
                         logger.warning(f"Skipped {samples_skipped} samples so far. Last RGB path: {rgb_path}")
                     continue
+
                 with open(full_rgb_path, 'rb') as f:
                     rgb_img = Image.open(f).convert('RGB')
                     rgb_np = np.array(rgb_img, dtype=np.float32)
 
-                # Load Mask
-                full_mask_path = get_full_path(mask_path, metadata_dir)
-                if not full_mask_path or not os.path.exists(full_mask_path):
-                    samples_skipped += 1
-                    continue
                 with open(full_mask_path, 'rb') as f:
                     mask_img = Image.open(f).convert('L')
                     mask_np = np.array(mask_img, dtype=np.float32)
                     mask_np = np.expand_dims(mask_np, axis=-1)
 
-                # Load Depth
                 depth_np = np.zeros_like(mask_np, dtype=np.float32)
                 if use_depth and depth_path:
-                    full_depth_path = get_full_path(depth_path, metadata_dir)
+                    full_depth_path = get_full_path(depth_path)
                     if full_depth_path and os.path.exists(full_depth_path):
                         with open(full_depth_path, 'rb') as f:
                             depth_img = Image.open(f).convert('L')
                             depth_np = np.array(depth_img, dtype=np.float32)
                             depth_np = np.expand_dims(depth_np, axis=-1)
 
-                # Load pre-processed Point Cloud (.npy)
                 pc_np = np.zeros((num_points_target, 3), dtype=np.float32)
                 if use_pc and pc_path:
-                    full_pc_path = get_full_path(pc_path, metadata_dir)
+                    full_pc_path = get_full_path(pc_path)
                     if full_pc_path and os.path.exists(full_pc_path):
                         pc_np = np.load(full_pc_path).astype(np.float32)
                 
