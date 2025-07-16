@@ -121,9 +121,6 @@ def initialize_strategy() -> tf.distribute.Strategy:
     logger.info("TPU initialization failed, falling back to GPU/CPU")
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        
         if len(gpus) > 1:
             strategy = tf.distribute.MirroredStrategy()
             logger.info(f"Multi-GPU strategy: {len(gpus)} GPUs")
