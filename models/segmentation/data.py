@@ -93,130 +93,28 @@ class SegmentationAugmentation(tf.keras.Model):
         }
         return augmented_inputs, augmented_mask
 
-def data_generator(metadata_list: List[Dict], data_cfg: Dict, paths_cfg: Dict):
+def data_generator(metadata_list: List[Dict], data_cfg: Dict):
     """
-    A pure Python generator. It loads everything using standard libraries,
-    and yields NumPy arrays. This is the part that runs on the CPU.
+    A pure Python generator that loads data using the absolute paths
+    provided in the metadata list.
     """
-    project_root = _get_project_root()
-    metadata_dir = project_root / paths_cfg['metadata_dir']
-    
     use_depth = data_cfg.get('use_depth_map', False)
     use_pc = data_cfg.get('use_point_cloud', False)
-    
     pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
     num_points_target = pc_prep_cfg.get('num_points', 4096)
 
-    logger.info(f"Data generator started. Metadata dir: {metadata_dir}")
-    logger.info(f"Total metadata samples: {len(metadata_list)}")
-    
-    # Debug: Test first few samples
-    if len(metadata_list) > 0:
-        logger.info("Testing first few samples...")
-        for i in range(min(3, len(metadata_list))):
-            sample = metadata_list[i]
-            rgb_path = sample.get('image_path')
-            mask_path = sample.get('mask_path')
-            
-            def get_full_path_debug(path_str, metadata_dir):
-                if not path_str:
-                    return None
-                
-                path_obj = pathlib.Path(path_str)
-                
-                if not path_obj.is_absolute():
-                    return str(metadata_dir / path_str)
-                
-                try:
-                    path_str_normalized = str(path_obj).replace('\\', '/')
-                    
-                    if 'RGBD_videos' in path_str_normalized:
-                        rgbd_idx = path_str_normalized.find('_MetaFood3D_new_RGBD_videos')
-                        if rgbd_idx != -1:
-                            relative_part = path_str_normalized[rgbd_idx:]
-                            kaggle_path = pathlib.Path('/kaggle/input/metafood3d') / relative_part
-                            return str(kaggle_path)
-                    
-                    elif 'Point_cloud' in path_str_normalized:
-                        pc_idx = path_str_normalized.find('_MetaFood3D_new_Point_cloud')
-                        if pc_idx != -1:
-                            relative_part = path_str_normalized[pc_idx:]
-                            kaggle_path = pathlib.Path('/kaggle/input/metafood3d-pointcloud') / relative_part
-                            return str(kaggle_path)
-                
-                except (IndexError, ValueError):
-                    pass
-                
-                return None
-            
-            resolved_rgb = get_full_path_debug(rgb_path, metadata_dir)
-            resolved_mask = get_full_path_debug(mask_path, metadata_dir)
-            
-            logger.info(f"Sample {i}: RGB original: {rgb_path}")
-            logger.info(f"Sample {i}: RGB resolved: {resolved_rgb}")
-            logger.info(f"Sample {i}: RGB exists: {os.path.exists(resolved_rgb) if resolved_rgb else False}")
-            logger.info(f"Sample {i}: Mask original: {mask_path}")
-            logger.info(f"Sample {i}: Mask resolved: {resolved_mask}")
-            logger.info(f"Sample {i}: Mask exists: {os.path.exists(resolved_mask) if resolved_mask else False}")
-    
-    samples_yielded = 0
-    samples_skipped = 0
-    
     while True:
         np.random.shuffle(metadata_list)
-        for i, item_data in enumerate(metadata_list):
+        for item_data in metadata_list:
             try:
-                # Path Construction - handle both absolute and relative paths
-                rgb_path = item_data.get('image_path')
-                mask_path = item_data.get('mask_path')
-                depth_path = item_data.get('depth_map_path')
-                pc_path = item_data.get('point_cloud_path')
-
-                if not (rgb_path and mask_path):
-                    continue
-
-                def get_full_path(path_str):
-                    if not path_str:
-                        return None
-                    
-                    if path_str.startswith('/kaggle/input/'):
-                        return path_str
-                    
-                    if path_str.startswith('preprocessed_point_clouds/'):
-                        return str(metadata_dir / path_str)
-                    
-                    path_parts = path_str.replace('\\', '/').split('/')
-                    try:
-                        if '_MetaFood3D_new_RGBD_videos' in path_str:
-                            base_folder = '_MetaFood3D_new_RGBD_videos'
-                            start_index = path_parts.index(base_folder)
-                            rel_path = '/'.join(path_parts[start_index:])
-                            return f"/kaggle/input/metafood3d/{rel_path}"
-                        
-                        elif '_MetaFood3D_new_Point_cloud' in path_str:
-                            base_folder = '_MetaFood3D_new_Point_cloud'
-                            start_index = path_parts.index(base_folder)
-                            rel_path = '/'.join(path_parts[start_index:])
-                            return f"/kaggle/input/metafood3d-pointcloud/{rel_path}"
-                        
-                        else:
-                            return f"/kaggle/input/metafood3d/_MetaFood3D_new_RGBD_videos/RGBD_videos/{path_str}"
-
-                    except ValueError:
-                        return str(metadata_dir / path_str)
-
-                # Loading raw data as NumPy arrays using standard Python IO
-                from PIL import Image
-
-                full_rgb_path = get_full_path(rgb_path)
-                full_mask_path = get_full_path(mask_path)
+                full_rgb_path = item_data.get('image_path')
+                full_mask_path = item_data.get('mask_path')
                 
                 if not (full_rgb_path and os.path.exists(full_rgb_path) and 
                         full_mask_path and os.path.exists(full_mask_path)):
-                    samples_skipped += 1
-                    if samples_skipped % 1000 == 0:
-                        logger.warning(f"Skipped {samples_skipped} samples so far. Last RGB path: {rgb_path}")
                     continue
+
+                from PIL import Image
 
                 with open(full_rgb_path, 'rb') as f:
                     rgb_img = Image.open(f).convert('RGB')
@@ -228,23 +126,17 @@ def data_generator(metadata_list: List[Dict], data_cfg: Dict, paths_cfg: Dict):
                     mask_np = np.expand_dims(mask_np, axis=-1)
 
                 depth_np = np.zeros_like(mask_np, dtype=np.float32)
-                if use_depth and depth_path:
-                    full_depth_path = get_full_path(depth_path)
-                    if full_depth_path and os.path.exists(full_depth_path):
-                        with open(full_depth_path, 'rb') as f:
-                            depth_img = Image.open(f).convert('L')
-                            depth_np = np.array(depth_img, dtype=np.float32)
-                            depth_np = np.expand_dims(depth_np, axis=-1)
-
-                pc_np = np.zeros((num_points_target, 3), dtype=np.float32)
-                if use_pc and pc_path:
-                    full_pc_path = get_full_path(pc_path)
-                    if full_pc_path and os.path.exists(full_pc_path):
-                        pc_np = np.load(full_pc_path).astype(np.float32)
+                full_depth_path = item_data.get('depth_map_path')
+                if use_depth and full_depth_path and os.path.exists(full_depth_path):
+                    with open(full_depth_path, 'rb') as f:
+                        depth_img = Image.open(f).convert('L')
+                        depth_np = np.array(depth_img, dtype=np.float32)
+                        depth_np = np.expand_dims(depth_np, axis=-1)
                 
-                samples_yielded += 1
-                if samples_yielded % 100 == 0:
-                    logger.info(f"Data generator: yielded {samples_yielded} samples, skipped {samples_skipped}")
+                pc_np = np.zeros((num_points_target, 3), dtype=np.float32)
+                full_pc_path = item_data.get('point_cloud_path')
+                if use_pc and full_pc_path and os.path.exists(full_pc_path):
+                    pc_np = np.load(full_pc_path).astype(np.float32)
                 
                 yield {
                     "rgb_input": rgb_np,
@@ -331,7 +223,7 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
 
             # Create the dataset from the pure Python generator
             dataset = tf.data.Dataset.from_generator(
-                lambda: data_generator(metadata_subset, data_cfg, paths_cfg),
+                lambda: data_generator(metadata_subset, data_cfg),
                 output_signature=output_signature
             )
 
