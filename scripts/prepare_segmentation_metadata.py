@@ -240,16 +240,11 @@ def create_segmentation_metadata(source_rgbd_base_dir_path: str,
                     missing_point_cloud_count +=1 
 
                 try:
-                    rgb_rel_path = str(img_path.relative_to(source_dir))
-                    mask_rel_path = str(Path(found_mask_path_str).relative_to(source_dir)) if found_mask_path_str else None
-                    depth_rel_path = str(Path(found_depth_path_str).relative_to(source_dir)) if found_depth_path_str else None
-                    pc_rel_path = str(Path(instance_point_cloud_npy_path_str).relative_to(output_meta_dir)) if instance_point_cloud_npy_path_str else None
-                    
                     entry = {
-                        "image_path": rgb_rel_path,
-                        "mask_path": mask_rel_path,
-                        "depth_map_path": depth_rel_path,
-                        "point_cloud_path": pc_rel_path,
+                        "image_path": str(img_path.resolve()),
+                        "mask_path": found_mask_path_str,
+                        "depth_map_path": found_depth_path_str,
+                        "point_cloud_path": instance_point_cloud_npy_path_str,
                         "class_name": class_name,
                         "instance_name": instance_name
                     }
