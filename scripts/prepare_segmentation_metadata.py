@@ -246,9 +246,9 @@ def create_segmentation_metadata(source_rgbd_base_dir_path: str,
                 try:
                     entry = {
                         "image_path": str(img_path.resolve()),
-                        "mask_path": found_mask_path_str,
-                        "depth_map_path": found_depth_path_str,
-                        "point_cloud_path": instance_point_cloud_npy_path_str,
+                        "mask_path": str(Path(found_mask_path_str).resolve()) if found_mask_path_str else None,
+                        "depth_map_path": str(Path(found_depth_path_str).resolve()) if found_depth_path_str else None,
+                        "point_cloud_path": str(Path(instance_point_cloud_npy_path_str).resolve()) if instance_point_cloud_npy_path_str else None,
                         "class_name": class_name,
                         "instance_name": instance_name
                     }
