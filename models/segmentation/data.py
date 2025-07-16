@@ -3,11 +3,11 @@ import yaml
 import tensorflow as tf
 import numpy as np
 import logging
-from typing import Tuple, Dict, Optional, List, Any, Callable
+from typing import Tuple, Dict, Optional, List, Any
 from sklearn.model_selection import train_test_split
 import pathlib
 import json
-from tensorflow.keras import layers 
+from PIL import Image
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -46,58 +46,19 @@ def _get_segmentation_preprocess_fn(architecture: Optional[str]):
     _SEG_PREPROCESS_FN_CACHE[arch_key] = preprocess_input_fn
     return preprocess_input_fn
 
-class SegmentationAugmentation(tf.keras.Model):
-    def __init__(self, aug_config, **kwargs):
-        super().__init__(**kwargs)
-        self.aug_config = aug_config
-        
-        self.geometric_layers = []
-        if self.aug_config.get("horizontal_flip", False):
-            self.geometric_layers.append(layers.RandomFlip("horizontal"))
-        if self.aug_config.get("rotation_range", 0) > 0:
-            self.geometric_layers.append(layers.RandomRotation(self.aug_config["rotation_range"] / 360.0))
-        if self.aug_config.get("zoom_range", 0) > 0:
-            zoom = self.aug_config["zoom_range"]
-            self.geometric_layers.append(layers.RandomZoom(height_factor=(-zoom, zoom)))
-
-        self.color_layers = []
-        if self.aug_config.get("brightness_range", [1.0, 1.0]) != [1.0, 1.0]:
-            factor = max(abs(1.0 - self.aug_config["brightness_range"][0]), abs(self.aug_config["brightness_range"][1] - 1.0))
-            self.color_layers.append(layers.RandomBrightness(factor=factor))
-        if self.aug_config.get("contrast_factor", 0) > 0:
-            self.color_layers.append(layers.RandomContrast(factor=self.aug_config["contrast_factor"]))
-
-    def call(self, inputs):
-        inputs_dict, mask = inputs
-        
-        image_and_mask = layers.concatenate([inputs_dict['rgb_input'], inputs_dict['depth_input'], mask], axis=-1)
-        
-        for layer in self.geometric_layers:
-            image_and_mask = layer(image_and_mask)
-
-        augmented_rgb = image_and_mask[..., :3]
-        augmented_depth = image_and_mask[..., 3:6]
-        augmented_mask = image_and_mask[..., 6:]
-        
-        for layer in self.color_layers:
-            augmented_rgb = layer(augmented_rgb)
-        
-        augmented_inputs = {
-            'rgb_input': augmented_rgb,
-            'depth_input': augmented_depth,
-            'pc_input': inputs_dict['pc_input']
-        }
-        return augmented_inputs, augmented_mask
-
-def data_generator(metadata_list: List[Dict], data_cfg: Dict):
+def data_generator(metadata_list: List[Dict], config: Dict, is_training: bool):
     """
-    A pure Python generator. It loads everything using the absolute paths
-    from the metadata and yields NumPy arrays.
+    A pure Python generator that does ALL preprocessing and yields final NumPy arrays.
     """
-    from PIL import Image
-
-    use_depth = data_cfg.get('use_depth_map', False)
-    use_pc = data_cfg.get('use_point_cloud', False)
+    data_cfg = config['data']
+    model_cfg = config.get('model', {})
+    aug_cfg = data_cfg.get('augmentation', {})
+    target_size = tuple(data_cfg.get('image_size', (256, 256)))
+    
+    do_flip = is_training and aug_cfg.get('enabled', False) and aug_cfg.get("horizontal_flip", False)
+    
+    preprocess_fn = _get_segmentation_preprocess_fn(model_cfg.get('backbone'))
+    
     pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
     num_points_target = pc_prep_cfg.get('num_points', 4096)
 
@@ -112,50 +73,52 @@ def data_generator(metadata_list: List[Dict], data_cfg: Dict):
                         full_mask_path and os.path.exists(full_mask_path)):
                     continue
 
-                with open(full_rgb_path, 'rb') as f:
-                    rgb_img = Image.open(f).convert('RGB')
-                    rgb_np = np.array(rgb_img, dtype=np.float32)
-
-                with open(full_mask_path, 'rb') as f:
-                    mask_img = Image.open(f).convert('L')
-                    mask_np = np.array(mask_img, dtype=np.float32)
-                    mask_np = np.expand_dims(mask_np, axis=-1)
-
-                depth_np = np.zeros_like(mask_np, dtype=np.float32)
+                rgb_np = np.array(Image.open(full_rgb_path).convert('RGB').resize(target_size), dtype=np.float32)
+                mask_np = np.array(Image.open(full_mask_path).convert('L').resize(target_size, Image.NEAREST), dtype=np.float32)
+                
+                depth_np = np.zeros(target_size, dtype=np.float32)
                 full_depth_path = item_data.get('depth_map_path')
-                if use_depth and full_depth_path and os.path.exists(full_depth_path):
-                    with open(full_depth_path, 'rb') as f:
-                        depth_img = Image.open(f).convert('L')
-                        depth_np = np.array(depth_img, dtype=np.float32)
-                        depth_np = np.expand_dims(depth_np, axis=-1)
+                if full_depth_path and os.path.exists(full_depth_path):
+                    depth_np = np.array(Image.open(full_depth_path).convert('L').resize(target_size), dtype=np.float32)
                 
                 pc_np = np.zeros((num_points_target, 3), dtype=np.float32)
                 full_pc_path = item_data.get('point_cloud_path')
-                if use_pc and full_pc_path and os.path.exists(full_pc_path):
-                    pc_np = np.load(full_pc_path).astype(np.float32)
+                if full_pc_path and os.path.exists(full_pc_path):
+                    pc_np = np.load(full_pc_path)
+
+                if do_flip and np.random.rand() > 0.5:
+                    rgb_np = np.fliplr(rgb_np)
+                    depth_np = np.fliplr(depth_np)
+                    mask_np = np.fliplr(mask_np)
+
+                depth_3_channel_np = np.stack([depth_np, depth_np, depth_np], axis=-1)
                 
-                yield {
-                    "rgb_input": rgb_np,
-                    "depth_input": depth_np,
-                    "pc_input": pc_np,
-                    "mask": mask_np
-                }
+                if preprocess_fn:
+                    rgb_np = preprocess_fn(rgb_np)
+                    depth_3_channel_np = preprocess_fn(depth_3_channel_np)
+                
+                yield (
+                    {
+                        "rgb_input": rgb_np,
+                        "depth_input": depth_3_channel_np,
+                        "pc_input": pc_np
+                    },
+                    mask_np
+                )
+
             except Exception as e:
-                logger.warning(f"Skipping sample {item_data.get('image_path')} due to generator error: {e}")
+                logger.warning(f"Generator skipping sample {item_data.get('image_path')}: {e}")
                 continue
 
 def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, int, int, int]:
     try:
         data_cfg = config['data']
         paths_cfg = config['paths']
-        model_cfg = config['model'] 
-        aug_cfg = data_cfg.get('augmentation', {})
-
-        target_size = tuple(data_cfg.get('image_size', (256, 256))) 
         batch_size = data_cfg['batch_size']
         num_classes = data_cfg['num_classes']
         split_ratios = data_cfg['split_ratios']
         random_seed = data_cfg.get('random_seed', 42)
+        target_size = tuple(data_cfg.get('image_size', (256, 256)))
 
         project_root = _get_project_root()
         metadata_path = project_root / paths_cfg['metadata_dir'] / paths_cfg['metadata_filename']
@@ -172,9 +135,6 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         num_test_samples = len(test_meta)
         logger.info(f"Dataset split: Train {num_train_samples}, Val {num_val_samples}, Test {num_test_samples}")
 
-        augmentation_pipeline = SegmentationAugmentation(aug_cfg)
-        preprocess_fn = _get_segmentation_preprocess_fn(model_cfg.get('backbone'))
-        
         pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
         num_points_target = pc_prep_cfg.get('num_points', 4096)
 
@@ -182,44 +142,23 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
             if not metadata_subset:
                 return None
 
-            output_signature = {
-                "rgb_input": tf.TensorSpec(shape=(None, None, 3), dtype=tf.float32),
-                "depth_input": tf.TensorSpec(shape=(None, None, 1), dtype=tf.float32),
-                "pc_input": tf.TensorSpec(shape=(num_points_target, 3), dtype=tf.float32),
-                "mask": tf.TensorSpec(shape=(None, None, 1), dtype=tf.float32),
-            }
-
-            dataset = tf.data.Dataset.from_generator(
-                lambda: data_generator(metadata_subset, data_cfg),
-                output_signature=output_signature
+            output_signature = (
+                {
+                    "rgb_input": tf.TensorSpec(shape=(*target_size, 3), dtype=tf.float32),
+                    "depth_input": tf.TensorSpec(shape=(*target_size, 3), dtype=tf.float32),
+                    "pc_input": tf.TensorSpec(shape=(num_points_target, 3), dtype=tf.float32)
+                },
+                tf.TensorSpec(shape=target_size, dtype=tf.float32)
             )
 
-            def tf_map_fn(sample):
-                rgb = tf.image.resize(sample['rgb_input'], target_size)
-                depth = tf.image.resize(sample['depth_input'], target_size)
-                mask = tf.image.resize(sample['mask'], target_size, method='nearest')
-
-                depth_3_channel = tf.concat([depth, depth, depth], axis=-1)
-                
-                inputs = {
-                    "rgb_input": rgb,
-                    "depth_input": depth_3_channel,
-                    "pc_input": sample['pc_input']
-                }
-
-                if is_training and aug_cfg.get('enabled', False):
-                    inputs, mask = augmentation_pipeline((inputs, mask))
-                
-                if preprocess_fn:
-                    inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
-                    inputs['depth_input'] = preprocess_fn(inputs['depth_input'])
-
-                return inputs, tf.squeeze(mask, axis=-1)
+            dataset = tf.data.Dataset.from_generator(
+                lambda: data_generator(metadata_subset, config, is_training),
+                output_signature=output_signature
+            )
 
             if is_training:
                 dataset = dataset.shuffle(buffer_size=min(len(metadata_subset), 1024))
             
-            dataset = dataset.map(tf_map_fn, num_parallel_calls=tf.data.AUTOTUNE)
             dataset = dataset.batch(batch_size)
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
             
