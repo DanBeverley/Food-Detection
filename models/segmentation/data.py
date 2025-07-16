@@ -1,5 +1,4 @@
 import os
-import yaml 
 import tensorflow as tf
 import numpy as np
 import logging
@@ -7,7 +6,7 @@ from typing import Tuple, Dict, Optional, List, Any
 from sklearn.model_selection import train_test_split
 import pathlib
 import json
-from PIL import Image
+from tensorflow.keras import layers
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -46,127 +45,161 @@ def _get_segmentation_preprocess_fn(architecture: Optional[str]):
     _SEG_PREPROCESS_FN_CACHE[arch_key] = preprocess_input_fn
     return preprocess_input_fn
 
-def data_generator(metadata_list: List[Dict], config: Dict, is_training: bool):
-    """
-    A pure Python generator that does ALL preprocessing and yields final NumPy arrays.
-    """
-    data_cfg = config['data']
-    model_cfg = config.get('model', {})
-    aug_cfg = data_cfg.get('augmentation', {})
-    target_size = tuple(data_cfg.get('image_size', (256, 256)))
+class SegmentationAugmentation(tf.keras.Model):
+    def __init__(self, aug_config, **kwargs):
+        super().__init__(**kwargs)
+        self.aug_config = aug_config
+        
+        self.geometric_layers = []
+        if self.aug_config.get("horizontal_flip", False):
+            self.geometric_layers.append(layers.RandomFlip("horizontal"))
+        if self.aug_config.get("rotation_range", 0) > 0:
+            self.geometric_layers.append(layers.RandomRotation(self.aug_config["rotation_range"] / 360.0))
+        if self.aug_config.get("zoom_range", 0) > 0:
+            zoom = self.aug_config["zoom_range"]
+            self.geometric_layers.append(layers.RandomZoom(height_factor=(-zoom, zoom)))
+
+        self.color_layers = []
+        if self.aug_config.get("brightness_range", [1.0, 1.0]) != [1.0, 1.0]:
+            factor = max(abs(1.0 - self.aug_config["brightness_range"][0]), abs(self.aug_config["brightness_range"][1] - 1.0))
+            self.color_layers.append(layers.RandomBrightness(factor=factor))
+        if self.aug_config.get("contrast_factor", 0) > 0:
+            self.color_layers.append(layers.RandomContrast(factor=self.aug_config["contrast_factor"]))
+
+    def call(self, inputs):
+        inputs_dict, mask = inputs
+        
+        image_and_mask = layers.concatenate([inputs_dict['rgb_input'], inputs_dict['depth_input'], mask], axis=-1)
+        
+        for layer in self.geometric_layers:
+            image_and_mask = layer(image_and_mask)
+
+        augmented_rgb = image_and_mask[..., :3]
+        augmented_depth = image_and_mask[..., 3:6]
+        augmented_mask = image_and_mask[..., 6:]
+        
+        for layer in self.color_layers:
+            augmented_rgb = layer(augmented_rgb)
+        
+        augmented_inputs = {
+            'rgb_input': augmented_rgb,
+            'depth_input': augmented_depth,
+            'pc_input': inputs_dict['pc_input']
+        }
+        return augmented_inputs, augmented_mask
+
+def parse_tfrecord_fn(example_proto, target_size, num_points):
+    """Parses a single tf.train.Example from a TFRecord file into tensors."""
+    feature_description = {
+        'rgb_image_raw': tf.io.FixedLenFeature([], tf.string),
+        'mask_image_raw': tf.io.FixedLenFeature([], tf.string),
+        'depth_image_raw': tf.io.FixedLenFeature([], tf.string),
+        'point_cloud_raw': tf.io.FixedLenFeature([], tf.string),
+    }
+    example = tf.io.parse_single_example(example_proto, feature_description)
     
-    do_flip = is_training and aug_cfg.get('enabled', False) and aug_cfg.get("horizontal_flip", False)
+    rgb = tf.image.decode_png(example['rgb_image_raw'], channels=3)
+    rgb.set_shape([*target_size, 3])
     
-    preprocess_fn = _get_segmentation_preprocess_fn(model_cfg.get('backbone'))
+    mask = tf.image.decode_png(example['mask_image_raw'], channels=1)
+    mask.set_shape([*target_size, 1])
     
-    pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
-    num_points_target = pc_prep_cfg.get('num_points', 4096)
-
-    while True:
-        np.random.shuffle(metadata_list)
-        for item_data in metadata_list:
-            try:
-                full_rgb_path = item_data.get('image_path')
-                full_mask_path = item_data.get('mask_path')
-                
-                if not (full_rgb_path and os.path.exists(full_rgb_path) and 
-                        full_mask_path and os.path.exists(full_mask_path)):
-                    continue
-
-                rgb_np = np.array(Image.open(full_rgb_path).convert('RGB').resize(target_size), dtype=np.float32)
-                mask_np = np.array(Image.open(full_mask_path).convert('L').resize(target_size, Image.NEAREST), dtype=np.float32)
-                
-                depth_np = np.zeros(target_size, dtype=np.float32)
-                full_depth_path = item_data.get('depth_map_path')
-                if full_depth_path and os.path.exists(full_depth_path):
-                    depth_np = np.array(Image.open(full_depth_path).convert('L').resize(target_size), dtype=np.float32)
-                
-                pc_np = np.zeros((num_points_target, 3), dtype=np.float32)
-                full_pc_path = item_data.get('point_cloud_path')
-                if full_pc_path and os.path.exists(full_pc_path):
-                    pc_np = np.load(full_pc_path)
-
-                if do_flip and np.random.rand() > 0.5:
-                    rgb_np = np.fliplr(rgb_np)
-                    depth_np = np.fliplr(depth_np)
-                    mask_np = np.fliplr(mask_np)
-
-                depth_3_channel_np = np.stack([depth_np, depth_np, depth_np], axis=-1)
-                
-                if preprocess_fn:
-                    rgb_np = preprocess_fn(rgb_np)
-                    depth_3_channel_np = preprocess_fn(depth_3_channel_np)
-                
-                yield (
-                    {
-                        "rgb_input": rgb_np,
-                        "depth_input": depth_3_channel_np,
-                        "pc_input": pc_np
-                    },
-                    mask_np
-                )
-
-            except Exception as e:
-                logger.warning(f"Generator skipping sample {item_data.get('image_path')}: {e}")
-                continue
+    def decode_depth():
+        d = tf.image.decode_png(example['depth_image_raw'], channels=1)
+        d.set_shape([*target_size, 1])
+        return d
+    
+    depth = tf.cond(
+        tf.strings.length(example['depth_image_raw']) > 0, 
+        decode_depth, 
+        lambda: tf.zeros([*target_size, 1], dtype=tf.uint8)
+    )
+    
+    pc = tf.io.decode_raw(example['point_cloud_raw'], tf.float32)
+    pc = tf.reshape(pc, [num_points, 3])
+    pc.set_shape([num_points, 3])
+    
+    return {
+        "rgb_input": tf.cast(rgb, tf.float32),
+        "depth_input": tf.cast(depth, tf.float32),
+        "pc_input": pc,
+        "mask": tf.cast(mask, tf.float32)
+    }
 
 def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, int, int, int]:
     try:
         data_cfg = config['data']
         paths_cfg = config['paths']
+        model_cfg = config['model']
+        aug_cfg = data_cfg.get('augmentation', {})
+        
+        target_size = tuple(data_cfg.get('image_size', (256, 256)))
         batch_size = data_cfg['batch_size']
         num_classes = data_cfg['num_classes']
-        split_ratios = data_cfg['split_ratios']
-        random_seed = data_cfg.get('random_seed', 42)
-        target_size = tuple(data_cfg.get('image_size', (256, 256)))
-
+        
         project_root = _get_project_root()
+        tfrecord_dir = project_root / paths_cfg['metadata_dir'] / "tfrecords"
         metadata_path = project_root / paths_cfg['metadata_dir'] / paths_cfg['metadata_filename']
         
+        # Load metadata to get sample counts
         with open(metadata_path, 'r') as f:
             all_metadata = json.load(f)
-
-        train_meta, temp_meta = train_test_split(all_metadata, test_size=(1-split_ratios['train']), random_state=random_seed)
-        val_prop_in_remainder = split_ratios['val'] / (split_ratios['val'] + split_ratios['test'])
-        val_meta, test_meta = train_test_split(temp_meta, test_size=(1-val_prop_in_remainder), random_state=random_seed)
-
+        
+        valid_entries = [e for e in all_metadata if e.get('image_path') and e.get('mask_path')]
+        train_meta, temp_meta = train_test_split(valid_entries, test_size=0.3, random_state=42)
+        val_meta, test_meta = train_test_split(temp_meta, test_size=0.5, random_state=42)
+        
         num_train_samples = len(train_meta)
         num_val_samples = len(val_meta)
         num_test_samples = len(test_meta)
-        logger.info(f"Dataset split: Train {num_train_samples}, Val {num_val_samples}, Test {num_test_samples}")
-
+        
+        augmentation_pipeline = SegmentationAugmentation(aug_cfg)
+        preprocess_fn = _get_segmentation_preprocess_fn(model_cfg.get('backbone'))
+        
         pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
         num_points_target = pc_prep_cfg.get('num_points', 4096)
 
-        def create_dataset(metadata_subset, is_training):
-            if not metadata_subset:
+        def create_dataset(tfrecord_filename, is_training):
+            filepath = str(tfrecord_dir / tfrecord_filename)
+            if not os.path.exists(filepath):
+                logger.error(f"TFRecord file not found: {filepath}")
                 return None
-
-            output_signature = (
-                {
-                    "rgb_input": tf.TensorSpec(shape=(*target_size, 3), dtype=tf.float32),
-                    "depth_input": tf.TensorSpec(shape=(*target_size, 3), dtype=tf.float32),
-                    "pc_input": tf.TensorSpec(shape=(num_points_target, 3), dtype=tf.float32)
-                },
-                tf.TensorSpec(shape=target_size, dtype=tf.float32)
-            )
-
-            dataset = tf.data.Dataset.from_generator(
-                lambda: data_generator(metadata_subset, config, is_training),
-                output_signature=output_signature
-            )
-
-            if is_training:
-                dataset = dataset.shuffle(buffer_size=min(len(metadata_subset), 1024))
             
+            dataset = tf.data.TFRecordDataset(filepath, num_parallel_reads=tf.data.AUTOTUNE)
+            
+            if is_training:
+                dataset = dataset.shuffle(buffer_size=2048)
+            
+            dataset = dataset.map(
+                lambda x: parse_tfrecord_fn(x, target_size, num_points_target),
+                num_parallel_calls=tf.data.AUTOTUNE
+            )
+            
+            def augment_and_finalize(sample):
+                inputs = {k: v for k, v in sample.items() if k != 'mask'}
+                mask = sample['mask']
+                
+                depth_3_channel = tf.concat([inputs['depth_input'], inputs['depth_input'], inputs['depth_input']], axis=-1)
+                inputs['depth_input'] = depth_3_channel
+                
+                if is_training and aug_cfg.get('enabled', False):
+                    inputs, mask = augmentation_pipeline((inputs, mask))
+                
+                if preprocess_fn:
+                    inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
+                    inputs['depth_input'] = preprocess_fn(inputs['depth_input'])
+                
+                return inputs, tf.squeeze(mask, axis=-1)
+
+            dataset = dataset.map(augment_and_finalize, num_parallel_calls=tf.data.AUTOTUNE)
             dataset = dataset.batch(batch_size)
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
             
             return dataset
 
-        train_dataset = create_dataset(train_meta, is_training=True)
-        val_dataset = create_dataset(val_meta, is_training=False)
-        test_dataset = create_dataset(test_meta, is_training=False)
+        train_dataset = create_dataset("train.tfrecord", is_training=True)
+        val_dataset = create_dataset("validation.tfrecord", is_training=False)
+        test_dataset = create_dataset("test.tfrecord", is_training=False)
 
         return train_dataset, val_dataset, test_dataset, num_train_samples, num_val_samples, num_test_samples, num_classes
 
