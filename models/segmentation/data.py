@@ -70,19 +70,15 @@ class SegmentationAugmentation(tf.keras.Model):
     def call(self, inputs):
         inputs_dict, mask = inputs
         
-        # Concatenate for geometric transformations
         image_and_mask = layers.concatenate([inputs_dict['rgb_input'], inputs_dict['depth_input'], mask], axis=-1)
         
-        # Apply geometric layers
         for layer in self.geometric_layers:
             image_and_mask = layer(image_and_mask)
 
-        # Split back
         augmented_rgb = image_and_mask[..., :3]
         augmented_depth = image_and_mask[..., 3:6]
         augmented_mask = image_and_mask[..., 6:]
         
-        # Apply color layers to RGB only
         for layer in self.color_layers:
             augmented_rgb = layer(augmented_rgb)
         
@@ -93,60 +89,45 @@ class SegmentationAugmentation(tf.keras.Model):
         }
         return augmented_inputs, augmented_mask
 
-def data_generator(metadata_list: List[Dict], data_cfg: Dict):
-    """
-    A pure Python generator that loads data using the absolute paths
-    provided in the metadata list.
-    """
-    use_depth = data_cfg.get('use_depth_map', False)
-    use_pc = data_cfg.get('use_point_cloud', False)
-    pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
-    num_points_target = pc_prep_cfg.get('num_points', 4096)
+def parse_tfrecord_fn(example_proto, target_size, num_points):
+    """Parses a single tf.train.Example into tensors."""
+    
+    feature_description = {
+        'rgb_image': tf.io.FixedLenFeature([], tf.string),
+        'mask_image': tf.io.FixedLenFeature([], tf.string),
+        'depth_image': tf.io.FixedLenFeature([], tf.string),
+        'point_cloud': tf.io.FixedLenFeature([], tf.string),
+    }
+    
+    example = tf.io.parse_single_example(example_proto, feature_description)
+    
+    rgb = tf.image.decode_image(example['rgb_image'], channels=3, expand_animations=False)
+    rgb = tf.image.resize(rgb, target_size)
+    rgb.set_shape([*target_size, 3])
 
-    while True:
-        np.random.shuffle(metadata_list)
-        for item_data in metadata_list:
-            try:
-                full_rgb_path = item_data.get('image_path')
-                full_mask_path = item_data.get('mask_path')
-                
-                if not (full_rgb_path and os.path.exists(full_rgb_path) and 
-                        full_mask_path and os.path.exists(full_mask_path)):
-                    continue
+    mask = tf.image.decode_image(example['mask_image'], channels=1, expand_animations=False)
+    mask = tf.image.resize(mask, target_size, method='nearest')
+    mask.set_shape([*target_size, 1])
 
-                from PIL import Image
+    def decode_depth():
+        depth = tf.image.decode_image(example['depth_image'], channels=1)
+        depth = tf.image.resize(depth, target_size)
+        return tf.cast(depth, tf.float32)
+    
+    depth = tf.cond(tf.strings.length(example['depth_image']) > 0, 
+                   decode_depth, 
+                   lambda: tf.zeros([*target_size, 1], dtype=tf.float32))
+    
+    pc = tf.io.decode_raw(example['point_cloud'], tf.float32)
+    pc = tf.reshape(pc, [num_points, 3])
+    pc.set_shape([num_points, 3])
 
-                with open(full_rgb_path, 'rb') as f:
-                    rgb_img = Image.open(f).convert('RGB')
-                    rgb_np = np.array(rgb_img, dtype=np.float32)
-
-                with open(full_mask_path, 'rb') as f:
-                    mask_img = Image.open(f).convert('L')
-                    mask_np = np.array(mask_img, dtype=np.float32)
-                    mask_np = np.expand_dims(mask_np, axis=-1)
-
-                depth_np = np.zeros_like(mask_np, dtype=np.float32)
-                full_depth_path = item_data.get('depth_map_path')
-                if use_depth and full_depth_path and os.path.exists(full_depth_path):
-                    with open(full_depth_path, 'rb') as f:
-                        depth_img = Image.open(f).convert('L')
-                        depth_np = np.array(depth_img, dtype=np.float32)
-                        depth_np = np.expand_dims(depth_np, axis=-1)
-                
-                pc_np = np.zeros((num_points_target, 3), dtype=np.float32)
-                full_pc_path = item_data.get('point_cloud_path')
-                if use_pc and full_pc_path and os.path.exists(full_pc_path):
-                    pc_np = np.load(full_pc_path).astype(np.float32)
-                
-                yield {
-                    "rgb_input": rgb_np,
-                    "depth_input": depth_np,
-                    "pc_input": pc_np,
-                    "mask": mask_np
-                }
-            except Exception as e:
-                logger.warning(f"Skipping sample {item_data.get('image_path')} due to generator error: {e}")
-                continue
+    return {
+        "rgb_input": tf.cast(rgb, tf.float32),
+        "depth_input": tf.cast(depth, tf.float32),
+        "pc_input": pc,
+        "mask": tf.cast(mask, tf.float32)
+    }
 
 def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, int, int, int]:
     try:
@@ -159,113 +140,73 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         target_size = tuple(data_cfg.get('image_size', (256, 256))) 
         batch_size = data_cfg['batch_size']
         num_classes = data_cfg['num_classes']
-        split_ratios = data_cfg['split_ratios']
-        random_seed = data_cfg.get('random_seed', 42)
-
-        debug_settings = config.get('debug', {})
-        debug_mode = debug_settings.get('enabled', False) or training_cfg.get('debug_mode', False)
-        debug_max_samples = debug_settings.get('max_samples_per_split') or data_cfg.get('debug_max_samples')
 
         project_root = _get_project_root()
-        metadata_dir = project_root / paths_cfg['metadata_dir']
-        metadata_path = metadata_dir / paths_cfg['metadata_filename']
+        tfrecord_dir = project_root / paths_cfg['metadata_dir'] / "tfrecords"
 
-        if not metadata_path.exists():
-            raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
-
-        with open(metadata_path, 'r') as f:
-            all_metadata = json.load(f)
-
-        if debug_mode and debug_max_samples:
-            all_metadata = all_metadata[:debug_max_samples]
-            logger.info(f"Debug mode: Limited dataset to {len(all_metadata)} samples")
-
-        # Split data
-        train_meta, temp_meta = train_test_split(
-            all_metadata, 
-            test_size=(1 - split_ratios['train']), 
-            random_state=random_seed,
-            shuffle=True
-        )
-        
-        val_size = split_ratios['val'] / (split_ratios['val'] + split_ratios['test'])
-        val_meta, test_meta = train_test_split(
-            temp_meta,
-            test_size=(1 - val_size),
-            random_state=random_seed,
-            shuffle=True
-        )
-
-        num_train_samples = len(train_meta)
-        num_val_samples = len(val_meta)
-        num_test_samples = len(test_meta)
-
-        logger.info(f"Dataset split: Train {num_train_samples}, Val {num_val_samples}, Test {num_test_samples}")
-
-        # Create augmentation pipeline and preprocessing
         augmentation_pipeline = SegmentationAugmentation(aug_cfg)
         preprocess_fn = _get_segmentation_preprocess_fn(model_cfg.get('backbone'))
         
         pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
         num_points_target = pc_prep_cfg.get('num_points', 4096)
 
-        def create_dataset(metadata_subset, is_training):
-            if not metadata_subset:
+        def create_dataset(tfrecord_filename, is_training):
+            filepath = str(tfrecord_dir / tfrecord_filename)
+            if not os.path.exists(filepath):
+                logger.error(f"TFRecord file not found: {filepath}")
                 return None
-
-            # Define the shapes and types of the NumPy arrays yielded by the generator
-            output_signature = {
-                "rgb_input": tf.TensorSpec(shape=(None, None, 3), dtype=tf.float32),
-                "depth_input": tf.TensorSpec(shape=(None, None, 1), dtype=tf.float32),
-                "pc_input": tf.TensorSpec(shape=(num_points_target, 3), dtype=tf.float32),
-                "mask": tf.TensorSpec(shape=(None, None, 1), dtype=tf.float32),
-            }
-
-            # Create the dataset from the pure Python generator
-            dataset = tf.data.Dataset.from_generator(
-                lambda: data_generator(metadata_subset, data_cfg),
-                output_signature=output_signature
+            
+            dataset = tf.data.TFRecordDataset(filepath, num_parallel_reads=tf.data.AUTOTUNE)
+            
+            if is_training:
+                dataset = dataset.shuffle(buffer_size=2048)
+            
+            dataset = dataset.map(
+                lambda x: parse_tfrecord_fn(x, target_size, num_points_target),
+                num_parallel_calls=tf.data.AUTOTUNE
             )
-
-            # This map function contains ONLY pure TensorFlow operations
-            def tf_map_fn(sample):
-                rgb = tf.image.resize(sample['rgb_input'], target_size)
-                depth = tf.image.resize(sample['depth_input'], target_size)
-                mask = tf.image.resize(sample['mask'], target_size, method='nearest')
-
-                # Convert depth to 3-channel for the model backbone
-                depth_3_channel = tf.concat([depth, depth, depth], axis=-1)
+            
+            def augment_and_finalize(sample):
+                inputs = {k: v for k, v in sample.items() if k != 'mask'}
+                mask = sample['mask']
                 
-                inputs = {
-                    "rgb_input": rgb,
-                    "depth_input": depth_3_channel,
-                    "pc_input": sample['pc_input']
-                }
-
-                # Apply augmentations if this is the training set
+                depth_3_channel = tf.concat([inputs['depth_input'], inputs['depth_input'], inputs['depth_input']], axis=-1)
+                inputs['depth_input'] = depth_3_channel
+                
                 if is_training and aug_cfg.get('enabled', False):
                     inputs, mask = augmentation_pipeline((inputs, mask))
                 
-                # Apply backbone-specific preprocessing
                 if preprocess_fn:
                     inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
                     inputs['depth_input'] = preprocess_fn(inputs['depth_input'])
 
-                # Final squeeze of the mask for the loss function
-                return inputs, tf.squeeze(mask, axis=-1)
+                final_mask = tf.squeeze(mask, axis=-1)
+                return inputs, final_mask
 
-            if is_training:
-                dataset = dataset.shuffle(buffer_size=min(len(metadata_subset), 1024))
-            
-            dataset = dataset.map(tf_map_fn, num_parallel_calls=tf.data.AUTOTUNE)
+            dataset = dataset.map(augment_and_finalize, num_parallel_calls=tf.data.AUTOTUNE)
             dataset = dataset.batch(batch_size)
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
             
             return dataset
 
-        train_dataset = create_dataset(train_meta, is_training=True)
-        val_dataset = create_dataset(val_meta, is_training=False)
-        test_dataset = create_dataset(test_meta, is_training=False)
+        train_dataset = create_dataset("train.tfrecord", is_training=True)
+        val_dataset = create_dataset("validation.tfrecord", is_training=False)
+        test_dataset = create_dataset("test.tfrecord", is_training=False)
+
+        metadata_path = project_root / paths_cfg['metadata_dir'] / paths_cfg['metadata_filename']
+        if metadata_path.exists():
+            with open(metadata_path, 'r') as f:
+                all_metadata = json.load(f)
+            
+            valid_entries = [entry for entry in all_metadata if entry.get('image_path') and entry.get('mask_path')]
+            train_meta, temp_meta = train_test_split(valid_entries, test_size=0.3, random_state=42)
+            val_meta, test_meta = train_test_split(temp_meta, test_size=0.5, random_state=42)
+            
+            num_train_samples = len(train_meta)
+            num_val_samples = len(val_meta)
+            num_test_samples = len(test_meta)
+        else:
+            num_train_samples = num_val_samples = num_test_samples = 0
 
         return train_dataset, val_dataset, test_dataset, num_train_samples, num_val_samples, num_test_samples, num_classes
 
