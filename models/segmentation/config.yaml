@@ -1,6 +1,6 @@
 data:
   image_size: [256, 256]  
-  batch_size: 64  
+  batch_size: 32
   split_ratios:
     train: 0.7
     val: 0.15
@@ -52,7 +52,7 @@ model:
 optimizer:
   name: "AdamW"  
   
-  stage1_learning_rate: 0.001   
+  stage1_learning_rate: 0.0001   
   stage2_learning_rate: 0.00001
   weight_decay: 0.01 
   clipnorm: 1.0  
