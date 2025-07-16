@@ -76,34 +76,7 @@ def _load_and_process_point_cloud(pc_path_str: str, num_points_target: int, norm
         logging.error(f"Error processing point cloud {pc_path_str}: {e}")
         return np.zeros((num_points_target, 3), dtype=np.float32)
 
-def _bytes_feature(value):
-    """Returns a bytes_list from a string / byte."""
-    if isinstance(value, type(tf.constant(0))):
-        value = value.numpy()
-    return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
-
-def create_tfrecord_sample(rgb_path, mask_path, depth_path, pc_path, num_points):
-    """Creates a tf.train.Example message from a single sample's data."""
-    
-    rgb_bytes = tf.io.read_file(rgb_path)
-    mask_bytes = tf.io.read_file(mask_path)
-    
-    depth_bytes = tf.constant(b'')
-    if depth_path and os.path.exists(depth_path):
-        depth_bytes = tf.io.read_file(depth_path)
-        
-    pc_data = np.zeros((num_points, 3), dtype=np.float32)
-    if pc_path and os.path.exists(pc_path):
-        pc_data = np.load(pc_path)
-
-    feature = {
-        'rgb_image': _bytes_feature(rgb_bytes),
-        'mask_image': _bytes_feature(mask_bytes),
-        'depth_image': _bytes_feature(depth_bytes),
-        'point_cloud': _bytes_feature(pc_data.tobytes()),
-    }
-    
-    return tf.train.Example(features=tf.train.Features(feature=feature)) 
+ 
 
 def create_segmentation_metadata(source_rgbd_base_dir_path: str, 
                                  output_metadata_dir_path: str, 
@@ -301,33 +274,6 @@ def create_segmentation_metadata(source_rgbd_base_dir_path: str,
         if missing_point_cloud_count > 0: 
             logging.warning(f"Could not find matching point clouds for {missing_point_cloud_count} images (path set to null).")
 
-        # Create TFRecord files
-        output_tfrecord_dir = output_meta_dir / "tfrecords"
-        output_tfrecord_dir.mkdir(parents=True, exist_ok=True)
-        
-        valid_entries = [entry for entry in all_metadata_entries if entry['image_path'] and entry['mask_path']]
-        logging.info(f"Creating TFRecord files for {len(valid_entries)} valid entries")
-        
-        train_meta, temp_meta = train_test_split(valid_entries, test_size=0.3, random_state=42)
-        val_meta, test_meta = train_test_split(temp_meta, test_size=0.5, random_state=42)
-        
-        def write_tfrecords(filename, metadata_subset):
-            filepath = str(output_tfrecord_dir / filename)
-            with tf.io.TFRecordWriter(filepath) as writer:
-                for item in tqdm(metadata_subset, desc=f"Writing {filename}"):
-                    tf_example = create_tfrecord_sample(
-                        item['image_path'],
-                        item['mask_path'], 
-                        item['depth_map_path'],
-                        item['point_cloud_path'],
-                        num_points_target
-                    )
-                    writer.write(tf_example.SerializeToString())
-            logging.info(f"Successfully wrote {len(metadata_subset)} records to {filepath}")
-
-        write_tfrecords("train.tfrecord", train_meta)
-        write_tfrecords("validation.tfrecord", val_meta)
-        write_tfrecords("test.tfrecord", test_meta)
 
     except IOError as e:
         logging.error(f"Failed to write metadata file: {e}")
