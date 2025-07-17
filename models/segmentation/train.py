@@ -227,74 +227,43 @@ def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_ba
         
 
 
-def build_fused_encoder_decoder_model(output_channels: int, image_size: tuple, model_config: dict, data_config: dict):
-    """Builds a multi-modal encoder-decoder model with parallel backbones and feature fusion.
-    Args:
-        output_channels: Number of output channels (e.g., 1 for binary segmentation).
-        image_size: Tuple (height, width) for the input image.
-        model_config: Dictionary containing model-specific configurations (e.g., backbone, dropout).
-        data_config: Dictionary containing data-specific configurations (for input modalities).
-    Returns:
-        A Keras encoder-decoder model with fused features.
-    """
+def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_config: dict, data_config: dict):
+    """Builds a multi-modal U-Net style model with skip connections."""
+    
     # Input Layers
     rgb_input = layers.Input(shape=[*image_size, 3], name='rgb_input')
     depth_input = layers.Input(shape=[*image_size, 3], name='depth_input')
-    
     num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud',{}).get('num_points', 4096)
     pc_input = layers.Input(shape=[num_points, 3], name='pc_input')
     
-    # This dictionary is for internal use to pass to the data pipeline
-    input_layers_dict = {
-        'rgb_input': rgb_input,
-        'depth_input': depth_input,
-        'pc_input': pc_input
-    }
+    input_layers_dict = {'rgb_input': rgb_input, 'depth_input': depth_input, 'pc_input': pc_input}
     logger.info("Created inputs for RGB, Depth, and Point Cloud.")
     
-
-
-    # Branch 1: RGB Backbone (Pre-trained) 
-    rgb_backbone_name = model_config.get('backbone', 'EfficientNetB0')
-    logger.info(f"Building RGB branch with pre-trained {rgb_backbone_name}...")
-    
-    def get_preprocess_fn(arch_name):
-        if arch_name.lower() == 'efficientnetb0':
-            from tensorflow.keras.applications.efficientnet import preprocess_input
-            return preprocess_input
-        elif arch_name.lower() == 'mobilenetv3small':
-            from tensorflow.keras.applications.mobilenet_v3 import preprocess_input
-            return preprocess_input
-        else:
-            return lambda x: (x / 127.5) - 1.0
-
-    rgb_preprocess_fn = get_preprocess_fn(rgb_backbone_name)
-    rgb_processed = rgb_preprocess_fn(rgb_input)
-    
-    rgb_base_model = EfficientNetB0(input_tensor=rgb_processed, include_top=False, weights='imagenet')
+    # RGB Encoder (Pre-trained EfficientNetB0)
+    rgb_base_model = EfficientNetB0(input_shape=[*image_size, 3], include_top=False, weights='imagenet')
     rgb_base_model.trainable = model_config.get('backbone_trainable', True)
+    rgb_skip_names = [
+        'block1a_project_bn',   # 128x128
+        'block2b_add',          # 64x64
+        'block3b_add',          # 32x32
+        'block5c_add',          # 16x16
+    ]
+    rgb_skip_outputs = [rgb_base_model.get_layer(name).output for name in rgb_skip_names]
+    rgb_bottleneck = rgb_base_model.get_layer('block6a_expand_activation').output  # 8x8
     
-    rgb_features = rgb_base_model.get_layer('block6a_expand_activation').output
-    rgb_features = layers.GlobalAveragePooling2D(name='rgb_gap')(rgb_features)
-    logger.info(f"RGB features extracted. Shape: {rgb_features.shape}")
-
-    # Branch 2: Depth Backbone 
-    depth_backbone_name = model_config.get('depth_backbone', 'MobileNetV3Small')
-    logger.info(f"Building Depth branch with {depth_backbone_name} (trained from scratch)...")
-    
-    depth_preprocess_fn = get_preprocess_fn(depth_backbone_name)
-    depth_processed = depth_preprocess_fn(depth_input)
-
-    depth_base_model = MobileNetV3Small(input_tensor=depth_processed, include_top=False, weights=None)
+    # Depth Encoder (Scratch MobileNetV3Small)
+    depth_base_model = MobileNetV3Small(input_shape=[*image_size, 3], include_top=False, weights=None)
     depth_base_model._name = "depth_backbone"
-    depth_base_model.trainable = True
-    
-    depth_features = depth_base_model.get_layer('activation_17').output
-    depth_features = layers.GlobalAveragePooling2D(name='depth_gap')(depth_features)
-    logger.info(f"Depth features extracted. Shape: {depth_features.shape}")
+    depth_skip_names = [
+        're_lu_2',      # 128x128
+        're_lu_4',      # 64x64  
+        're_lu_8',      # 32x32
+        're_lu_12',     # 16x16
+    ]
+    depth_skip_outputs = [depth_base_model.get_layer(name).output for name in depth_skip_names]
+    depth_bottleneck = depth_base_model.get_layer('activation_17').output  # 8x8
 
-    # Branch 3: Point Cloud Backbone (PointNet-style)
-    logger.info("Building Point Cloud branch (PointNet-style)...")
+    # Point Cloud Encoder (PointNet-style)
     def conv_bn(x, filters):
         x = layers.Conv1D(filters, kernel_size=1, padding="valid")(x)
         x = layers.BatchNormalization(momentum=0.9)(x)
@@ -303,67 +272,51 @@ def build_fused_encoder_decoder_model(output_channels: int, image_size: tuple, m
     pc_x = layers.LayerNormalization()(pc_input)
     pc_x = conv_bn(pc_x, 64)
     pc_x = conv_bn(pc_x, 128)
-    pc_x = conv_bn(pc_x, 256)
-    pc_features = layers.GlobalMaxPooling1D(name='pc_gmp')(pc_x)
-    logger.info(f"Point Cloud features extracted. Shape: {pc_features.shape}")
-    
-    # Fusion 
-    logger.info("Fusing features from all three branches...")
-    
-    rgb_features_norm = layers.BatchNormalization(name='rgb_feat_norm', momentum=0.9)(rgb_features)
-    depth_features_norm = layers.BatchNormalization(name='depth_feat_norm', momentum=0.9)(depth_features)
-    pc_features_norm = layers.BatchNormalization(name='pc_feat_norm', momentum=0.9)(pc_features)
+    pc_features = conv_bn(pc_x, 1024)
+    pc_features = layers.GlobalMaxPooling1D(name='pc_gmp')(pc_features)  # (batch, 1024)
 
-    fused_features = layers.Concatenate(name='initial_fusion')([
-        rgb_features_norm, 
-        depth_features_norm, 
-        pc_features_norm
-    ])
+    # Create models for each branch to apply them to inputs
+    rgb_model = tf.keras.Model(inputs=rgb_base_model.input, outputs=rgb_skip_outputs + [rgb_bottleneck])
+    depth_model = tf.keras.Model(inputs=depth_base_model.input, outputs=depth_skip_outputs + [depth_bottleneck])
     
-    # Decoder 
-    logger.info("Building decoder to reconstruct mask from fused features...")
+    # Apply models to actual inputs
+    *rgb_skips, rgb_bottle = rgb_model(rgb_input)
+    *depth_skips, depth_bottle = depth_model(depth_input)
 
-    # Start by creating a small spatial map from the 1D vector
-    x = layers.Dense(8 * 8 * 256, use_bias=False, name='decoder_start_dense')(fused_features)
-    x = layers.BatchNormalization(momentum=0.9)(x)
-    x = layers.ReLU()(x)
-    x = layers.Reshape((8, 8, 256))(x)
-
-    # Upsampling blocks to get back to full resolution
-    def upsample_block(x, filters, name):
-        x = layers.Conv2DTranspose(filters, 3, strides=2, padding='same', name=f"{name}_transpose")(x)
-        x = layers.BatchNormalization(name=f"{name}_bn", momentum=0.9)(x)
-        return layers.ReLU(name=f"{name}_relu")(x)
-
-    x = upsample_block(x, 128, name='decoder_block1') # 8x8 -> 16x16
-    x = upsample_block(x, 64, name='decoder_block2')  # 16x16 -> 32x32
-    x = upsample_block(x, 32, name='decoder_block3')  # 32x32 -> 64x64
-    x = upsample_block(x, 16, name='decoder_block4')  # 64x64 -> 128x128
-    x = upsample_block(x, 8, name='decoder_block5')   # 128x128 -> 256x256
+    # Bottleneck Fusion
+    # Resize PC features to match image bottleneck spatial dimensions (8x8)
+    pc_features_spatial = layers.Dense(8 * 8 * 256, activation='relu')(pc_features)
+    pc_features_spatial = layers.Reshape((8, 8, 256))(pc_features_spatial)
     
-    # Final output layer
+    fused_bottleneck = layers.Concatenate()([rgb_bottle, depth_bottle, pc_features_spatial])
+    fused_bottleneck = layers.Conv2D(512, 3, padding='same', activation='relu')(fused_bottleneck)
+    
+    # Decoder with Skip Connections
+    def upsample_block(x, skip_rgb, skip_depth, filters, name):
+        x = layers.UpSampling2D(2, interpolation='bilinear', name=f"{name}_upsample")(x)
+        # Concatenate with skip connections from BOTH encoders
+        x = layers.Concatenate(name=f"{name}_concat")([x, skip_rgb, skip_depth])
+        x = layers.Conv2D(filters, 3, padding='same', activation='relu', name=f"{name}_conv1")(x)
+        x = layers.Conv2D(filters, 3, padding='same', activation='relu', name=f"{name}_conv2")(x)
+        return x
+
+    # Decoder Path
+    x = upsample_block(fused_bottleneck, rgb_skips[3], depth_skips[3], 256, 'decoder_block1')  # 8x8 -> 16x16
+    x = upsample_block(x, rgb_skips[2], depth_skips[2], 128, 'decoder_block2')  # 16x16 -> 32x32
+    x = upsample_block(x, rgb_skips[1], depth_skips[1], 64, 'decoder_block3')   # 32x32 -> 64x64
+    x = upsample_block(x, rgb_skips[0], depth_skips[0], 32, 'decoder_block4')   # 64x64 -> 128x128
+    
+    # Final upsampling to original size
+    x = layers.UpSampling2D(2, interpolation='bilinear')(x)
+    x = layers.Conv2D(16, 3, padding='same', activation='relu')(x)
+
+    # Final Output
     output_activation = model_config.get('output_activation', 'sigmoid')
     outputs = layers.Conv2D(output_channels, 1, padding="same", activation=output_activation, name='final_output_conv')(x)
-    
-    # Cast to float32 for mixed precision stability
     outputs = layers.Activation('linear', dtype='float32')(outputs)
 
-    # Pass the dictionary of named Input tensors directly - canonical Keras approach
     model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
-    logger.info(f"Built fused encoder-decoder model with output shape: {model.output_shape}")
-
-    summary_file_path = "model_summary.txt" 
-    try:
-        with open(summary_file_path, 'w') as f:
-            model.summary(print_fn=lambda x: f.write(x + '\n'))
-        logger.info(f"Model summary saved to {summary_file_path}")
-    except Exception as e:
-        logger.error(f"Could not save model summary to {summary_file_path}: {e}")
-
-    if logger.getEffectiveLevel() <= logging.DEBUG:
-        model.summary(print_fn=logger.info)
-
-    logger.info(f"Fused encoder-decoder model built with final activation: {output_activation}.")
+    logger.info("Built U-Net style fused model with skip connections.")
     return model
 
 # Custom metrics for segmentation
@@ -442,12 +395,6 @@ def dice_loss(y_true, y_pred, smooth=1.0):
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
     
-    # Handle shape mismatch: model output [batch, H, W, 1] vs mask [batch, H, W]
-    if len(y_pred.shape) == 4 and y_pred.shape[-1] == 1:
-        y_pred = tf.squeeze(y_pred, axis=-1)
-    if len(y_true.shape) == 4 and y_true.shape[-1] == 1:
-        y_true = tf.squeeze(y_true, axis=-1)
-    
     y_true_f = tf.reshape(y_true, [-1])
     y_pred_f = tf.reshape(y_pred, [-1])
     intersection = tf.reduce_sum(y_true_f * y_pred_f)
@@ -457,15 +404,6 @@ def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
     """Focal loss for addressing class imbalance."""
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
-    
-    # Handle shape mismatch: model output [batch, H, W, 1] vs mask [batch, H, W]
-    if len(y_pred.shape) == 4 and y_pred.shape[-1] == 1:
-        y_pred = tf.squeeze(y_pred, axis=-1)
-    if len(y_true.shape) == 4 and y_true.shape[-1] == 1:
-        y_true = tf.squeeze(y_true, axis=-1)
-    
-    # Ensure both tensors have the same shape
-    y_true = tf.ensure_shape(y_true, y_pred.shape)
     
     # Clip predictions to prevent log(0)
     y_pred = tf.clip_by_value(y_pred, tf.keras.backend.epsilon(), 1.0 - tf.keras.backend.epsilon())
@@ -607,7 +545,7 @@ def main():
     logger.info("\n" + "="*60 + "\n=== STAGE 1: Pre-training Depth & Point Cloud Branches ===\n" + "="*60)
     
     with strategy.scope():
-        model = build_fused_encoder_decoder_model(
+        model = build_unet_style_fused_model(
             output_channels=num_classes, 
             image_size=tuple(data_cfg.get('image_size')), 
             model_config=config.get('model', {}), 
