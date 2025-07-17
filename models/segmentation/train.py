@@ -310,9 +310,9 @@ def build_fused_encoder_decoder_model(output_channels: int, image_size: tuple, m
     # Fusion 
     logger.info("Fusing features from all three branches...")
     
-    rgb_features_norm = layers.BatchNormalization(name='rgb_feat_norm')(rgb_features)
-    depth_features_norm = layers.BatchNormalization(name='depth_feat_norm')(depth_features)
-    pc_features_norm = layers.BatchNormalization(name='pc_feat_norm')(pc_features)
+    rgb_features_norm = layers.BatchNormalization(name='rgb_feat_norm', momentum=0.9)(rgb_features)
+    depth_features_norm = layers.BatchNormalization(name='depth_feat_norm', momentum=0.9)(depth_features)
+    pc_features_norm = layers.BatchNormalization(name='pc_feat_norm', momentum=0.9)(pc_features)
 
     fused_features = layers.Concatenate(name='initial_fusion')([
         rgb_features_norm, 
@@ -325,14 +325,14 @@ def build_fused_encoder_decoder_model(output_channels: int, image_size: tuple, m
 
     # Start by creating a small spatial map from the 1D vector
     x = layers.Dense(8 * 8 * 256, use_bias=False, name='decoder_start_dense')(fused_features)
-    x = layers.BatchNormalization()(x)
+    x = layers.BatchNormalization(momentum=0.9)(x)
     x = layers.ReLU()(x)
     x = layers.Reshape((8, 8, 256))(x)
 
     # Upsampling blocks to get back to full resolution
     def upsample_block(x, filters, name):
         x = layers.Conv2DTranspose(filters, 3, strides=2, padding='same', name=f"{name}_transpose")(x)
-        x = layers.BatchNormalization(name=f"{name}_bn")(x)
+        x = layers.BatchNormalization(name=f"{name}_bn", momentum=0.9)(x)
         return layers.ReLU(name=f"{name}_relu")(x)
 
     x = upsample_block(x, 128, name='decoder_block1') # 8x8 -> 16x16
@@ -624,7 +624,7 @@ def main():
 
         # Compile for Stage 1
         stage1_lr = optimizer_cfg.get('stage1_learning_rate', 1e-3)
-        optimizer_stage1 = tf.keras.optimizers.AdamW(learning_rate=stage1_lr)
+        optimizer_stage1 = tf.keras.optimizers.AdamW(learning_rate=stage1_lr, clipnorm=1.0)
         model.compile(optimizer=optimizer_stage1, loss=loss_function, metrics=metrics_list)
         logger.info(f"Model compiled for Stage 1 with LR: {stage1_lr}")
     
@@ -675,7 +675,7 @@ def main():
             
         # Compile with a very low learning rate
         stage2_lr = optimizer_cfg.get('stage2_learning_rate', 1e-5)
-        optimizer_stage2 = tf.keras.optimizers.AdamW(learning_rate=stage2_lr)
+        optimizer_stage2 = tf.keras.optimizers.AdamW(learning_rate=stage2_lr, clipnorm=1.0)
         model.compile(optimizer=optimizer_stage2, loss=loss_function, metrics=metrics_list)
         logger.info(f"Model re-compiled for Stage 2 with LR: {stage2_lr}")
 
