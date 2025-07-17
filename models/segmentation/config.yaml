@@ -7,7 +7,10 @@ data:
     test: 0.15
   num_classes: 1 # Number of segmentation classes (e.g., 1 for foreground + 1 for background, or N food classes + background)
   random_seed: 42 
-  debug_max_samples: null  
+  debug_max_samples: null
+  num_train_samples: 71160
+  num_val_samples: 15249
+  num_test_samples: 15249  
 
   use_depth_map: true
   depth_map_dir_name: "depth"
@@ -126,6 +129,7 @@ paths:
   log_dir: "logs/segmentation/"
   metadata_dir: "data/segmentation"
   metadata_filename: "metadata.json"
+  tfrecord_dir: "data/segmentation/tfrecords"
 
 # Export Configuration
 export:

@@ -137,24 +137,12 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         batch_size = data_cfg['batch_size']
         num_classes = data_cfg['num_classes']
         
-        project_root = _get_project_root()
-        tfrecord_dir = project_root / paths_cfg['metadata_dir'] / "tfrecords"
-        metadata_path = project_root / paths_cfg['metadata_dir'] / paths_cfg['metadata_filename']
+        tfrecord_dir = Path(paths_cfg.get('tfrecord_dir', paths_cfg['metadata_dir'] + "/tfrecords"))
         
-        # Load metadata to get sample counts
-        with open(metadata_path, 'r') as f:
-            all_metadata = json.load(f)
-        
-        valid_entries = [e for e in all_metadata if e.get('image_path') and e.get('mask_path')]
-        split_ratios = data_cfg['split_ratios']
-        random_seed = data_cfg.get('random_seed', 42)
-        train_meta, temp_meta = train_test_split(valid_entries, test_size=(1-split_ratios['train']), random_state=random_seed)
-        val_prop_in_remainder = split_ratios['val'] / (split_ratios['val'] + split_ratios['test'])
-        val_meta, test_meta = train_test_split(temp_meta, test_size=(1-val_prop_in_remainder), random_state=random_seed)
-        
-        num_train_samples = len(train_meta)
-        num_val_samples = len(val_meta)
-        num_test_samples = len(test_meta)
+        num_train_samples = data_cfg.get('num_train_samples', 0)
+        num_val_samples = data_cfg.get('num_val_samples', 0)
+        num_test_samples = data_cfg.get('num_test_samples', 0)
+        logger.info(f"Using pre-calculated dataset counts: Train {num_train_samples}, Val {num_val_samples}, Test {num_test_samples}")
         
         augmentation_pipeline = SegmentationAugmentation(aug_cfg)
         preprocess_fn = _get_segmentation_preprocess_fn(model_cfg.get('backbone'))
