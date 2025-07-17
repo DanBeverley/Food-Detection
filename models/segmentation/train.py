@@ -249,7 +249,7 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
         'block5c_add',          # 16x16
     ]
     rgb_skip_outputs = [rgb_base_model.get_layer(name).output for name in rgb_skip_names]
-    rgb_bottleneck = rgb_base_model.get_layer('block6a_expand_activation').output  # 8x8
+    rgb_bottleneck = rgb_base_model.get_layer('top_activation').output  # 8x8
     
     # Depth Encoder (Scratch MobileNetV3Small)
     depth_base_model = MobileNetV3Small(input_shape=[*image_size, 3], include_top=False, weights=None)
