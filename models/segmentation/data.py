@@ -128,6 +128,7 @@ def parse_tfrecord_fn(example_proto, target_size, num_points):
 
 def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, int, int, int]:
     try:
+        logger.info("--- Starting load_segmentation_data ---")
         data_cfg = config['data']
         paths_cfg = config['paths']
         model_cfg = config['model']
@@ -137,7 +138,10 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         batch_size = data_cfg['batch_size']
         num_classes = data_cfg['num_classes']
         
+        logger.info("Configuration loaded.")
+        
         tfrecord_dir = Path(paths_cfg.get('tfrecord_dir', paths_cfg['metadata_dir'] + "/tfrecords"))
+        logger.info(f"TFRecord directory set to: {tfrecord_dir}")
         
         num_train_samples = data_cfg.get('num_train_samples', 0)
         num_val_samples = data_cfg.get('num_val_samples', 0)
@@ -152,19 +156,27 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
 
         def create_dataset_from_tfrecord(tfrecord_filename, is_training):
             filepath = str(tfrecord_dir / tfrecord_filename)
+            logger.info(f"Attempting to create dataset from: {filepath}")
             if not os.path.exists(filepath):
-                logger.error(f"TFRecord file not found: {filepath}")
+                logger.error(f"FATAL: TFRecord file not found: {filepath}")
                 return None
             
-            dataset = tf.data.TFRecordDataset(filepath, num_parallel_reads=tf.data.AUTOTUNE)
+            dataset = tf.data.TFRecordDataset(
+                filepath, 
+                num_parallel_reads=tf.data.AUTOTUNE,
+                cycle_length=4
+            )
+            logger.info(f"[{tfrecord_filename}] TFRecordDataset object created.")
             
             if is_training:
                 dataset = dataset.shuffle(buffer_size=2048).repeat()
+                logger.info(f"[{tfrecord_filename}] Dataset shuffled and repeated.")
             
             dataset = dataset.map(
                 lambda x: parse_tfrecord_fn(x, target_size, num_points_target),
                 num_parallel_calls=tf.data.AUTOTUNE
             )
+            logger.info(f"[{tfrecord_filename}] Parse function mapped.")
             
             def augment_and_finalize(sample):
                 inputs = {k: v for k, v in sample.items() if k != 'mask'}
@@ -187,15 +199,26 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                 return inputs, tf.squeeze(mask, axis=-1)
 
             dataset = dataset.map(augment_and_finalize, num_parallel_calls=tf.data.AUTOTUNE)
+            logger.info(f"[{tfrecord_filename}] Augment and finalize function mapped.")
+
             dataset = dataset.batch(batch_size)
+            logger.info(f"[{tfrecord_filename}] Dataset batched.")
+
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
+            logger.info(f"[{tfrecord_filename}] Dataset prefetching enabled.")
             
             return dataset
 
+        logger.info("Creating training dataset...")
         train_dataset = create_dataset_from_tfrecord("train.tfrecord", is_training=True)
+        
+        logger.info("Creating validation dataset...")
         val_dataset = create_dataset_from_tfrecord("validation.tfrecord", is_training=False)
+        
+        logger.info("Creating test dataset...")
         test_dataset = create_dataset_from_tfrecord("test.tfrecord", is_training=False)
 
+        logger.info("--- Finished load_segmentation_data ---")
         return train_dataset, val_dataset, test_dataset, num_train_samples, num_val_samples, num_test_samples, num_classes
 
     except Exception as e:
