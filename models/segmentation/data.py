@@ -146,8 +146,11 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
             all_metadata = json.load(f)
         
         valid_entries = [e for e in all_metadata if e.get('image_path') and e.get('mask_path')]
-        train_meta, temp_meta = train_test_split(valid_entries, test_size=0.3, random_state=42)
-        val_meta, test_meta = train_test_split(temp_meta, test_size=0.5, random_state=42)
+        split_ratios = data_cfg['split_ratios']
+        random_seed = data_cfg.get('random_seed', 42)
+        train_meta, temp_meta = train_test_split(valid_entries, test_size=(1-split_ratios['train']), random_state=random_seed)
+        val_prop_in_remainder = split_ratios['val'] / (split_ratios['val'] + split_ratios['test'])
+        val_meta, test_meta = train_test_split(temp_meta, test_size=(1-val_prop_in_remainder), random_state=random_seed)
         
         num_train_samples = len(train_meta)
         num_val_samples = len(val_meta)
@@ -159,7 +162,7 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
         num_points_target = pc_prep_cfg.get('num_points', 4096)
 
-        def create_dataset(tfrecord_filename, is_training):
+        def create_dataset_from_tfrecord(tfrecord_filename, is_training):
             filepath = str(tfrecord_dir / tfrecord_filename)
             if not os.path.exists(filepath):
                 logger.error(f"TFRecord file not found: {filepath}")
@@ -168,7 +171,7 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
             dataset = tf.data.TFRecordDataset(filepath, num_parallel_reads=tf.data.AUTOTUNE)
             
             if is_training:
-                dataset = dataset.shuffle(buffer_size=2048)
+                dataset = dataset.shuffle(buffer_size=2048).repeat()
             
             dataset = dataset.map(
                 lambda x: parse_tfrecord_fn(x, target_size, num_points_target),
@@ -189,6 +192,10 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                     inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
                     inputs['depth_input'] = preprocess_fn(inputs['depth_input'])
                 
+                inputs['rgb_input'] = tf.clip_by_value(inputs['rgb_input'], -10.0, 10.0)
+                inputs['depth_input'] = tf.clip_by_value(inputs['depth_input'], -10.0, 10.0)
+                inputs['pc_input'] = tf.clip_by_value(inputs['pc_input'], -10.0, 10.0)
+                
                 return inputs, tf.squeeze(mask, axis=-1)
 
             dataset = dataset.map(augment_and_finalize, num_parallel_calls=tf.data.AUTOTUNE)
@@ -197,9 +204,9 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
             
             return dataset
 
-        train_dataset = create_dataset("train.tfrecord", is_training=True)
-        val_dataset = create_dataset("validation.tfrecord", is_training=False)
-        test_dataset = create_dataset("test.tfrecord", is_training=False)
+        train_dataset = create_dataset_from_tfrecord("train.tfrecord", is_training=True)
+        val_dataset = create_dataset_from_tfrecord("validation.tfrecord", is_training=False)
+        test_dataset = create_dataset_from_tfrecord("test.tfrecord", is_training=False)
 
         return train_dataset, val_dataset, test_dataset, num_train_samples, num_val_samples, num_test_samples, num_classes
 
