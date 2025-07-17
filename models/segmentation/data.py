@@ -7,6 +7,7 @@ from sklearn.model_selection import train_test_split
 import pathlib
 import json
 from tensorflow.keras import layers
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -137,134 +138,101 @@ def parse_tfrecord_fn(example_proto, target_size, num_points):
     
     rgb = tf.image.decode_png(example['rgb_image_raw'], channels=3)
     rgb.set_shape([*target_size, 3])
-    
+    rgb = tf.cast(rgb, tf.float32)
+
     mask = tf.image.decode_png(example['mask_image_raw'], channels=1)
     mask.set_shape([*target_size, 1])
-    
+    mask = tf.cast(mask, tf.float32)
+
     def decode_depth():
         d = tf.image.decode_png(example['depth_image_raw'], channels=1)
         d.set_shape([*target_size, 1])
-        return d
+        return tf.cast(d, tf.float32)
     
     depth = tf.cond(
         tf.strings.length(example['depth_image_raw']) > 0, 
         decode_depth, 
-        lambda: tf.zeros([*target_size, 1], dtype=tf.uint8)
+        lambda: tf.zeros([*target_size, 1], dtype=tf.float32)
     )
     
+    # Replicate depth channels to match model input
+    depth = tf.concat([depth, depth, depth], axis=-1)
+
     pc = tf.io.decode_raw(example['point_cloud_raw'], tf.float32)
     pc = tf.reshape(pc, [num_points, 3])
     pc.set_shape([num_points, 3])
     
-    return {
-        "rgb_input": tf.cast(rgb, tf.float32),
-        "depth_input": tf.cast(depth, tf.float32),
+    # Return a TUPLE that the model expects: (x, y) where x can be a dictionary
+    inputs = {
+        "rgb_input": rgb,
+        "depth_input": depth,
         "pc_input": pc,
-        "mask": tf.cast(mask, tf.float32)
     }
+    return inputs, mask
 
 def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, int, int, int]:
     try:
-        logger.info("--- Starting load_segmentation_data ---")
+        logger.info("--- [DEBUG MODE] Starting Simplified load_segmentation_data ---")
+        
         data_cfg = config['data']
         paths_cfg = config['paths']
-        model_cfg = config['model']
-        aug_cfg = data_cfg.get('augmentation', {})
         
         target_size = tuple(data_cfg.get('image_size', (256, 256)))
         batch_size = data_cfg['batch_size']
-        num_classes = data_cfg['num_classes']
-        
-        logger.info("Configuration loaded.")
         
         tfrecord_dir = Path(paths_cfg.get('tfrecord_dir', paths_cfg['metadata_dir'] + "/tfrecords"))
         logger.info(f"TFRecord directory set to: {tfrecord_dir}")
-        
+
         num_train_samples = data_cfg.get('num_train_samples', 0)
         num_val_samples = data_cfg.get('num_val_samples', 0)
         num_test_samples = data_cfg.get('num_test_samples', 0)
-        logger.info(f"Using pre-calculated dataset counts: Train {num_train_samples}, Val {num_val_samples}, Test {num_test_samples}")
-        
-        augmentation_pipeline = SegmentationAugmentation(aug_cfg)
-        preprocess_fn = _get_segmentation_preprocess_fn(model_cfg.get('backbone'))
+        num_classes = data_cfg.get('num_classes', 1)
         
         pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
         num_points_target = pc_prep_cfg.get('num_points', 4096)
 
         def create_dataset_from_tfrecord(tfrecord_filename, is_training):
             filepath = str(tfrecord_dir / tfrecord_filename)
-            logger.info(f"Attempting to create dataset from: {filepath}")
             if not os.path.exists(filepath):
                 logger.error(f"FATAL: TFRecord file not found: {filepath}")
                 return None
             
             dataset = tf.data.TFRecordDataset(
                 filepath, 
-                num_parallel_reads=tf.data.AUTOTUNE,
-                cycle_length=4
+                num_parallel_reads=tf.data.AUTOTUNE
             )
-            logger.info(f"[{tfrecord_filename}] TFRecordDataset object created.")
             
             if is_training:
-                dataset = dataset.shuffle(buffer_size=2048).repeat()
-                logger.info(f"[{tfrecord_filename}] Dataset shuffled and repeated.")
-            
+                # IMPORTANT: repeat() is essential for multi-epoch training
+                dataset = dataset.shuffle(buffer_size=1024).repeat()
+
+            # THE SIMPLIFICATION: Just parse the data. No other mapping.
             dataset = dataset.map(
                 lambda x: parse_tfrecord_fn(x, target_size, num_points_target),
                 num_parallel_calls=tf.data.AUTOTUNE
             )
-            logger.info(f"[{tfrecord_filename}] Parse function mapped.")
             
-            def finalize_pre_batch(sample):
-                inputs = {k: v for k, v in sample.items() if k != 'mask'}
-                mask = sample['mask']
-                
-                # Replicate depth channels
-                depth_3_channel = tf.concat([inputs['depth_input'], inputs['depth_input'], inputs['depth_input']], axis=-1)
-                inputs['depth_input'] = depth_3_channel
-                
-                # Preprocess images
-                if preprocess_fn:
-                    inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
-                    inputs['depth_input'] = preprocess_fn(inputs['depth_input'])
-                
-                # Clipping
-                inputs['rgb_input'] = tf.clip_by_value(inputs['rgb_input'], -10.0, 10.0)
-                inputs['depth_input'] = tf.clip_by_value(inputs['depth_input'], -10.0, 10.0)
-                inputs['pc_input'] = tf.clip_by_value(inputs['pc_input'], -10.0, 10.0)
-                
-                return inputs, mask
-            
-            dataset = dataset.map(finalize_pre_batch, num_parallel_calls=tf.data.AUTOTUNE)
-            logger.info(f"[{tfrecord_filename}] Pre-batch finalize function mapped.")
-            
-            # Now batch the data
-            dataset = dataset.batch(batch_size)
-            logger.info(f"[{tfrecord_filename}] Dataset batched.")
-            
-            # Apply the HEAVY augmentation on the BATCH
-            if is_training and aug_cfg.get('enabled', False):
-                dataset = dataset.map(augmentation_pipeline, num_parallel_calls=tf.data.AUTOTUNE)
-                logger.info(f"[{tfrecord_filename}] Batch-level augmentation applied.")
+            # Batch it with drop_remainder=True for distributed training
+            dataset = dataset.batch(batch_size, drop_remainder=True)
 
-            # Prefetch at the very end
+            # Prefetch
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
-            logger.info(f"[{tfrecord_filename}] Dataset prefetching enabled.")
             
+            logger.info(f"[{tfrecord_filename}] SIMPLIFIED pipeline created (Parse -> Batch -> Prefetch).")
             return dataset
 
-        logger.info("Creating training dataset...")
+        logger.info("Creating training dataset with SIMPLIFIED pipeline...")
         train_dataset = create_dataset_from_tfrecord("train.tfrecord", is_training=True)
         
-        logger.info("Creating validation dataset...")
+        logger.info("Creating validation dataset with SIMPLIFIED pipeline...")
         val_dataset = create_dataset_from_tfrecord("validation.tfrecord", is_training=False)
         
-        logger.info("Creating test dataset...")
+        logger.info("Creating test dataset with SIMPLIFIED pipeline...")
         test_dataset = create_dataset_from_tfrecord("test.tfrecord", is_training=False)
 
-        logger.info("--- Finished load_segmentation_data ---")
+        logger.info("--- [DEBUG MODE] Finished Simplified load_segmentation_data ---")
         return train_dataset, val_dataset, test_dataset, num_train_samples, num_val_samples, num_test_samples, num_classes
 
     except Exception as e:
-        logger.error(f"An unexpected error occurred in load_segmentation_data: {e}", exc_info=True)
+        logger.error(f"An unexpected error occurred in simplified load_segmentation_data: {e}", exc_info=True)
         return None, None, None, 0, 0, 0, 0
