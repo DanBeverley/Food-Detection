@@ -49,14 +49,14 @@ class SegmentationAugmentation(tf.keras.Model):
     def __init__(self, aug_config, **kwargs):
         super().__init__(**kwargs)
         self.aug_config = aug_config
-        
-        self.do_flip = self.aug_config.get("horizontal_flip", False)
-        if self.do_flip:
-            self.flipper = layers.RandomFlip("horizontal")
-        
-        self.rotation_factor = self.aug_config.get("rotation_range", 0) / 360.0
-        if self.rotation_factor > 0:
-            self.rotator = layers.RandomRotation(self.rotation_factor)
+
+        # Use Keras Layers for Image Augmentations
+        self.geometric_layers = []
+        if self.aug_config.get("horizontal_flip", False):
+            self.geometric_layers.append(layers.RandomFlip("horizontal"))
+        if self.aug_config.get("rotation_range", 0) > 0:
+            rotation_factor = self.aug_config["rotation_range"] / 360.0
+            self.geometric_layers.append(layers.RandomRotation(rotation_factor))
 
         self.color_layers = []
         if self.aug_config.get("brightness_range", [1.0, 1.0]) != [1.0, 1.0]:
@@ -66,61 +66,58 @@ class SegmentationAugmentation(tf.keras.Model):
             self.color_layers.append(layers.RandomContrast(factor=self.aug_config["contrast_factor"]))
 
     def call(self, inputs):
+        # This call now happens AFTER batching, so inputs are batched
         inputs_dict, mask = inputs
         
-        image_and_mask = layers.concatenate([inputs_dict['rgb_input'], inputs_dict['depth_input'], mask], axis=-1)
+        # Augment Images and Mask Together
+        image_and_mask = tf.concat([inputs_dict['rgb_input'], inputs_dict['depth_input'], mask], axis=-1)
         
-        augmented_pc = inputs_dict['pc_input']
-
-        # Random Rotation
-        if self.rotation_factor > 0:
-            theta = tf.random.uniform(shape=[], minval=-self.rotation_factor * 360.0, maxval=self.rotation_factor * 360.0)
-            theta_rad = theta * np.pi / 180.0
+        for layer in self.geometric_layers:
+            image_and_mask = layer(image_and_mask, training=True)
             
-            image_and_mask = self.rotator(image_and_mask)
-            
-            # Apply rotation to point cloud (around Z-axis)
-            cos_theta = tf.cos(theta_rad)
-            sin_theta = tf.sin(theta_rad)
-            rotation_matrix = tf.stack([
-                [cos_theta, -sin_theta, 0.0],
-                [sin_theta, cos_theta, 0.0],
-                [0.0, 0.0, 1.0]
-            ])
-            
-            pc_shape = tf.shape(augmented_pc)
-            pc_reshaped = tf.reshape(augmented_pc, [-1, 3])
-            pc_rotated = tf.matmul(pc_reshaped, rotation_matrix, transpose_b=True)
-            augmented_pc = tf.reshape(pc_rotated, pc_shape)
-
-        # Random Horizontal Flip
-        if self.do_flip:
-            # Generate random flip condition
-            flip_prob = tf.random.uniform(shape=[])
-            should_flip = flip_prob < 0.5
-            
-            # Apply flip to images/mask
-            image_and_mask = tf.cond(
-                should_flip,
-                lambda: tf.image.flip_left_right(image_and_mask),
-                lambda: image_and_mask
-            )
-            
-            # Apply flip to point cloud X-coordinate
-            x_coords = augmented_pc[..., 0:1]
-            y_coords = augmented_pc[..., 1:2]
-            z_coords = augmented_pc[..., 2:3]
-            
-            flipped_x = tf.cond(should_flip, lambda: -x_coords, lambda: x_coords)
-            augmented_pc = tf.concat([flipped_x, y_coords, z_coords], axis=-1)
-
+        # De-concatenate
         augmented_rgb = image_and_mask[..., :3]
         augmented_depth = image_and_mask[..., 3:6]
         augmented_mask = image_and_mask[..., 6:]
         
+        # Augment Point Cloud Separately (vectorized for entire batch)
+        augmented_pc = inputs_dict['pc_input']
+
+        # Random Flip (vectorized)
+        if self.aug_config.get("horizontal_flip", False):
+            batch_size = tf.shape(augmented_pc)[0]
+            flip_cond = tf.random.uniform(shape=[batch_size, 1, 1]) < 0.5
+            flip_multiplier = tf.where(flip_cond, -1.0, 1.0)
+            pc_flip_transform = tf.concat([flip_multiplier, tf.ones_like(flip_multiplier), tf.ones_like(flip_multiplier)], axis=-1)
+            augmented_pc = augmented_pc * pc_flip_transform
+
+        # Random Rotation (vectorized)
+        if self.aug_config.get("rotation_range", 0) > 0:
+            batch_size = tf.shape(augmented_pc)[0]
+            rotation_degrees = self.aug_config["rotation_range"]
+            angles = tf.random.uniform(shape=[batch_size], minval=-rotation_degrees, maxval=rotation_degrees)
+            angles_rad = angles * np.pi / 180.0
+            
+            # Create rotation matrices for the entire batch
+            cos_angles = tf.cos(angles_rad)
+            sin_angles = tf.sin(angles_rad)
+            zeros = tf.zeros_like(cos_angles)
+            ones = tf.ones_like(cos_angles)
+            
+            # Stack rotation matrices [batch_size, 3, 3]
+            rotation_matrices = tf.stack([
+                tf.stack([cos_angles, -sin_angles, zeros], axis=1),
+                tf.stack([sin_angles, cos_angles, zeros], axis=1),
+                tf.stack([zeros, zeros, ones], axis=1)
+            ], axis=1)
+            
+            # Apply batch matrix multiplication
+            augmented_pc = tf.linalg.matmul(augmented_pc, rotation_matrices, transpose_b=True)
+
+        # Apply Color Augmentations
         for layer in self.color_layers:
-            augmented_rgb = layer(augmented_rgb)
-        
+            augmented_rgb = layer(augmented_rgb, training=True)
+            
         augmented_inputs = {
             'rgb_input': augmented_rgb,
             'depth_input': augmented_depth,
@@ -218,32 +215,39 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
             )
             logger.info(f"[{tfrecord_filename}] Parse function mapped.")
             
-            def augment_and_finalize(sample):
+            def finalize_pre_batch(sample):
                 inputs = {k: v for k, v in sample.items() if k != 'mask'}
                 mask = sample['mask']
                 
+                # Replicate depth channels
                 depth_3_channel = tf.concat([inputs['depth_input'], inputs['depth_input'], inputs['depth_input']], axis=-1)
                 inputs['depth_input'] = depth_3_channel
                 
-                if is_training and aug_cfg.get('enabled', False):
-                    inputs, mask = augmentation_pipeline((inputs, mask))
-                
+                # Preprocess images
                 if preprocess_fn:
                     inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
                     inputs['depth_input'] = preprocess_fn(inputs['depth_input'])
                 
+                # Clipping
                 inputs['rgb_input'] = tf.clip_by_value(inputs['rgb_input'], -10.0, 10.0)
                 inputs['depth_input'] = tf.clip_by_value(inputs['depth_input'], -10.0, 10.0)
                 inputs['pc_input'] = tf.clip_by_value(inputs['pc_input'], -10.0, 10.0)
                 
                 return inputs, mask
-
-            dataset = dataset.map(augment_and_finalize, num_parallel_calls=tf.data.AUTOTUNE)
-            logger.info(f"[{tfrecord_filename}] Augment and finalize function mapped.")
-
+            
+            dataset = dataset.map(finalize_pre_batch, num_parallel_calls=tf.data.AUTOTUNE)
+            logger.info(f"[{tfrecord_filename}] Pre-batch finalize function mapped.")
+            
+            # Now batch the data
             dataset = dataset.batch(batch_size)
             logger.info(f"[{tfrecord_filename}] Dataset batched.")
+            
+            # Apply the HEAVY augmentation on the BATCH
+            if is_training and aug_cfg.get('enabled', False):
+                dataset = dataset.map(augmentation_pipeline, num_parallel_calls=tf.data.AUTOTUNE)
+                logger.info(f"[{tfrecord_filename}] Batch-level augmentation applied.")
 
+            # Prefetch at the very end
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
             logger.info(f"[{tfrecord_filename}] Dataset prefetching enabled.")
             
