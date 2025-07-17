@@ -50,19 +50,18 @@ class SegmentationAugmentation(tf.keras.Model):
         super().__init__(**kwargs)
         self.aug_config = aug_config
         
-        self.geometric_layers = []
-        if self.aug_config.get("horizontal_flip", False):
-            self.geometric_layers.append(layers.RandomFlip("horizontal"))
-        if self.aug_config.get("rotation_range", 0) > 0:
-            self.geometric_layers.append(layers.RandomRotation(self.aug_config["rotation_range"] / 360.0))
-        if self.aug_config.get("zoom_range", 0) > 0:
-            zoom = self.aug_config["zoom_range"]
-            self.geometric_layers.append(layers.RandomZoom(height_factor=(-zoom, zoom)))
+        self.do_flip = self.aug_config.get("horizontal_flip", False)
+        if self.do_flip:
+            self.flipper = layers.RandomFlip("horizontal")
+        
+        self.rotation_factor = self.aug_config.get("rotation_range", 0) / 360.0
+        if self.rotation_factor > 0:
+            self.rotator = layers.RandomRotation(self.rotation_factor)
 
         self.color_layers = []
         if self.aug_config.get("brightness_range", [1.0, 1.0]) != [1.0, 1.0]:
             factor = max(abs(1.0 - self.aug_config["brightness_range"][0]), abs(self.aug_config["brightness_range"][1] - 1.0))
-            self.color_layers.append(layers.RandomBrightness(factor=factor))
+            self.color_layers.append(layers.RandomBrightness(factor=factor, value_range=(0.0, 255.0)))
         if self.aug_config.get("contrast_factor", 0) > 0:
             self.color_layers.append(layers.RandomContrast(factor=self.aug_config["contrast_factor"]))
 
@@ -71,8 +70,49 @@ class SegmentationAugmentation(tf.keras.Model):
         
         image_and_mask = layers.concatenate([inputs_dict['rgb_input'], inputs_dict['depth_input'], mask], axis=-1)
         
-        for layer in self.geometric_layers:
-            image_and_mask = layer(image_and_mask)
+        augmented_pc = inputs_dict['pc_input']
+
+        # Random Rotation
+        if self.rotation_factor > 0:
+            theta = tf.random.uniform(shape=[], minval=-self.rotation_factor * 360.0, maxval=self.rotation_factor * 360.0)
+            theta_rad = theta * np.pi / 180.0
+            
+            image_and_mask = self.rotator(image_and_mask)
+            
+            # Apply rotation to point cloud (around Z-axis)
+            cos_theta = tf.cos(theta_rad)
+            sin_theta = tf.sin(theta_rad)
+            rotation_matrix = tf.stack([
+                [cos_theta, -sin_theta, 0.0],
+                [sin_theta, cos_theta, 0.0],
+                [0.0, 0.0, 1.0]
+            ])
+            
+            pc_shape = tf.shape(augmented_pc)
+            pc_reshaped = tf.reshape(augmented_pc, [-1, 3])
+            pc_rotated = tf.matmul(pc_reshaped, rotation_matrix, transpose_b=True)
+            augmented_pc = tf.reshape(pc_rotated, pc_shape)
+
+        # Random Horizontal Flip
+        if self.do_flip:
+            # Generate random flip condition
+            flip_prob = tf.random.uniform(shape=[])
+            should_flip = flip_prob < 0.5
+            
+            # Apply flip to images/mask
+            image_and_mask = tf.cond(
+                should_flip,
+                lambda: tf.image.flip_left_right(image_and_mask),
+                lambda: image_and_mask
+            )
+            
+            # Apply flip to point cloud X-coordinate
+            x_coords = augmented_pc[..., 0:1]
+            y_coords = augmented_pc[..., 1:2]
+            z_coords = augmented_pc[..., 2:3]
+            
+            flipped_x = tf.cond(should_flip, lambda: -x_coords, lambda: x_coords)
+            augmented_pc = tf.concat([flipped_x, y_coords, z_coords], axis=-1)
 
         augmented_rgb = image_and_mask[..., :3]
         augmented_depth = image_and_mask[..., 3:6]
@@ -84,7 +124,7 @@ class SegmentationAugmentation(tf.keras.Model):
         augmented_inputs = {
             'rgb_input': augmented_rgb,
             'depth_input': augmented_depth,
-            'pc_input': inputs_dict['pc_input']
+            'pc_input': augmented_pc
         }
         return augmented_inputs, augmented_mask
 
@@ -196,7 +236,7 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                 inputs['depth_input'] = tf.clip_by_value(inputs['depth_input'], -10.0, 10.0)
                 inputs['pc_input'] = tf.clip_by_value(inputs['pc_input'], -10.0, 10.0)
                 
-                return inputs, tf.squeeze(mask, axis=-1)
+                return inputs, mask
 
             dataset = dataset.map(augment_and_finalize, num_parallel_calls=tf.data.AUTOTUNE)
             logger.info(f"[{tfrecord_filename}] Augment and finalize function mapped.")
