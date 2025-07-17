@@ -255,10 +255,10 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
     depth_base_model = MobileNetV3Small(input_shape=[*image_size, 3], include_top=False, weights=None)
     depth_base_model._name = "depth_backbone"
     depth_skip_names = [
-        're_lu_2',      # 128x128
-        're_lu_4',      # 64x64  
-        're_lu_8',      # 32x32
-        're_lu_12',     # 16x16
+        'Conv_1',               # Output shape (None, 128, 128, 16)
+        'expanded_conv_1/Add',  # Output shape (None, 64, 64, 24)
+        'expanded_conv_3/Add',  # Output shape (None, 32, 32, 48)
+        'expanded_conv_8/Add',  # Output shape (None, 16, 16, 96)
     ]
     depth_skip_outputs = [depth_base_model.get_layer(name).output for name in depth_skip_names]
     depth_bottleneck = depth_base_model.get_layer('activation_17').output  # 8x8
