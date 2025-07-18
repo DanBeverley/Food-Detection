@@ -231,11 +231,11 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
             dataset = dataset.map(finalize_pre_batch, num_parallel_calls=tf.data.AUTOTUNE)
             dataset = dataset.batch(batch_size, drop_remainder=True)
             
-            if is_training and aug_cfg.get('enabled', False):
-                dataset = dataset.map(augment_batch, num_parallel_calls=tf.data.AUTOTUNE)
+            # if is_training and aug_cfg.get('enabled', False):
+            #     dataset = dataset.map(augment_batch, num_parallel_calls=tf.data.AUTOTUNE)
             
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
-            logger.info(f"[{tfrecord_filename}] Full-featured pipeline created successfully.")
+            logger.info(f"[{tfrecord_filename}] Test pipeline created (Preprocessing ONLY).")
             return dataset
         
         logger.info("Creating training dataset...")
