@@ -73,11 +73,12 @@ class SegmentationAugmentation(tf.keras.Model):
         augmented_mask = image_and_mask[..., 6:]
         
         augmented_pc = inputs['pc_input']
+        pc_dtype = augmented_pc.dtype
         
         if self.aug_config.get("horizontal_flip", False):
             batch_size = tf.shape(augmented_pc)[0]
             flip_cond = tf.random.uniform(shape=[batch_size, 1, 1]) < 0.5
-            flip_multiplier = tf.where(flip_cond, -1.0, 1.0)
+            flip_multiplier = tf.where(flip_cond, tf.cast(-1.0, pc_dtype), tf.cast(1.0, pc_dtype))
             pc_flip_transform = tf.concat([flip_multiplier, tf.ones_like(flip_multiplier), tf.ones_like(flip_multiplier)], axis=-1)
             augmented_pc = augmented_pc * pc_flip_transform
             
@@ -93,6 +94,7 @@ class SegmentationAugmentation(tf.keras.Model):
                 tf.stack([sin_angles, cos_angles, zeros], axis=1),
                 tf.stack([zeros, zeros, ones], axis=1)
             ], axis=1)
+            rotation_matrices = tf.cast(rotation_matrices, pc_dtype)
             augmented_pc = tf.linalg.matmul(augmented_pc, rotation_matrices, transpose_b=True)
 
         for layer in self.color_layers:
