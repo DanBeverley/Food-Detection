@@ -6,6 +6,8 @@ import yaml
 import logging
 import tensorflow as tf
 
+tf.debugging.enable_check_numerics()
+
 # Configure TensorFlow for TPU compatibility
 try:
     tf.config.experimental.enable_tensor_float_32(False)  # Disable TF32 for TPU compatibility
@@ -137,6 +139,15 @@ SEGMENTATION_CONFIG_PATH = os.path.join(_get_project_root(), "models", "segmenta
 from tensorflow.keras.callbacks import Callback
 from tensorflow.keras.applications import EfficientNetB0, ResNet50V2, MobileNetV3Small # Add more as needed
 from tensorflow.keras import layers
+
+class DetectNaNCallback(tf.keras.callbacks.Callback):
+    def on_batch_end(self, batch, logs=None):
+        if logs is None:
+            return
+        loss = logs.get('loss')
+        if loss is not None and (np.isnan(loss) or np.isinf(loss)):
+            print("\n\n!!! NaN or Inf detected in loss. Halting training. !!!\n\n")
+            self.model.stop_training = True
 
 class TqdmProgressCallback(tf.keras.callbacks.Callback):
     """Custom callback for robust progress tracking and logging during training."""
@@ -321,9 +332,10 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
 
     # Final Output: raw logits for numerical stability
     outputs = layers.Conv2D(output_channels, 1, padding="same", name='final_logits')(x)
+    outputs = layers.Activation('linear', dtype='float32', name='output_float32')(outputs)
 
     model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
-    logger.info("Built U-Net style fused model (outputting raw logits).")
+    logger.info("Built U-Net style fused model (outputting float32 logits).")
     return model
 
 # Custom metrics for segmentation
@@ -481,7 +493,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
-    # set_mixed_precision_policy(config, strategy)  # DISABLED FOR DEBUG
+    set_mixed_precision_policy(config, strategy)
 
     # Data Loading
     logger.info("Loading data for training...")
@@ -589,6 +601,7 @@ def main():
     model_dir_abs.mkdir(parents=True, exist_ok=True)
     
     stage1_callbacks = [
+        DetectNaNCallback(),
         TqdmProgressCallback(),
         tf.keras.callbacks.ModelCheckpoint(
             filepath=str(model_dir_abs / f'stage1_best_{timestamp}.h5'),
