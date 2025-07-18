@@ -553,12 +553,10 @@ def main():
             data_config=data_cfg
         )
         
-        # Freeze the pre-trained RGB backbone
-        backbone_name_from_config = config.get('model', {}).get('backbone', 'efficientnetb0').lower()
         for layer in model.layers:
-            if layer.name == backbone_name_from_config:
+            if isinstance(layer, tf.keras.Model) and 'top_activation' in [l.name for l in layer.layers]:
                 layer.trainable = False
-                logger.info(f"Freezing RGB Backbone: {layer.name}")
+                logger.info(f"Successfully found and froze backbone: {layer.name}")
                 break
 
         # Compile for Stage 1
@@ -606,11 +604,11 @@ def main():
     logger.info("\n" + "="*60 + "\n=== STAGE 2: Fine-tuning all branches together ===\n" + "="*60)
     
     with strategy.scope():
-        # Unfreeze all layers for fine-tuning
         for layer in model.layers:
-            if not isinstance(layer, tf.keras.layers.BatchNormalization):
+            if isinstance(layer, tf.keras.Model) and 'top_activation' in [l.name for l in layer.layers]:
                 layer.trainable = True
-        logger.info("All model layers UNFROZEN for Stage 2.")
+                logger.info(f"Successfully found and unfroze backbone: {layer.name}")
+                break
             
         # Compile with a very low learning rate
         stage2_lr = optimizer_cfg.get('stage2_learning_rate', 1e-5)
