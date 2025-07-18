@@ -321,10 +321,9 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
 
     # Final Output: raw logits for numerical stability
     outputs = layers.Conv2D(output_channels, 1, padding="same", name='final_logits')(x)
-    outputs = layers.Activation('linear', name='output_float32')(outputs)
 
     model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
-    logger.info("Built U-Net style fused model (outputting float32 logits).")
+    logger.info("Built U-Net style fused model (outputting raw logits).")
     return model
 
 # Custom metrics for segmentation
