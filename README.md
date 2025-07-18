@@ -1,54 +1,48 @@
 # Food Detection, Volume, and Calorie Estimation System
 
-A comprehensive Python-based pipeline for food detection, volume estimation, and calorie calculation using deep learning models and RGB-D data. Built for production deployment on mobile devices using the MetaFood3D dataset.
+A multimodal deep learning pipeline for food analysis using RGB-D cameras. Combines computer vision and nutritional analysis for volume estimation and calorie calculation.
 
-## Current Status: Production-Ready Pipeline
+## Current Status: Development Version
 
-**Latest Update (July 2025)**: Complete end-to-end food analysis pipeline with TPU/GPU training support and multimodal segmentation model.
+**Latest Update (July 2025)**: Multimodal segmentation model with extensive debugging and optimization work completed.
 
-### Completed Features
-- **Food Segmentation**: Fused encoder-decoder with multimodal inputs (RGB + depth + point cloud)
-- **Food Classification**: MobileNetV3Small for 108 food classes (224×224, TFLite optimized)
-- **Volume Estimation**: Depth-based point cloud voxelization with 123.25 cm³ accuracy
-- **Nutritional Analysis**: USDA API integration with custom database
-- **Calorie Estimation**: Complete mass and calorie calculation pipeline
-- **Mobile Deployment**: TFLite models ready for production
-- **Modular Configuration**: Centralized config-driven architecture
+### Implemented Features
+- **Food Segmentation**: U-Net architecture with multimodal inputs (RGB + depth + point cloud)
+- **Food Classification**: MobileNetV3Small for 108 food classes
+- **Volume Estimation**: Point cloud-based volume calculation
+- **Nutritional Analysis**: USDA API integration
+- **Training Infrastructure**: TPU/GPU support with distribution strategies
 
-### Verified Test Results
-```
-Food: Apple (Confidence: 1.00)
-Volume: 123.25 cm³, Mass: 98.60g
-Total Calories: 51.27 kcal
-Processing Time: 14.65 seconds
-```
+### Known Working Components
+- Data pipeline with TFRecord format
+- Multimodal model architecture
+- TPU/GPU training compatibility
+- Point cloud processing and sanitization
 
 ## Core Components
 
 ### Deep Learning Pipeline
-- **Segmentation Model**: Fused encoder-decoder with parallel backbones (EfficientNetB0, MobileNetV3Small, PointNet-style)
-- **Classification Model**: MobileNetV3Small with advanced augmentation (MixUp, CutMix)
-- **Training Features**: TPU/GPU support, mixed precision, staged training, multimodal fusion
-- **Mobile Optimization**: TFLite export with INT8 quantization
+- **Segmentation Model**: U-Net with parallel backbones (EfficientNetB0, MobileNetV3Small, PointNet-style)
+- **Classification Model**: MobileNetV3Small with standard augmentation
+- **Training Features**: TPU/GPU support, mixed precision, staged training
+- **Data Pipeline**: TFRecord format with NaN/inf sanitization
 
 ### Volume Estimation System
 - **Point Cloud Processing**: RGB-D to 3D point cloud conversion
-- **Voxelization Algorithm**: 5mm voxel grid for accurate volume calculation
+- **Volume Calculation**: Point cloud-based volume estimation
 - **Camera Calibration**: Configurable intrinsics for different devices
-- **Fallback Methods**: Mesh-based volume calculation support
 
-### Nutritional Intelligence
-- **Multi-Source Lookup**: USDA FoodData Central API + custom database
+### Nutritional Analysis
+- **USDA API Integration**: FoodData Central API support
 - **Density Database**: Food-specific density values for mass calculation
-- **Caching System**: Intelligent API response caching
-- **Complete Pipeline**: Volume → Density → Mass → Calories
+- **Pipeline**: Volume → Density → Mass → Calories
 
 ## Dataset Integration
 
 **MetaFood3D Support**:
-- 108 food classes with 101,658 total images
-- Multi-modal data: RGB images + depth maps + 3D point clouds
-- Real-world scenarios with varied lighting and presentations
+- 108 food classes with multimodal data
+- RGB images + depth maps + 3D point clouds
+- TFRecord preprocessing for efficient training
 
 ## Project Structure
 
@@ -89,32 +83,25 @@ source venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 ```
 
-### Training Options
+### Training
 
-#### GPU Training (Local)
+#### Segmentation Model
 ```bash
 python models/segmentation/train.py
+```
+
+#### Classification Model
+```bash
 python models/classification/train.py
 ```
 
-#### TPU Training (Kaggle/Colab)
+#### Data Preparation
 ```bash
-# Upload notebook files to Kaggle with TPU runtime
-# Models automatically detect and use TPU when available
-# Data loading optimized for TPU with distributed datasets
+python scripts/prepare_segmentation_metadata.py
 ```
 
-#### Production Pipeline
+### Food Analysis
 ```bash
-python main.py --prepare-all-data --train-all --export-all-tflite \
-  --classification_input_dir "path/to/MetaFood3D/RGBD_videos" \
-  --segmentation_rgbd_input_dir "path/to/MetaFood3D/RGBD_videos" \
-  --segmentation_pointcloud_input_dir "path/to/MetaFood3D/Point_cloud"
-```
-
-### Food Analysis Inference
-```bash
-# Complete food analysis with calorie estimation
 python main.py --run-inference \
   --image_path "path/to/food_image.jpg" \
   --depth_map_path "path/to/depth_map.jpg" \
@@ -124,46 +111,24 @@ python main.py --run-inference \
 
 ## Configuration
 
-### Production Settings
-The system uses centralized YAML configuration for modularity:
+The system uses YAML configuration files:
 
 - **Pipeline Config**: `config_pipeline.yaml` - Camera intrinsics, paths, volume parameters
-- **Classification Config**: `models/classification/config.yaml` - 50 epochs, full augmentation
-- **Segmentation Config**: `models/segmentation/config.yaml` - Combined loss, attention mechanisms
+- **Classification Config**: `models/classification/config.yaml` - Training parameters
+- **Segmentation Config**: `models/segmentation/config.yaml` - Model architecture and training
 
-### Key Features
-- **Configurable camera intrinsics** for different devices
-- **Modular path management** for deployment flexibility
-- **Robust fallback mechanisms** for missing configurations
-- **Volume processing parameters** tunable per use case
+## Technical Implementation
 
-## Performance Metrics
+### Training Optimizations
+- **Mixed Precision**: Enabled for performance on compatible hardware
+- **Distribution Strategy**: TPU/GPU support with automatic hardware detection
+- **Data Pipeline**: TFRecord format with optimized loading
+- **Numerical Stability**: NaN/inf sanitization and gradient clipping
 
-### Model Performance
-- **Classification**: 108 food classes with confidence thresholding
-- **Segmentation**: IoU-optimized with attention mechanisms
-- **Volume Estimation**: ±5% accuracy on test objects
-- **Processing Speed**: ~15 seconds per image (CPU)
-
-### Production Optimizations
-- **TFLite Models**: Mobile-optimized inference
-- **Mixed Precision Training**: Faster training with maintained accuracy
-- **Advanced Augmentation**: Improved generalization
-- **Memory Optimization**: Efficient data loading and processing
-
-## Technical Features
-
-### Robustness & Modularity
-- **Config-driven architecture**: Minimal hardcoded values
-- **Comprehensive error handling**: Graceful failure recovery
-- **Modular components**: Reusable across deployments
-- **Production logging**: Detailed performance metrics
-
-### Mobile Deployment Ready
-- **TFLite Export**: Optimized for mobile inference
-- **Quantized Models**: INT8 quantization for speed
-- **Minimal Dependencies**: Streamlined for deployment
-- **Cross-platform Support**: iOS/Android compatible
+### Model Architecture
+- **Segmentation**: U-Net with skip connections and multimodal fusion
+- **Classification**: MobileNetV3Small for efficiency
+- **Point Cloud Processing**: PointNet-style encoder for 3D data
 
 ## API Reference
 
@@ -186,28 +151,29 @@ results = analyze_food_item(
 # - timing metrics
 ```
 
-## Recent Improvements
+## Recent Work (July 2025)
 
-### Multimodal Segmentation (July 2025)
-- **Fused encoder-decoder architecture** - Replaced U-Net with parallel backbones for RGB, depth, and point cloud inputs
-- **TPU/GPU training support** - Optimized data pipeline for distributed training with automatic hardware detection
-- **Staged training strategy** - Two-phase training (freeze backbones, then fine-tune) for better convergence
-- **Numpy compatibility fixes** - Resolved trimesh import issues with newer numpy versions
+### Multimodal Segmentation Implementation
+- **U-Net Architecture**: Parallel backbones for RGB, depth, and point cloud inputs
+- **TPU/GPU Training**: Optimized data pipeline with automatic hardware detection
+- **Staged Training**: Two-phase training strategy (freeze backbones, then fine-tune)
+- **Numerical Stability**: Extensive debugging and optimization for gradient stability
 
 ### Training Infrastructure
-- **TPU-native data pipeline** - CPU data loading with TPU distribution for optimal performance  
-- **Stateful augmentation layers** - Fixed tf.Variable creation errors in tf.data pipeline
-- **Mixed precision training** - bfloat16 support for TPU and GPU acceleration
-- **Robust error handling** - Graceful fallbacks for missing point cloud data
+- **TFRecord Pipeline**: Efficient data loading for distributed training
+- **Mixed Precision**: bfloat16 support for TPU and GPU acceleration
+- **Distribution Strategy**: OneDeviceStrategy to avoid gradient aggregation issues
+- **Data Sanitization**: NaN/inf handling for point cloud data
 
-## Contributing
+### Known Issues
+- **Training Stability**: Ongoing work on gradient overflow in multimodal fusion
+- **Hardware Compatibility**: MirroredStrategy conflicts with mixed precision resolved
+- **XLA Compilation**: Debug tools incompatibility with XLA compiler addressed
 
-This production-ready system is designed for:
-- Model accuracy improvements
-- Mobile optimization enhancements
-- Additional food class integration
-- Real-world deployment validation
+## Development Status
+
+This is an active development project with working components and ongoing optimization efforts. The codebase demonstrates multimodal deep learning techniques and distributed training infrastructure.
 
 ---
 
-**Status**: Production-ready pipeline with verified end-to-end functionality and mobile deployment capability.
+**Status**: Development version with functional components and active debugging/optimization work.
