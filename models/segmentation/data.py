@@ -62,8 +62,9 @@ class SegmentationAugmentation(tf.keras.Model):
         if self.aug_config.get("contrast_factor", 0) > 0:
             self.color_layers.append(layers.RandomContrast(factor=self.aug_config["contrast_factor"]))
 
-    def call(self, inputs, mask):
-        image_and_mask = tf.concat([inputs['rgb_input'], inputs['depth_input'], mask], axis=-1)
+    def call(self, inputs):
+        inputs_dict, mask = inputs
+        image_and_mask = tf.concat([inputs_dict['rgb_input'], inputs_dict['depth_input'], mask], axis=-1)
         
         for layer in self.geometric_layers:
             image_and_mask = layer(image_and_mask, training=True)
@@ -72,7 +73,7 @@ class SegmentationAugmentation(tf.keras.Model):
         augmented_depth = image_and_mask[..., 3:6]
         augmented_mask = image_and_mask[..., 6:]
         
-        augmented_pc = inputs['pc_input']
+        augmented_pc = inputs_dict['pc_input']
         pc_dtype = augmented_pc.dtype
         
         if self.aug_config.get("horizontal_flip", False):
@@ -183,7 +184,7 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
             return inputs, mask
 
         def augment_batch(inputs, mask):
-            return augmentation_pipeline(inputs, mask)
+            return augmentation_pipeline((inputs, mask))
 
         def create_dataset_from_tfrecord(tfrecord_filename, is_training):
             filepath = str(tfrecord_dir / tfrecord_filename)
@@ -201,7 +202,7 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
             dataset = dataset.batch(batch_size, drop_remainder=True)
             
             if is_training and aug_cfg.get('enabled', False):
-                dataset = dataset.map(augment_batch, num_parallel_calls=tf.data.AUTOTUNE)
+                dataset = dataset.map(augmentation_pipeline, num_parallel_calls=tf.data.AUTOTUNE)
             
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
             logger.info(f"[{tfrecord_filename}] Full-featured pipeline created successfully.")
