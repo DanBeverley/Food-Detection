@@ -321,10 +321,10 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
 
     # Final Output: raw logits for numerical stability
     outputs = layers.Conv2D(output_channels, 1, padding="same", name='final_logits')(x)
-    outputs = layers.Activation('linear', dtype='float32')(outputs)
+    outputs = layers.Activation('linear', dtype='float32', name='output_float32')(outputs)
 
     model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
-    logger.info("Built U-Net style fused model (outputting logits).")
+    logger.info("Built U-Net style fused model (outputting float32 logits).")
     return model
 
 # Custom metrics for segmentation
@@ -501,41 +501,45 @@ def main():
     steps_per_epoch = num_train // per_replica_batch_size
     validation_steps = num_val // per_replica_batch_size if val_ds else None
 
-    loss_fn_name = loss_cfg.get('name', 'binary_crossentropy').lower()
+    # MAXIMUM STABILITY: Use simplest possible loss function
+    loss_function = tf.keras.losses.BinaryCrossentropy(from_logits=True)
+    logger.info("Using simplified loss function: BinaryCrossentropy(from_logits=True)")
     
-    if loss_fn_name == 'binary_crossentropy': 
-        label_smoothing = loss_cfg.get('label_smoothing', 0.0)
-        loss_function = tf.keras.losses.BinaryCrossentropy(
-            from_logits=True,
-            label_smoothing=label_smoothing
-        )
-    elif loss_fn_name == 'combined_loss':
-        bce_config = loss_cfg.get('binary_crossentropy', {})
-        dice_config = loss_cfg.get('dice_loss', {})
-        focal_config = loss_cfg.get('focal_loss', {})
-        
-        bce_weight = bce_config.get('weight', 0.5)
-        dice_weight = dice_config.get('weight', 0.3)
-        focal_weight = focal_config.get('weight', 0.2)
-        label_smoothing = bce_config.get('label_smoothing', 0.1)
-        smooth = dice_config.get('smooth', 1.0)
-        alpha = focal_config.get('alpha', 0.25)
-        gamma = focal_config.get('gamma', 2.0)
-        
-        loss_function = lambda y_true, y_pred: combined_loss(
-            y_true, y_pred, 
-            bce_weight=bce_weight, 
-            dice_weight=dice_weight, 
-            focal_weight=focal_weight,
-            label_smoothing=label_smoothing,
-            smooth=smooth,
-            alpha=alpha,
-            gamma=gamma
-        )
-        logger.info(f"Using combined loss: BCE({bce_weight}) + Dice({dice_weight}) + Focal({focal_weight})")
-    else:
-        logger.warning(f"Unsupported loss function: {loss_fn_name}. Defaulting to binary crossentropy.")
-        loss_function = tf.keras.losses.BinaryCrossentropy(from_logits=False)
+    # Original complex loss logic disabled for stability
+    # loss_fn_name = loss_cfg.get('name', 'binary_crossentropy').lower()
+    # if loss_fn_name == 'binary_crossentropy': 
+    #     label_smoothing = loss_cfg.get('label_smoothing', 0.0)
+    #     loss_function = tf.keras.losses.BinaryCrossentropy(
+    #         from_logits=True,
+    #         label_smoothing=label_smoothing
+    #     )
+    # elif loss_fn_name == 'combined_loss':
+    #     bce_config = loss_cfg.get('binary_crossentropy', {})
+    #     dice_config = loss_cfg.get('dice_loss', {})
+    #     focal_config = loss_cfg.get('focal_loss', {})
+    #     
+    #     bce_weight = bce_config.get('weight', 0.5)
+    #     dice_weight = dice_config.get('weight', 0.3)
+    #     focal_weight = focal_config.get('weight', 0.2)
+    #     label_smoothing = bce_config.get('label_smoothing', 0.1)
+    #     smooth = dice_config.get('smooth', 1.0)
+    #     alpha = focal_config.get('alpha', 0.25)
+    #     gamma = focal_config.get('gamma', 2.0)
+    #     
+    #     loss_function = lambda y_true, y_pred: combined_loss(
+    #         y_true, y_pred, 
+    #         bce_weight=bce_weight, 
+    #         dice_weight=dice_weight, 
+    #         focal_weight=focal_weight,
+    #         label_smoothing=label_smoothing,
+    #         smooth=smooth,
+    #         alpha=alpha,
+    #         gamma=gamma
+    #     )
+    #     logger.info(f"Using combined loss: BCE({bce_weight}) + Dice({dice_weight}) + Focal({focal_weight})")
+    # else:
+    #     logger.warning(f"Unsupported loss function: {loss_fn_name}. Defaulting to binary crossentropy.")
+    #     loss_function = tf.keras.losses.BinaryCrossentropy(from_logits=False)
 
     metrics_cfg = training_cfg.get('metrics', ['binary_accuracy'])
     metrics_list = []
@@ -572,9 +576,9 @@ def main():
 
         # Compile for Stage 1
         stage1_lr = optimizer_cfg.get('stage1_learning_rate', 1e-5)
-        optimizer_stage1 = tf.keras.optimizers.AdamW(learning_rate=stage1_lr, clipnorm=1.0)
+        optimizer_stage1 = tf.keras.optimizers.Adam(learning_rate=stage1_lr, clipnorm=1.0)
         model.compile(optimizer=optimizer_stage1, loss=loss_function, metrics=metrics_list)
-        logger.info(f"Model compiled for Stage 1 with LR: {stage1_lr}")
+        logger.info(f"Model compiled for Stage 1 with Adam, STABLE LR: {stage1_lr}, and Simplified Loss")
     
     stage1_epochs = training_cfg.get('stage1_epochs', 5)
     logger.info(f"--- Starting Stage 1 training for {stage1_epochs} epochs ---")
@@ -620,7 +624,7 @@ def main():
             
         # Compile with a very low learning rate
         stage2_lr = optimizer_cfg.get('stage2_learning_rate', 1e-5)
-        optimizer_stage2 = tf.keras.optimizers.AdamW(learning_rate=stage2_lr, clipnorm=1.0)
+        optimizer_stage2 = tf.keras.optimizers.Adam(learning_rate=stage2_lr, clipnorm=1.0)
         model.compile(optimizer=optimizer_stage2, loss=loss_function, metrics=metrics_list)
         logger.info(f"Model re-compiled for Stage 2 with LR: {stage2_lr}")
 
