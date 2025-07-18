@@ -319,13 +319,12 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
     x = layers.UpSampling2D(2, interpolation='bilinear')(x)
     x = layers.Conv2D(16, 3, padding='same', activation='relu')(x)
 
-    # Final Output
-    output_activation = model_config.get('output_activation', 'sigmoid')
-    outputs = layers.Conv2D(output_channels, 1, padding="same", activation=output_activation, name='final_output_conv')(x)
+    # Final Output: raw logits for numerical stability
+    outputs = layers.Conv2D(output_channels, 1, padding="same", name='final_logits')(x)
     outputs = layers.Activation('linear', dtype='float32')(outputs)
 
     model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
-    logger.info("Built U-Net style fused model with skip connections.")
+    logger.info("Built U-Net style fused model (outputting logits).")
     return model
 
 # Custom metrics for segmentation
@@ -398,6 +397,22 @@ class DiceCoefficient(tf.keras.metrics.Metric):
         self.dice_sum.assign(0.0)
         self.count.assign(0.0)
 
+class IoUFromLogits(BinaryIoU):
+    def __init__(self, name='binary_iou', **kwargs):
+        super().__init__(name=name, **kwargs)
+
+    def update_state(self, y_true, y_pred_logits, sample_weight=None):
+        y_pred_probs = tf.nn.sigmoid(y_pred_logits)
+        super().update_state(y_true, y_pred_probs, sample_weight)
+
+class DiceFromLogits(DiceCoefficient):
+    def __init__(self, name='dice_coefficient', **kwargs):
+        super().__init__(name=name, **kwargs)
+
+    def update_state(self, y_true, y_pred_logits, sample_weight=None):
+        y_pred_probs = tf.nn.sigmoid(y_pred_logits)
+        super().update_state(y_true, y_pred_probs, sample_weight)
+
 # Custom loss functions
 def dice_loss(y_true, y_pred, smooth=1.0):
     """Dice loss for segmentation."""
@@ -433,34 +448,26 @@ def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
     focal_loss_value = focal_weight * ce_loss
     return tf.reduce_mean(focal_loss_value)
 
-def combined_loss(y_true, y_pred, bce_weight=0.5, dice_weight=0.3, focal_weight=0.2, 
+def combined_loss(y_true, y_pred_logits, bce_weight=0.5, dice_weight=0.3, focal_weight=0.2, 
                  label_smoothing=0.1, smooth=1.0, alpha=0.25, gamma=2.0):
     """Combined loss function for better segmentation."""
-    # Handle shape mismatch: model output [batch, H, W, 1] vs mask [batch, H, W]
-    if len(y_pred.shape) == 4 and y_pred.shape[-1] == 1:
-        y_pred = tf.squeeze(y_pred, axis=-1)
-    if len(y_true.shape) == 4 and y_true.shape[-1] == 1:
-        y_true = tf.squeeze(y_true, axis=-1)
     
-    # Ensure both tensors have the same shape
-    y_true = tf.ensure_shape(y_true, y_pred.shape)
+    y_true_float = tf.cast(y_true, tf.float32)
     
-    # Binary crossentropy with label smoothing
-    if label_smoothing > 0:
-        y_true_smooth = y_true * (1 - label_smoothing) + 0.5 * label_smoothing
-    else:
-        y_true_smooth = y_true
+    # Use numerically stable binary crossentropy from logits
+    bce = tf.keras.losses.binary_crossentropy(
+        y_true_float, y_pred_logits, from_logits=True, label_smoothing=label_smoothing
+    )
+    bce = tf.reduce_mean(bce)
     
-    # Calculate BCE manually to ensure shape consistency
-    y_pred_clipped = tf.clip_by_value(y_pred, tf.keras.backend.epsilon(), 1.0 - tf.keras.backend.epsilon())
-    bce = -(y_true_smooth * tf.math.log(y_pred_clipped) + (1 - y_true_smooth) * tf.math.log(1 - y_pred_clipped))
-    bce = tf.reduce_mean(bce)  # Reduce to scalar
+    # Convert logits to probabilities for Dice and Focal loss
+    y_pred_probs = tf.nn.sigmoid(y_pred_logits)
     
     # Dice loss (already returns scalar)
-    dice = dice_loss(y_true, y_pred, smooth=smooth)
+    dice = dice_loss(y_true_float, y_pred_probs, smooth=smooth)
     
     # Focal loss (already returns scalar)
-    focal = focal_loss(y_true, y_pred, alpha=alpha, gamma=gamma)
+    focal = focal_loss(y_true_float, y_pred_probs, alpha=alpha, gamma=gamma)
     
     return bce_weight * bce + dice_weight * dice + focal_weight * focal
 
@@ -497,10 +504,9 @@ def main():
     loss_fn_name = loss_cfg.get('name', 'binary_crossentropy').lower()
     
     if loss_fn_name == 'binary_crossentropy': 
-        model_final_activation = config.get('model', {}).get('activation', 'sigmoid')
         label_smoothing = loss_cfg.get('label_smoothing', 0.0)
         loss_function = tf.keras.losses.BinaryCrossentropy(
-            from_logits=(model_final_activation != 'sigmoid'),
+            from_logits=True,
             label_smoothing=label_smoothing
         )
     elif loss_fn_name == 'combined_loss':
@@ -536,11 +542,11 @@ def main():
     for m_name in metrics_cfg:
         m_name_lower = m_name.lower()
         if m_name_lower == 'accuracy' or m_name_lower == 'binary_accuracy':
-            metrics_list.append('binary_accuracy')
+            metrics_list.append(tf.keras.metrics.BinaryAccuracy(name="binary_accuracy",threshold=0.0))
         elif m_name_lower == 'binary_iou':
-            metrics_list.append(BinaryIoU(threshold=0.5, name='binary_iou'))
+            metrics_list.append(IoUFromLogits(threshold=0.5, name='binary_iou'))
         elif m_name_lower == 'dice_coefficient':
-            metrics_list.append(DiceCoefficient(threshold=0.5, name='dice_coefficient'))
+            metrics_list.append(DiceFromLogits(threshold=0.5, name='dice_coefficient'))
         elif m_name_lower == 'precision':
             metrics_list.append(tf.keras.metrics.Precision(name='precision'))
         elif m_name_lower == 'recall':
