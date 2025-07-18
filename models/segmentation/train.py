@@ -571,7 +571,7 @@ def main():
         model.get_layer('rgb_encoder').trainable = False
 
         # Compile for Stage 1
-        stage1_lr = optimizer_cfg.get('stage1_learning_rate', 1e-3)
+        stage1_lr = optimizer_cfg.get('stage1_learning_rate', 1e-5)
         optimizer_stage1 = tf.keras.optimizers.AdamW(learning_rate=stage1_lr, clipnorm=1.0)
         model.compile(optimizer=optimizer_stage1, loss=loss_function, metrics=metrics_list)
         logger.info(f"Model compiled for Stage 1 with LR: {stage1_lr}")

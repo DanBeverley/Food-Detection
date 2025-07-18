@@ -169,7 +169,7 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         def finalize_pre_batch(inputs, mask):
             if preprocess_fn:
                 inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
-                inputs['depth_input'] = preprocess_fn(inputs['depth_input'])
+                inputs['depth_input'] = inputs['depth_input'] / 255.0
             
             inputs['rgb_input'] = tf.clip_by_value(inputs['rgb_input'], -10.0, 10.0)
             inputs['depth_input'] = tf.clip_by_value(inputs['depth_input'], -10.0, 10.0)
