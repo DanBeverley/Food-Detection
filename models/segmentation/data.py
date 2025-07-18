@@ -171,6 +171,11 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                 inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
                 inputs['depth_input'] = inputs['depth_input'] / 255.0
             
+            pc = inputs['pc_input']
+            pc = tf.where(tf.math.is_nan(pc), 0.0, pc)
+            pc = tf.where(tf.math.is_inf(pc), 0.0, pc)
+            inputs['pc_input'] = pc
+            
             inputs['rgb_input'] = tf.clip_by_value(inputs['rgb_input'], -10.0, 10.0)
             inputs['depth_input'] = tf.clip_by_value(inputs['depth_input'], -10.0, 10.0)
             inputs['pc_input'] = tf.clip_by_value(inputs['pc_input'], -10.0, 10.0)
