@@ -6,7 +6,7 @@ import yaml
 import logging
 import tensorflow as tf
 
-tf.debugging.enable_check_numerics()
+# tf.debugging.enable_check_numerics()
 
 # Configure TensorFlow for TPU compatibility
 try:
@@ -123,15 +123,9 @@ def initialize_strategy() -> tf.distribute.Strategy:
     logger.info("TPU initialization failed, falling back to GPU/CPU")
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
-        if len(gpus) > 1:
-            strategy = tf.distribute.MirroredStrategy()
-            logger.info(f"Multi-GPU strategy: {len(gpus)} GPUs")
-        else:
-            strategy = tf.distribute.get_strategy()
-            logger.info(f"Single GPU strategy")
-        return strategy
+        logger.info(f"Found {len(gpus)} GPUs. Forcing single-GPU strategy to avoid MirroredStrategy bugs.")
+        return tf.distribute.OneDeviceStrategy(device="/gpu:0")
     else:
-        logger.info("Using CPU strategy")
         return tf.distribute.get_strategy()
 
 SEGMENTATION_CONFIG_PATH = os.path.join(_get_project_root(), "models", "segmentation", "config.yaml")
@@ -327,6 +321,7 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
     x = layers.Conv2D(16, 3, padding='same', activation='relu')(x)
 
     outputs = layers.Conv2D(output_channels, 1, padding="same", name='final_logits')(x)
+    outputs = layers.Activation('linear', dtype='float32', name='output_float32')(outputs)
 
     model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
     return model
@@ -486,7 +481,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
-    # set_mixed_precision_policy(config, strategy)
+    set_mixed_precision_policy(config, strategy)
 
     # Data Loading
     logger.info("Loading data for training...")
