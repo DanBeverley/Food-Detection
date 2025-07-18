@@ -6,11 +6,9 @@ import os
 import json
 import traceback
 from datetime import datetime
-from pathlib import Path # Added import
+from pathlib import Path
 
-# TPU-specific imports and configuration
-# Allow TPU library loading in subprocess context
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'  # Reduce TensorFlow logging
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'  
 
 import tensorflow as tf
 
@@ -48,11 +46,9 @@ class DebugCallback(tf.keras.callbacks.Callback):
 
 from typing import Dict, Tuple, Any, List, Optional
 
-# Configure TensorFlow for TPU compatibility
 try:
     tf.config.experimental.enable_tensor_float_32(False)  # Disable TF32 for TPU compatibility
 except AttributeError:
-    # TF32 control not available in this TensorFlow version
     pass
 
 logger = logging.getLogger(__name__)
@@ -101,9 +97,20 @@ def initialize_strategy() -> tf.distribute.Strategy:
         logger.info(f"COLAB_TPU_ADDR found: {colab_tpu_addr}")
         resolver_address = colab_tpu_addr
     else:
-        # For Kaggle TPU, try empty string first (standard approach)
-        resolver_address = ''
-        logger.info("No TPU environment variables found, trying empty string resolver for Kaggle TPU")
+        # For Kaggle TPU, try automatic detection first
+        try:
+            resolver = tf.distribute.cluster_resolver.TPUClusterResolver()
+            logger.info("Kaggle TPU detected via automatic resolver")
+            tf.config.experimental_connect_to_cluster(resolver)
+            tf.tpu.experimental.initialize_tpu_system(resolver)
+            strategy = tf.distribute.TPUStrategy(resolver)
+            logger.info(f"TPU Strategy successfully initialized: {strategy}")
+            logger.info(f"Number of TPU cores: {strategy.num_replicas_in_sync}")
+            return strategy
+        except Exception as e:
+            logger.info(f"Automatic TPU detection failed: {e}")
+            resolver_address = ''
+            logger.info("Falling back to empty string resolver for Kaggle TPU")
     
     # Try TPU detection with retry mechanism
     for attempt in range(3):
@@ -242,45 +249,17 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     fine_tune_layers_rgb = model_cfg.get('fine_tune_layers', 10)
     weights = 'imagenet' if use_pretrained else None
 
-    # Determine if multi-modal input is configured (backward compatibility)
-    modalities_cfg = data_cfg.get('modalities_config', {})
-    
-    # Backward compatibility: Check old flags and create modalities_cfg if needed
-    use_depth_map = data_cfg.get('use_depth_map', False)
-    use_point_cloud = data_cfg.get('use_point_cloud', False)
-    
-    if use_depth_map or use_point_cloud:
-        is_multimodal_enabled = True
-        # Create modalities config from old flags and modalities_preprocessing
-        preprocessing_cfg = data_cfg.get('modalities_preprocessing', {})
-        
-        if use_depth_map:
-            modalities_cfg['depth'] = {
-                'enabled': True,
-                'normalize': preprocessing_cfg.get('depth', {}).get('normalize', False)
-            }
-        
-        if use_point_cloud:
-            modalities_cfg['point_cloud'] = {
-                'enabled': True,
-                'normalize': preprocessing_cfg.get('point_cloud', {}).get('normalize', False)
-            }
-            
-        logger.info("Using backward compatibility for old multimodal flags")
-    else:
-        is_multimodal_enabled = modalities_cfg.get('enabled', False)
-    
-    logger.info(f"Multi-modal input enabled: {is_multimodal_enabled}")
+    # RGB-only classification model
+    logger.info("RGB-only classification model")
 
     active_input_layers_list = []
     all_branch_features = []
 
-    # --- RGB Branch (always present) ---
+    # RGB Branch
     rgb_input_shape = (*image_size, 3)
     rgb_input_tensor = layers.Input(shape=rgb_input_shape, name='rgb_input')
-    # Add to list only if multi-modal, otherwise it's the sole input.
-    if is_multimodal_enabled:
-        active_input_layers_list.append(rgb_input_tensor)
+    # RGB input
+    active_input_layers_list.append(rgb_input_tensor)
     logger.info(f"RGB Input: shape={rgb_input_shape}")
 
     logger.info(f"Building RGB branch with architecture: {architecture}")
@@ -363,138 +342,9 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     
     all_branch_features.append(pooled_rgb_features)
 
-    # Depth Branch (conditional on multi-modal AND specific depth config)
-    use_depth = modalities_cfg.get('depth', {}).get('enabled', False) if is_multimodal_enabled else False
-    if use_depth:
-        depth_input_shape_config = modalities_cfg.get('depth', {}).get('input_shape', [*image_size, 3])
-        depth_input_shape = tuple(depth_input_shape_config) # Ensure it's a tuple
-        depth_input_tensor = layers.Input(shape=depth_input_shape, name='depth_input')
-        active_input_layers_list.append(depth_input_tensor)
-        logger.info(f"Depth Input: shape={depth_input_shape}, adding Depth processing branch.")
 
-        depth_arch_cfg = modalities_cfg.get('depth', {}).get('architecture', {})
-        depth_conv_layers = depth_arch_cfg.get('conv_layers', [
-            {'filters': 32, 'kernel_size': 3, 'pool': True, 'batch_norm': True},
-            {'filters': 64, 'kernel_size': 3, 'pool': True, 'batch_norm': True}
-        ])
-        depth_pooling_type = depth_arch_cfg.get('pooling', 'GlobalAveragePooling2D')
-
-        depth_x = depth_input_tensor
-        
-        # If a pretrained model adapted for depth were used, it might expect 3 channels:
-        # if depth_arch_cfg.get('repeat_channels_for_pretrained', False):
-        #     logger.info("Repeating depth channel 3 times for potentially pretrained model input.")
-        #     depth_x = layers.Concatenate(axis=-1)([depth_x, depth_x, depth_x])
-
-        for i, layer_params in enumerate(depth_conv_layers):
-            depth_x = layers.Conv2D(layer_params['filters'], 
-                                    kernel_size=layer_params.get('kernel_size', 3), 
-                                    padding='same', 
-                                    activation='relu', name=f'depth_conv{i+1}')(depth_x)
-            if layer_params.get('batch_norm', False):
-                depth_x = layers.BatchNormalization(name=f'depth_bn{i+1}')(depth_x)
-            if layer_params.get('pool', False):
-                depth_x = layers.MaxPooling2D((2, 2), name=f'depth_pool{i+1}')(depth_x)
-        
-        if hasattr(layers, depth_pooling_type):
-            pooled_depth_features = getattr(layers, depth_pooling_type)(name='depth_pool')(depth_x)
-        else:
-            logger.warning(f"Depth pooling layer '{depth_pooling_type}' not found. Defaulting to GlobalAveragePooling2D.")
-            pooled_depth_features = layers.GlobalAveragePooling2D(name='depth_gap_fallback')(depth_x)
-
-        all_branch_features.append(pooled_depth_features)
-        logger.info(f"Depth branch added with {len(depth_conv_layers)} conv blocks and {depth_pooling_type}.")
-    elif is_multimodal_enabled and modalities_cfg.get('depth', {}).get('enabled', False):
-        logger.info("Depth modality is configured but 'use_depth_map' (old flag) or specific 'depth.enabled' is effectively false. Depth branch NOT added.")
-
-    # --- Point Cloud Branch (conditional on multi-modal AND specific PC config) ---
-    use_pc = modalities_cfg.get('point_cloud', {}).get('enabled', False) if is_multimodal_enabled else False
-    if use_pc:
-        pc_cfg = modalities_cfg.get('point_cloud', {})
-        num_points = pc_cfg.get('num_points', 4096) # Read from config, default to 4096
-        pc_input_shape = (num_points, 3) # (Num points, 3 coords)
-        pc_input_tensor = layers.Input(shape=pc_input_shape, name='point_cloud_input')
-        active_input_layers_list.append(pc_input_tensor)
-        logger.info(f"Point Cloud Input: shape={pc_input_shape}, num_points={num_points}. Adding Point Cloud processing branch.")
-
-        pc_arch_cfg = pc_cfg.get('architecture', {})
-        pc_conv1d_layers = pc_arch_cfg.get('conv1d_layers', [
-            {'filters': 64, 'kernel_size': 1, 'batch_norm': True},
-            {'filters': 128, 'kernel_size': 1, 'batch_norm': True},
-            {'filters': pc_arch_cfg.get('bottleneck_size', 256), 'kernel_size': 1, 'batch_norm': False} # Match PointNet-like global feature size
-        ])
-        pc_pooling_type = pc_arch_cfg.get('pooling', 'GlobalMaxPooling1D') # PointNet uses MaxPooling
-
-        pc_x = pc_input_tensor
-        
-        pc_preprocessing_cfg = modalities_cfg.get('point_cloud', {})
-        if pc_preprocessing_cfg.get('normalize', False):
-            # Normalize point cloud coordinates to prevent large values causing NaN
-            logger.info("Applying LayerNormalization to point cloud input to prevent NaN")
-            pc_x = layers.LayerNormalization(axis=-1)(pc_x)
-        
-        for i, layer_params in enumerate(pc_conv1d_layers):
-            pc_x = layers.Conv1D(layer_params['filters'], 
-                                kernel_size=layer_params.get('kernel_size', 1), 
-                                activation='relu', name=f'pc_conv1d_{i+1}')(pc_x)
-            if layer_params.get('batch_norm', True):
-                pc_x = layers.BatchNormalization(name=f'pc_bn_{i+1}')(pc_x)
-
-        if hasattr(layers, pc_pooling_type):
-            pooled_pc_features = getattr(layers, pc_pooling_type)(name='pc_pool')(pc_x)
-        else:
-            logger.warning(f"Point cloud pooling layer '{pc_pooling_type}' not found. Defaulting to GlobalMaxPooling1D.")
-            pooled_pc_features = layers.GlobalMaxPooling1D(name='pc_gmp_fallback')(pc_x)
-
-        all_branch_features.append(pooled_pc_features)
-        logger.info(f"Point Cloud branch added with {len(pc_conv1d_layers)} conv1d blocks and {pc_pooling_type}.")
-    elif is_multimodal_enabled and modalities_cfg.get('point_cloud', {}).get('enabled', False):
-        logger.info("Point Cloud modality is configured but 'use_point_cloud' (old flag) or specific 'point_cloud.enabled' is effectively false. Point Cloud branch NOT added.")
-
-    # Fusion and Classification Head
-    
-    # 1. Normalize each branch's feature vector before fusion
-    # This prevents one modality from numerically dominating the others.
-    norm_branch_features = []
-    branch_names = ['rgb', 'depth', 'pc']
-    for i, features in enumerate(all_branch_features):
-        branch_name = branch_names[i] if i < len(branch_names) else f'branch_{i}'
-        norm_features = layers.BatchNormalization(name=f'{branch_name}_features_bn')(features)
-        norm_branch_features.append(norm_features)
-
-    if is_multimodal_enabled and len(norm_branch_features) > 1:
-        logger.info(f"Fusing {len(norm_branch_features)} feature branches with Gated Mechanism.")
-        
-        # 2. Gated Fusion Mechanism
-        # Instead of simple concatenation, let the model learn the importance of each modality.
-        
-        # concatenate the normalized features to get a combined view.
-        combined_features = layers.Concatenate(name='combined_feature_view')(norm_branch_features)
-        
-        # Create a small gating network that looks at the combined features.
-        gate_x = layers.Dense(128, activation='relu', name='gate_dense')(combined_features)
-        
-        # The output of the gating network is a set of weights (one for each branch).
-        # Softmax ensures the weights sum to 1.
-        gate_weights = layers.Dense(len(norm_branch_features), activation='softmax', name='gate_softmax')(gate_x)
-        
-        # 3. Apply the learned weights to each branch
-        weighted_features = []
-        for i, branch_features in enumerate(norm_branch_features):
-            # Extract the weight for this specific branch
-            branch_weight = layers.Lambda(lambda x, idx=i: x[:, idx:idx+1], name=f'gate_weight_b{i}')(gate_weights)
-            # Multiply the branch's features by its learned weight
-            weighted_branch = layers.Multiply(name=f'weighted_features_b{i}')([branch_features, branch_weight])
-            weighted_features.append(weighted_branch)
-            
-        # 4. Concatenate the *weighted* features for the final fused vector
-        fused_features = layers.Concatenate(name='weighted_feature_fusion')(weighted_features)
-
-    elif len(norm_branch_features) == 1:
-        fused_features = norm_branch_features[0] # Single branch, no fusion needed
-    else:
-        logger.error("No feature branches were created. Cannot build model head.")
-        raise ValueError("Model construction failed: No feature branches were created.")
+    # Classification Head - RGB only
+    fused_features = pooled_rgb_features
 
     # Classification Head configuration from model_cfg
     head_config = model_cfg.get('classification_head', {})
@@ -598,13 +448,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         outputs = layers.Activation('linear', dtype=tf.float32, name='cast_to_float32')(outputs)
 
     # Determine model inputs
-    if is_multimodal_enabled:
-        model_inputs = active_input_layers_list
-        if not model_inputs: # Should have at least RGB if multimodal was intended
-             logger.error("Multimodal enabled, but no input layers were configured in active_input_layers_list. Defaulting to RGB only.")
-             model_inputs = rgb_input_tensor # Fallback, though this state indicates config issue
-    else:
-        model_inputs = rgb_input_tensor # Single input: RGB only
+    model_inputs = rgb_input_tensor
 
 
     # Always use the standard tf.keras.Model
@@ -695,36 +539,15 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
     # Test forward pass
     logger.info("Testing forward pass...")
     try:
-        if is_multimodal_enabled:
-            # Create a dictionary of dummy inputs for multimodal model
-            dummy_inputs = {}
-            input_layers = model.inputs if isinstance(model.inputs, list) else [model.inputs]
-            
-            for input_tensor in input_layers:
-                input_name = input_tensor.name
-                input_shape = input_tensor.shape[1:]  # Exclude batch dimension
-                
-                logger.info(f"Creating dummy data for input '{input_name}' with shape {input_shape}")
-                
-                # Extract key name (remove ':0' suffix)
-                input_key = input_name.split(':')[0]
-                dummy_inputs[input_key] = tf.random.normal((2, *input_shape))
-            
-            logger.info(f"Testing forward pass with multimodal inputs: {list(dummy_inputs.keys())}")
-            dummy_output = model(dummy_inputs, training=False)
-        else:
-            # Single RGB input
-            dummy_batch = tf.random.normal((2, *image_size, 3))
-            logger.info("Testing forward pass with single RGB input")
-            dummy_output = model(dummy_batch, training=False)
+        # Single RGB input
+        dummy_batch = tf.random.normal((2, *image_size, 3))
+        logger.info("Testing forward pass with RGB input")
+        dummy_output = model(dummy_batch, training=False)
         
         logger.info(f"Forward pass successful. Output shape: {dummy_output.shape}")
         
         # Check if output is always the same (indicating frozen model)
-        if is_multimodal_enabled:
-            dummy_output2 = model(dummy_inputs, training=False)
-        else:
-            dummy_output2 = model(dummy_batch, training=False)
+        dummy_output2 = model(dummy_batch, training=False)
         
         outputs_identical = tf.reduce_all(tf.equal(dummy_output, dummy_output2))
         logger.info(f"Repeated calls identical: {outputs_identical}")
@@ -745,7 +568,7 @@ def build_model(num_classes: int, config: Dict, learning_rate_to_use) -> models.
         logger.error(traceback.format_exc())
         return
     
-    # Optionally print model summary
+    # (Optional) print model summary
     if model_cfg.get('print_summary', True):
         model.summary(print_fn=logger.info)
         
@@ -1173,6 +996,12 @@ def main(args):
 
     data_cfg = config.get('data', {})
     training_cfg = config.get('training', {})
+    
+    # Additional TPU diagnostics
+    if training_cfg.get('use_tpu', False):
+        diagnose_tpu_environment()
+        logger.info(f"TPU Strategy initialized: {strategy.__class__.__name__}")
+        logger.info(f"Number of TPU cores: {strategy.num_replicas_in_sync}")
     model_cfg = config.get('model', {})
     optimizer_cfg = config.get('optimizer', {})
 
@@ -1228,17 +1057,14 @@ def main(args):
     
     train_ds, val_ds, test_ds, num_train_samples, num_val_samples, num_test_samples, class_names, num_classes = data_result
     
-    # Verify multi-modal data loading
-    logger.info("--- Verifying Multi-Modal Data ---")
+    # Verify RGB data loading
+    logger.info("--- Verifying RGB Data Loading ---")
     if train_ds is not None:
         for batch_inputs, _ in train_ds.take(1):
-            if isinstance(batch_inputs, dict):
-                for name, tensor in batch_inputs.items():
-                    mean_val = tf.reduce_mean(tf.cast(tensor, tf.float32))
-                    std_val = tf.math.reduce_std(tf.cast(tensor, tf.float32))
-                    logger.info(f"Input '{name}': Mean={mean_val.numpy():.4f}, StdDev={std_val.numpy():.4f}")
-                    if std_val.numpy() < 1e-6:
-                        logger.error(f"CRITICAL: Input '{name}' appears to be all zeros or constant! Check data loading.")
+            if isinstance(batch_inputs, tf.Tensor):
+                mean_val = tf.reduce_mean(tf.cast(batch_inputs, tf.float32))
+                std_val = tf.math.reduce_std(tf.cast(batch_inputs, tf.float32))
+                logger.info(f"RGB Input: Mean={mean_val.numpy():.4f}, StdDev={std_val.numpy():.4f}")
             break
     else:
         logger.error("Training dataset is None, cannot verify data.")
@@ -1336,7 +1162,6 @@ def main(args):
         test_steps = (num_test_samples + batch_size - 1) // batch_size
         test_loss, *test_metrics_values = model.evaluate(test_ds, steps=test_steps, verbose=1)
         logger.info(f"Test Loss: {test_loss}")
-        # Assuming model.metrics_names includes 'loss' as the first element
         for metric_name, metric_value in zip(model.metrics_names[1:], test_metrics_values):
             logger.info(f"Test {metric_name}: {metric_value}")
     elif test_ds and num_test_samples == 0:

@@ -1,7 +1,7 @@
 data:
   metadata_path: "data/classification/metadata.json" 
   image_size: [224, 224] 
-  batch_size: 32  # Adjusted for single GPU
+  batch_size: 64
   split_ratio: 0.2
   # debug_max_total_samples: 100 # Commented out to use full dataset
   
@@ -13,17 +13,10 @@ data:
   test_split: 0.1
   random_seed: 42
 
-  use_depth_map: true
-  depth_map_dir_name: "depth" 
-
-  use_point_cloud: true
-  point_cloud_root_dir: "/kaggle/input/metafood3d-pointcloud/_MetaFood3D_new_Point_cloud/Point_cloud" 
-  point_cloud_sampling_rate_dir: "4096" 
-  point_cloud_suffix: "_sampled_1.ply" 
 
   augmentation:
-    enabled: true
-    augment_training_data: true
+    enabled: false
+    augment_training_data: false
     augment_validation_data: false
     
     # Production augmentation ranges
@@ -54,7 +47,7 @@ data:
   # Advanced augmentation techniques (applied after batching)
   advanced_augmentation:
     mixup:
-      enabled: true
+      enabled: false
       alpha: 0.4
 
     cutmix:
@@ -64,13 +57,6 @@ data:
     # Label smoothing equivalent through augmentation
     label_smoothing_equivalent: 0.1
 
-  modalities_preprocessing:
-    depth:
-      normalize: true
-
-    point_cloud:
-      num_points: 4096 
-      normalize: true   
 
 # Production Model Configuration
 model:
@@ -106,7 +92,7 @@ model:
 # Production Optimizer Configuration
 optimizer:
   name: "AdamW"
-  learning_rate: 0.0005
+  learning_rate: 0.001  # Increased for larger TPU batch size
   weight_decay: 0.01 
   clipnorm: 1.0  
   
@@ -134,7 +120,7 @@ training:
   epochs: 30 
   debug_epochs: 3  
   use_mixed_precision: true
-  use_tpu: false  
+  use_tpu: true  
   
   # DISABLED for debugging
   use_class_weights: false

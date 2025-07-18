@@ -460,7 +460,7 @@ def load_classification_data(
                 logger.info(f"  base_data_dir contents: {list(Path(base_data_dir).iterdir())[:5]}")
         
         if not full_image_path.exists():
-            if skipped_count < 5:  # Only log first few missing files to avoid spam
+            if skipped_count < 5:  
                 logger.warning(f"Image file not found: {full_image_path}. Skipping.")
             skipped_count += 1
             continue
@@ -597,138 +597,11 @@ def load_classification_data(
     augmentation_pipeline = _build_augmentation_pipeline(data_config) # Pass data_config
 
     # Helper function for tf.py_function - handles complex file I/O in Python
-    def _load_modalities_py(rgb_path_tensor, base_data_dir_tensor):
-        """Load depth and point cloud data given RGB path"""
-        try:
-            # Convert tensors to Python strings for os.path operations
-            rgb_path_str = tf.compat.as_str_any(rgb_path_tensor)
-            base_data_dir_str = tf.compat.as_str_any(base_data_dir_tensor)
-        except Exception as e:
-            logger.error(f"Error converting tensors to strings: {e}")
-            # Return dummy data
-            num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
-            return np.zeros([*image_size, 1], dtype=np.uint8), np.zeros([num_points, 3], dtype=np.float32)
-
-        # Load depth map
-        try:
-            depth_dir_name = data_config.get('depth_map_dir_name', 'depth')
-            # Reconstruct the full path to the RGB image first
-            full_rgb_path = os.path.join(base_data_dir_str, rgb_path_str)
-
-            # Derive depth path from full_rgb_path
-            if '/original/' in full_rgb_path:
-                depth_path = full_rgb_path.replace('/original/', f'/{depth_dir_name}/')
-            else:
-                depth_path = full_rgb_path.replace('.jpg', '_depth.jpg').replace('.png', '_depth.png')
-            
-            logger.debug(f"Attempting to load depth map from: {depth_path}")
-            if os.path.exists(depth_path):
-                # Load depth image
-                with open(depth_path, 'rb') as f:
-                    depth_bytes = f.read()
-                depth_img = tf.image.decode_image(depth_bytes, channels=1, expand_animations=False)
-                depth_img = tf.image.resize(depth_img, image_size)
-                depth_np = depth_img.numpy().astype(np.uint8)
-                logger.debug(f"Successfully loaded depth map from: {depth_path}")
-            else:
-                logger.warning(f"Depth map file not found: {depth_path}. Using dummy.")
-                depth_np = np.zeros([*image_size, 1], dtype=np.uint8)
-        except Exception as e:
-            logger.error(f"Error loading depth map for {rgb_path_str}: {e}")
-            depth_np = np.zeros([*image_size, 1], dtype=np.uint8)
-        
-        # Load point cloud with correct path structure
-        try:
-            num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
-            
-            # The point_cloud_root_dir from config is already absolute (Kaggle path)
-            pc_root = data_config.get('point_cloud_root_dir')
-            sampling_rate = data_config.get('point_cloud_sampling_rate_dir')
-            suffix = data_config.get('point_cloud_suffix')
-
-            if pc_root and sampling_rate and suffix:
-                # Extract food_class and food_item from the relative rgb_path_str
-                # Example: Apple/apple_1/original/0.jpg
-                path_parts_relative = Path(rgb_path_str).parts
-                
-                # Assuming structure: ClassName/InstanceName/original/image.jpg
-                if len(path_parts_relative) >= 3: 
-                    food_class = path_parts_relative[0]
-                    food_item = path_parts_relative[1]
-                    
-                    pc_path = os.path.join(pc_root, sampling_rate, food_class, food_item, f"{food_item}{suffix}")
-                    
-                    logger.debug(f"Attempting to load point cloud from: {pc_path}") # Add debug log
-                    if os.path.exists(pc_path):
-                        # Load actual PLY file
-                        try:
-                            pc_data = []
-                            with open(pc_path, 'r') as f:
-                                lines = f.readlines()
-                                
-                            # Find where vertex data starts
-                            vertex_count = 0
-                            data_start = 0
-                            for i, line in enumerate(lines):
-                                if line.startswith('element vertex'):
-                                    vertex_count = int(line.split()[-1])
-                                elif line.startswith('end_header'):
-                                    data_start = i + 1
-                                    break
-                            
-                            # Read vertex coordinates
-                            for i in range(data_start, min(data_start + vertex_count, data_start + num_points)):
-                                if i < len(lines):
-                                    coords = lines[i].strip().split()
-                                    if len(coords) >= 3:
-                                        x, y, z = float(coords[0]), float(coords[1]), float(coords[2])
-                                        pc_data.append([x, y, z])
-                            
-                            # Convert to numpy and handle size
-                            if len(pc_data) > 0:
-                                pc_np = np.array(pc_data, dtype=np.float32)
-                                if len(pc_np) > num_points:
-                                    # Random sampling if too many points
-                                    indices = np.random.choice(len(pc_np), num_points, replace=False)
-                                    pc_np = pc_np[indices]
-                                elif len(pc_np) < num_points:
-                                    # Pad with zeros if too few points
-                                    padding = np.zeros((num_points - len(pc_np), 3), dtype=np.float32)
-                                    pc_np = np.vstack([pc_np, padding])
-                            else:
-                                pc_np = np.zeros([num_points, 3], dtype=np.float32)
-                                
-                            logger.debug(f"Loaded {len(pc_data)} points from: {pc_path}")
-                            
-                        except Exception as e:
-                            logger.warning(f"Error reading PLY file {pc_path}: {e}. Using dummy.")
-                            pc_np = np.zeros([num_points, 3], dtype=np.float32)
-                    else:
-                        logger.warning(f"Point cloud file not found: {pc_path}. Using dummy.")
-                        pc_np = np.zeros([num_points, 3], dtype=np.float32)
-                else:
-                    logger.warning(f"Could not parse food_class/food_item from relative path: {rgb_path_str}. Using dummy point cloud.")
-                    pc_np = np.zeros([num_points, 3], dtype=np.float32)
-            else:
-                logger.error("Point cloud configuration (root, sampling_rate, suffix) is incomplete. Using dummy.")
-                pc_np = np.zeros([num_points, 3], dtype=np.float32)
-                
-        except Exception as e:
-            logger.error(f"Error loading point cloud for {rgb_path_str}: {e}")
-            num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
-            pc_np = np.zeros([num_points, 3], dtype=np.float32)
-        
-        return depth_np, pc_np
 
     def configure_dataset(paths_np: np.ndarray, labels_np: np.ndarray, shuffle_ds: bool, augment_ds: bool, is_training_set_flag: bool, base_data_dir_param: str = None) -> Optional[tf.data.Dataset]:
         if len(paths_np) == 0:
             return None
         try:
-            # Check if multimodal is enabled
-            use_depth_map = data_config.get('use_depth_map', False)
-            use_point_cloud = data_config.get('use_point_cloud', False)
-            is_multimodal = use_depth_map or use_point_cloud
-            
             # Create dataset from paths and labels
             dataset = tf.data.Dataset.from_tensor_slices((list(paths_np), list(labels_np)))
             
@@ -755,57 +628,10 @@ def load_classification_data(
                     # Remove batch dimension
                     image = tf.squeeze(image, 0)
                 
-                if is_multimodal:
-                    # Load additional modalities using tf.py_function
-                    depth_data, pc_data = tf.py_function(
-                        func=_load_modalities_py,
-                        inp=[path, base_data_dir_param or ""],
-                        Tout=[tf.uint8, tf.float32]
-                    )
-                    
-                    # Set shapes for depth and point cloud data
-                    depth_data.set_shape([*image_size, 1])
-                    num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
-                    pc_data.set_shape([num_points, 3])
-                    
-                    # Normalize modalities robustly to prevent gradient explosion
-                    
-                    # 1. Normalize depth data to be in the [0, 255] range with proper clipping
-                    depth_data = tf.cast(depth_data, tf.float32)
-                    # Clip extreme depth values and normalize to [0, 255] range
-                    depth_data = tf.clip_by_value(depth_data, 0.0, 10000.0)  # Clip extreme depth values
-                    depth_min = tf.reduce_min(depth_data)
-                    depth_max = tf.reduce_max(depth_data)
-                    # Avoid division by zero
-                    depth_range = tf.maximum(depth_max - depth_min, 1e-8)
-                    depth_data = (depth_data - depth_min) / depth_range * 255.0
-                    
-                    # 2. Concatenate Depth map 3 times to mimic RGB channels
-                    depth_data_3_channel = tf.concat([depth_data, depth_data, depth_data], axis=-1)
-
-                    # 3. Apply the similar preprocessing to both RGB and Depth
-                    if preprocess_input_fn:
-                        image = preprocess_input_fn(image)
-                        depth_data_3_channel = preprocess_input_fn(depth_data_3_channel)
-                    
-                    # 4. Normalize Point Cloud data robustly with clipping
-                    # Clip extreme coordinates first, then normalize
-                    pc_data = tf.clip_by_value(pc_data, -1000.0, 1000.0)  # Clip extreme coordinates
-                    pc_data = tf.nn.l2_normalize(pc_data, axis=-1)
-                    
-                    # 5. Add final validation clipping to prevent any extreme values
-                    inputs_dict = {
-                        'rgb_input': tf.clip_by_value(image, -5.0, 5.0),
-                        'depth_input': tf.clip_by_value(depth_data_3_channel, -5.0, 5.0),  
-                        'point_cloud_input': tf.clip_by_value(pc_data, -2.0, 2.0)
-                    }
-                    
-                    return inputs_dict, label
-                else:
-                    # Apply preprocessing to RGB-only case
-                    if preprocess_input_fn:
-                        image = preprocess_input_fn(image)
-                    return image, label
+                # Apply preprocessing to RGB
+                if preprocess_input_fn:
+                    image = preprocess_input_fn(image)
+                return image, label
             
             dataset = dataset.map(load_and_process, num_parallel_calls=tf.data.AUTOTUNE)
 
@@ -826,28 +652,13 @@ def load_classification_data(
                 
                 # Create one-hot encoding with explicit dtype
                 labels_one_hot = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
-
-                if is_multimodal:
-                    # Handle dictionary of inputs for multimodal case
-                    expected_shapes = {
-                        'rgb_input': [None, *image_size, 3],
-                        'depth_input': [None, *image_size, 3],
-                        'point_cloud_input': [None, data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096), 3]
-                    }
-                    
-                    # Set shape for each tensor in the dictionary
-                    for key, tensor in images.items():
-                        if key in expected_shapes:
-                            tensor.set_shape(expected_shapes[key])
+                # Handle single RGB input case
+                if is_training_set_flag:
+                    # For training, batch size is fixed (due to drop_remainder=True)
+                    images.set_shape([batch_size, *image_size, 3])
                 else:
-                    # Handle single RGB input case
-                    if is_training_set_flag:
-                        # For training, batch size is fixed (due to drop_remainder=True)
-                        images.set_shape([batch_size, *image_size, 3])
-                    else:
-                        # For val/test, the last batch can be smaller
-                        images.set_shape([None, *image_size, 3])
-
+                    # For val/test, the last batch can be smaller
+                    images.set_shape([None, *image_size, 3])
                 # Set shape for the labels
                 if is_training_set_flag:
                     labels_one_hot.set_shape([batch_size, num_classes])
