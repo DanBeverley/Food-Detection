@@ -79,12 +79,10 @@ def parse_tfrecord_fn(example_proto, target_size, num_points):
 
 def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], ...]:
     try:
-        logger.info("--- Starting load_segmentation_data (Full-Featured) ---")
+        logger.info("--- Starting load_segmentation_data (MINIMAL DEBUG VERSION) ---")
         
         data_cfg = config['data']
         paths_cfg = config['paths']
-        model_cfg = config['model']
-        aug_cfg = data_cfg.get('augmentation', {})
         
         target_size = tuple(data_cfg.get('image_size', (256, 256)))
         batch_size = data_cfg['batch_size']
@@ -100,84 +98,12 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
         num_points_target = pc_prep_cfg.get('num_points', 4096)
 
-        preprocess_fn = _get_segmentation_preprocess_fn(model_cfg.get('backbone'))
-        
-        geometric_layers = []
-        if aug_cfg.get("horizontal_flip", False):
-            geometric_layers.append(layers.RandomFlip("horizontal"))
-        if aug_cfg.get("rotation_range", 0) > 0:
-            rotation_factor = aug_cfg["rotation_range"] / 360.0
-            geometric_layers.append(layers.RandomRotation(rotation_factor))
-
-        color_layers = []
-        if aug_cfg.get("brightness_range", [1.0, 1.0]) != [1.0, 1.0]:
-            factor = max(abs(1.0 - aug_cfg["brightness_range"][0]), abs(aug_cfg["brightness_range"][1] - 1.0))
-            color_layers.append(layers.RandomBrightness(factor=factor, value_range=(0.0, 255.0)))
-        if aug_cfg.get("contrast_factor", 0) > 0:
-            color_layers.append(layers.RandomContrast(factor=aug_cfg["contrast_factor"]))
-
-        @tf.function
-        def augment_batch(inputs, mask):
-            image_and_mask = tf.concat([inputs['rgb_input'], inputs['depth_input'], mask], axis=-1)
-            
-            for layer in geometric_layers:
-                image_and_mask = layer(image_and_mask, training=True)
-                
-            augmented_rgb = image_and_mask[..., :3]
-            augmented_depth = image_and_mask[..., 3:6]
-            augmented_mask = image_and_mask[..., 6:]
-            
-            augmented_pc = inputs['pc_input']
-            pc_dtype = augmented_pc.dtype
-            
-            if aug_cfg.get("horizontal_flip", False):
-                batch_size = tf.shape(augmented_pc)[0]
-                flip_cond = tf.random.uniform(shape=[batch_size, 1, 1]) < 0.5
-                flip_multiplier = tf.where(flip_cond, tf.cast(-1.0, pc_dtype), tf.cast(1.0, pc_dtype))
-                pc_flip_transform = tf.concat([flip_multiplier, tf.ones_like(flip_multiplier), tf.ones_like(flip_multiplier)], axis=-1)
-                augmented_pc = augmented_pc * pc_flip_transform
-                
-            if aug_cfg.get("rotation_range", 0) > 0:
-                batch_size = tf.shape(augmented_pc)[0]
-                rotation_degrees = aug_cfg["rotation_range"]
-                angles = tf.random.uniform(shape=[batch_size], minval=-rotation_degrees, maxval=rotation_degrees)
-                angles_rad = angles * np.pi / 180.0
-                cos_angles, sin_angles = tf.cos(angles_rad), tf.sin(angles_rad)
-                zeros, ones = tf.zeros_like(cos_angles), tf.ones_like(cos_angles)
-                rotation_matrices = tf.stack([
-                    tf.stack([cos_angles, -sin_angles, zeros], axis=1),
-                    tf.stack([sin_angles, cos_angles, zeros], axis=1),
-                    tf.stack([zeros, zeros, ones], axis=1)
-                ], axis=1)
-                rotation_matrices = tf.cast(rotation_matrices, pc_dtype)
-                augmented_pc = tf.linalg.matmul(augmented_pc, rotation_matrices, transpose_b=True)
-
-            for layer in color_layers:
-                augmented_rgb = layer(augmented_rgb, training=True)
-                
-            augmented_inputs = {
-                'rgb_input': augmented_rgb,
-                'depth_input': augmented_depth,
-                'pc_input': augmented_pc
-            }
-            return augmented_inputs, augmented_mask
-        
-        def finalize_pre_batch(inputs, mask):
-            if preprocess_fn:
-                inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
-                inputs['depth_input'] = inputs['depth_input'] / 255.0
-            
+        def sanitize(inputs, mask):
             pc = inputs['pc_input']
             pc = tf.where(tf.math.is_nan(pc), 0.0, pc)
             pc = tf.where(tf.math.is_inf(pc), 0.0, pc)
             inputs['pc_input'] = pc
-            
-            inputs['rgb_input'] = tf.clip_by_value(inputs['rgb_input'], -10.0, 10.0)
-            inputs['depth_input'] = tf.clip_by_value(inputs['depth_input'], -10.0, 10.0)
-            inputs['pc_input'] = tf.clip_by_value(inputs['pc_input'], -10.0, 10.0)
-            
             return inputs, mask
-
 
         def create_dataset_from_tfrecord(tfrecord_filename, is_training):
             filepath = str(tfrecord_dir / tfrecord_filename)
@@ -191,14 +117,10 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                 dataset = dataset.shuffle(buffer_size=1024).repeat()
 
             dataset = dataset.map(lambda x: parse_tfrecord_fn(x, target_size, num_points_target), num_parallel_calls=tf.data.AUTOTUNE)
-            dataset = dataset.map(finalize_pre_batch, num_parallel_calls=tf.data.AUTOTUNE)
+            dataset = dataset.map(sanitize, num_parallel_calls=tf.data.AUTOTUNE)
             dataset = dataset.batch(batch_size, drop_remainder=True)
-            
-            if is_training and aug_cfg.get('enabled', False):
-                dataset = dataset.map(augment_batch, num_parallel_calls=tf.data.AUTOTUNE)
-            
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
-            logger.info(f"[{tfrecord_filename}] Full-featured pipeline created successfully.")
+            logger.info(f"[{tfrecord_filename}] MINIMAL DEBUG pipeline created successfully.")
             return dataset
         
         logger.info("Creating training dataset...")
