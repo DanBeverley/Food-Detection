@@ -277,8 +277,16 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
     pc_features = layers.GlobalMaxPooling1D(name='pc_gmp')(pc_features)  # (batch, 1024)
 
     # Create models for each branch to apply them to inputs
-    rgb_model = tf.keras.Model(inputs=rgb_base_model.input, outputs=rgb_skip_outputs + [rgb_bottleneck])
-    depth_model = tf.keras.Model(inputs=depth_base_model.input, outputs=depth_skip_outputs + [depth_bottleneck])
+    rgb_model = tf.keras.Model(
+        inputs=rgb_base_model.input, 
+        outputs=rgb_skip_outputs + [rgb_bottleneck],
+        name="rgb_encoder"
+    )
+    depth_model = tf.keras.Model(
+        inputs=depth_base_model.input, 
+        outputs=depth_skip_outputs + [depth_bottleneck],
+        name="depth_encoder"
+    )
     
     # Apply models to actual inputs
     *rgb_skips, rgb_bottle = rgb_model(rgb_input)
@@ -553,11 +561,8 @@ def main():
             data_config=data_cfg
         )
         
-        for layer in model.layers:
-            if isinstance(layer, tf.keras.Model) and 'top_activation' in [l.name for l in layer.layers]:
-                layer.trainable = False
-                logger.info(f"Successfully found and froze backbone: {layer.name}")
-                break
+        logger.info("Freezing RGB Backbone: 'rgb_encoder'")
+        model.get_layer('rgb_encoder').trainable = False
 
         # Compile for Stage 1
         stage1_lr = optimizer_cfg.get('stage1_learning_rate', 1e-3)
@@ -604,11 +609,8 @@ def main():
     logger.info("\n" + "="*60 + "\n=== STAGE 2: Fine-tuning all branches together ===\n" + "="*60)
     
     with strategy.scope():
-        for layer in model.layers:
-            if isinstance(layer, tf.keras.Model) and 'top_activation' in [l.name for l in layer.layers]:
-                layer.trainable = True
-                logger.info(f"Successfully found and unfroze backbone: {layer.name}")
-                break
+        logger.info("Unfreezing RGB Backbone: 'rgb_encoder'")
+        model.get_layer('rgb_encoder').trainable = True
             
         # Compile with a very low learning rate
         stage2_lr = optimizer_cfg.get('stage2_learning_rate', 1e-5)
