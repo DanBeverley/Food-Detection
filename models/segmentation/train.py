@@ -321,7 +321,7 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
 
     # Final Output: raw logits for numerical stability
     outputs = layers.Conv2D(output_channels, 1, padding="same", name='final_logits')(x)
-    outputs = layers.Activation('linear', dtype='float32', name='output_float32')(outputs)
+    outputs = layers.Activation('linear', name='output_float32')(outputs)
 
     model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
     logger.info("Built U-Net style fused model (outputting float32 logits).")
@@ -482,7 +482,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
-    set_mixed_precision_policy(config, strategy)
+    # set_mixed_precision_policy(config, strategy)  # DISABLED FOR DEBUG
 
     # Data Loading
     logger.info("Loading data for training...")
@@ -575,8 +575,8 @@ def main():
         model.get_layer('rgb_encoder').trainable = False
 
         # Compile for Stage 1
-        stage1_lr = optimizer_cfg.get('stage1_learning_rate', 1e-5)
-        optimizer_stage1 = tf.keras.optimizers.Adam(learning_rate=stage1_lr, clipnorm=1.0)
+        stage1_lr = optimizer_cfg.get('stage1_learning_rate', 1e-4)
+        optimizer_stage1 = tf.keras.optimizers.AdamW(learning_rate=stage1_lr, clipnorm=1.0)
         model.compile(optimizer=optimizer_stage1, loss=loss_function, metrics=metrics_list)
         logger.info(f"Model compiled for Stage 1 with Adam, STABLE LR: {stage1_lr}, and Simplified Loss")
     
@@ -623,8 +623,8 @@ def main():
         model.get_layer('rgb_encoder').trainable = True
             
         # Compile with a very low learning rate
-        stage2_lr = optimizer_cfg.get('stage2_learning_rate', 1e-5)
-        optimizer_stage2 = tf.keras.optimizers.Adam(learning_rate=stage2_lr, clipnorm=1.0)
+        stage2_lr = optimizer_cfg.get('stage2_learning_rate', 1e-4)
+        optimizer_stage2 = tf.keras.optimizers.AdamW(learning_rate=stage2_lr, clipnorm=1.0)
         model.compile(optimizer=optimizer_stage2, loss=loss_function, metrics=metrics_list)
         logger.info(f"Model re-compiled for Stage 2 with LR: {stage2_lr}")
 
