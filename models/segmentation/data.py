@@ -191,6 +191,23 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
         num_points_target = pc_prep_cfg.get('num_points', 4096)
 
+        augmentation_pipeline = SegmentationAugmentation(aug_cfg)
+        preprocess_fn = _get_segmentation_preprocess_fn(model_cfg.get('backbone'))
+        
+        def finalize_pre_batch(inputs, mask):
+            if preprocess_fn:
+                inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
+                inputs['depth_input'] = preprocess_fn(inputs['depth_input'])
+            
+            inputs['rgb_input'] = tf.clip_by_value(inputs['rgb_input'], -10.0, 10.0)
+            inputs['depth_input'] = tf.clip_by_value(inputs['depth_input'], -10.0, 10.0)
+            inputs['pc_input'] = tf.clip_by_value(inputs['pc_input'], -10.0, 10.0)
+            
+            return inputs, mask
+
+        def augment_batch(inputs, mask):
+            return augmentation_pipeline(inputs, mask)
+
         def create_dataset_from_tfrecord(tfrecord_filename, is_training):
             filepath = str(tfrecord_dir / tfrecord_filename)
             if not os.path.exists(filepath):
@@ -206,33 +223,33 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                 # IMPORTANT: repeat() is essential for multi-epoch training
                 dataset = dataset.shuffle(buffer_size=1024).repeat()
 
-            # THE SIMPLIFICATION: Just parse the data. No other mapping.
             dataset = dataset.map(
                 lambda x: parse_tfrecord_fn(x, target_size, num_points_target),
                 num_parallel_calls=tf.data.AUTOTUNE
             )
             
-            # Batch it with drop_remainder=True for distributed training
+            dataset = dataset.map(finalize_pre_batch, num_parallel_calls=tf.data.AUTOTUNE)
             dataset = dataset.batch(batch_size, drop_remainder=True)
-
-            # Prefetch
-            dataset = dataset.prefetch(tf.data.AUTOTUNE)
             
-            logger.info(f"[{tfrecord_filename}] SIMPLIFIED pipeline created (Parse -> Batch -> Prefetch).")
+            if is_training and aug_cfg.get('enabled', False):
+                dataset = dataset.map(augment_batch, num_parallel_calls=tf.data.AUTOTUNE)
+            
+            dataset = dataset.prefetch(tf.data.AUTOTUNE)
+            logger.info(f"[{tfrecord_filename}] Full-featured pipeline created successfully.")
             return dataset
-
-        logger.info("Creating training dataset with SIMPLIFIED pipeline...")
+        
+        logger.info("Creating training dataset...")
         train_dataset = create_dataset_from_tfrecord("train.tfrecord", is_training=True)
         
-        logger.info("Creating validation dataset with SIMPLIFIED pipeline...")
+        logger.info("Creating validation dataset...")
         val_dataset = create_dataset_from_tfrecord("validation.tfrecord", is_training=False)
         
-        logger.info("Creating test dataset with SIMPLIFIED pipeline...")
+        logger.info("Creating test dataset...")
         test_dataset = create_dataset_from_tfrecord("test.tfrecord", is_training=False)
 
-        logger.info("--- [DEBUG MODE] Finished Simplified load_segmentation_data ---")
+        logger.info("--- Finished load_segmentation_data (Full-Featured) ---")
         return train_dataset, val_dataset, test_dataset, num_train_samples, num_val_samples, num_test_samples, num_classes
 
     except Exception as e:
-        logger.error(f"An unexpected error occurred in simplified load_segmentation_data: {e}", exc_info=True)
+        logger.error(f"An unexpected error occurred in load_segmentation_data: {e}", exc_info=True)
         return None, None, None, 0, 0, 0, 0
