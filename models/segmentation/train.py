@@ -239,31 +239,30 @@ def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_ba
 
 
 def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_config: dict, data_config: dict):
-    """Builds a multi-modal U-Net style model with skip connections."""
+    from tensorflow.keras.applications import efficientnet, mobilenet_v3
     
-    # Input Layers
     rgb_input = layers.Input(shape=[*image_size, 3], name='rgb_input')
     depth_input = layers.Input(shape=[*image_size, 3], name='depth_input')
     num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud',{}).get('num_points', 4096)
     pc_input = layers.Input(shape=[num_points, 3], name='pc_input')
     
     input_layers_dict = {'rgb_input': rgb_input, 'depth_input': depth_input, 'pc_input': pc_input}
-    logger.info("Created inputs for RGB, Depth, and Point Cloud.")
     
-    # RGB Encoder (Pre-trained EfficientNetB0)
-    rgb_base_model = EfficientNetB0(input_shape=[*image_size, 3], include_top=False, weights='imagenet')
+    rgb_processed = efficientnet.preprocess_input(rgb_input)
+    depth_processed = mobilenet_v3.preprocess_input(depth_input)
+    
+    rgb_base_model = EfficientNetB0(input_tensor=rgb_processed, include_top=False, weights='imagenet')
     rgb_base_model.trainable = model_config.get('backbone_trainable', True)
     rgb_skip_names = [
-        'block1a_project_bn',   # 128x128
-        'block2b_add',          # 64x64
-        'block3b_add',          # 32x32
-        'block5c_add',          # 16x16
+        'block1a_project_bn',
+        'block2b_add',
+        'block3b_add',
+        'block5c_add',
     ]
     rgb_skip_outputs = [rgb_base_model.get_layer(name).output for name in rgb_skip_names]
-    rgb_bottleneck = rgb_base_model.get_layer('top_activation').output  # 8x8
+    rgb_bottleneck = rgb_base_model.get_layer('top_activation').output
     
-    # Depth Encoder (Scratch MobileNetV3Small)
-    depth_base_model = MobileNetV3Small(input_shape=[*image_size, 3], include_top=False, weights=None)
+    depth_base_model = MobileNetV3Small(input_tensor=depth_processed, include_top=False, weights=None)
     depth_base_model._name = "depth_backbone"
 
     depth_skip_names = [
@@ -273,9 +272,8 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
         'expanded_conv_7_add',
     ]
     depth_skip_outputs = [depth_base_model.get_layer(name).output for name in depth_skip_names]
-    depth_bottleneck = depth_base_model.get_layer('activation_17').output  # 8x8
+    depth_bottleneck = depth_base_model.get_layer('activation_17').output
 
-    # Point Cloud Encoder (PointNet-style)
     def conv_bn(x, filters):
         x = layers.Conv1D(filters, kernel_size=1, padding="valid")(x)
         x = layers.BatchNormalization(momentum=0.9)(x)
@@ -285,9 +283,8 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
     pc_x = conv_bn(pc_x, 64)
     pc_x = conv_bn(pc_x, 128)
     pc_features = conv_bn(pc_x, 1024)
-    pc_features = layers.GlobalMaxPooling1D(name='pc_gmp')(pc_features)  # (batch, 1024)
+    pc_features = layers.GlobalMaxPooling1D(name='pc_gmp')(pc_features)
 
-    # Create models for each branch to apply them to inputs
     rgb_model = tf.keras.Model(
         inputs=rgb_base_model.input, 
         outputs=rgb_skip_outputs + [rgb_bottleneck],
@@ -299,9 +296,8 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
         name="depth_encoder"
     )
     
-    # Apply models to actual inputs
-    *rgb_skips, rgb_bottle = rgb_model(rgb_input)
-    *depth_skips, depth_bottle = depth_model(depth_input)
+    *rgb_skips, rgb_bottle = rgb_model(rgb_processed)
+    *depth_skips, depth_bottle = depth_model(depth_processed)
 
     # Bottleneck Fusion
     # Resize PC features to match image bottleneck spatial dimensions (8x8)
@@ -330,12 +326,9 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
     x = layers.UpSampling2D(2, interpolation='bilinear')(x)
     x = layers.Conv2D(16, 3, padding='same', activation='relu')(x)
 
-    # Final Output: raw logits for numerical stability
     outputs = layers.Conv2D(output_channels, 1, padding="same", name='final_logits')(x)
-    outputs = layers.Activation('linear', dtype='float32', name='output_float32')(outputs)
 
     model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
-    logger.info("Built U-Net style fused model (outputting float32 logits).")
     return model
 
 # Custom metrics for segmentation
@@ -493,7 +486,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
-    set_mixed_precision_policy(config, strategy)
+    # set_mixed_precision_policy(config, strategy)
 
     # Data Loading
     logger.info("Loading data for training...")
