@@ -3,19 +3,16 @@ import tensorflow as tf
 import numpy as np
 import logging
 from typing import Tuple, Dict, Optional, List, Any
-from sklearn.model_selection import train_test_split
-import pathlib
-import json
-from tensorflow.keras import layers
 from pathlib import Path
+from tensorflow.keras import layers
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 _SEG_PREPROCESS_FN_CACHE = {}
 
-def _get_project_root() -> pathlib.Path:
-    return pathlib.Path(__file__).resolve().parent.parent.parent
+def _get_project_root() -> Path:
+    return Path(__file__).resolve().parent.parent.parent
 
 def _get_segmentation_preprocess_fn(architecture: Optional[str]):
     if architecture is None:
@@ -51,7 +48,6 @@ class SegmentationAugmentation(tf.keras.Model):
         super().__init__(**kwargs)
         self.aug_config = aug_config
 
-        # Use Keras Layers for Image Augmentations
         self.geometric_layers = []
         if self.aug_config.get("horizontal_flip", False):
             self.geometric_layers.append(layers.RandomFlip("horizontal"))
@@ -66,56 +62,39 @@ class SegmentationAugmentation(tf.keras.Model):
         if self.aug_config.get("contrast_factor", 0) > 0:
             self.color_layers.append(layers.RandomContrast(factor=self.aug_config["contrast_factor"]))
 
-    def call(self, inputs):
-        # This call now happens AFTER batching, so inputs are batched
-        inputs_dict, mask = inputs
-        
-        # Augment Images and Mask Together
-        image_and_mask = tf.concat([inputs_dict['rgb_input'], inputs_dict['depth_input'], mask], axis=-1)
+    def call(self, inputs, mask):
+        image_and_mask = tf.concat([inputs['rgb_input'], inputs['depth_input'], mask], axis=-1)
         
         for layer in self.geometric_layers:
             image_and_mask = layer(image_and_mask, training=True)
             
-        # De-concatenate
         augmented_rgb = image_and_mask[..., :3]
         augmented_depth = image_and_mask[..., 3:6]
         augmented_mask = image_and_mask[..., 6:]
         
-        # Augment Point Cloud Separately (vectorized for entire batch)
-        augmented_pc = inputs_dict['pc_input']
-
-        # Random Flip (vectorized)
+        augmented_pc = inputs['pc_input']
+        
         if self.aug_config.get("horizontal_flip", False):
             batch_size = tf.shape(augmented_pc)[0]
             flip_cond = tf.random.uniform(shape=[batch_size, 1, 1]) < 0.5
             flip_multiplier = tf.where(flip_cond, -1.0, 1.0)
             pc_flip_transform = tf.concat([flip_multiplier, tf.ones_like(flip_multiplier), tf.ones_like(flip_multiplier)], axis=-1)
             augmented_pc = augmented_pc * pc_flip_transform
-
-        # Random Rotation (vectorized)
+            
         if self.aug_config.get("rotation_range", 0) > 0:
             batch_size = tf.shape(augmented_pc)[0]
             rotation_degrees = self.aug_config["rotation_range"]
             angles = tf.random.uniform(shape=[batch_size], minval=-rotation_degrees, maxval=rotation_degrees)
             angles_rad = angles * np.pi / 180.0
-            
-            # Create rotation matrices for the entire batch
-            cos_angles = tf.cos(angles_rad)
-            sin_angles = tf.sin(angles_rad)
-            zeros = tf.zeros_like(cos_angles)
-            ones = tf.ones_like(cos_angles)
-            
-            # Stack rotation matrices [batch_size, 3, 3]
+            cos_angles, sin_angles = tf.cos(angles_rad), tf.sin(angles_rad)
+            zeros, ones = tf.zeros_like(cos_angles), tf.ones_like(cos_angles)
             rotation_matrices = tf.stack([
                 tf.stack([cos_angles, -sin_angles, zeros], axis=1),
                 tf.stack([sin_angles, cos_angles, zeros], axis=1),
                 tf.stack([zeros, zeros, ones], axis=1)
             ], axis=1)
-            
-            # Apply batch matrix multiplication
             augmented_pc = tf.linalg.matmul(augmented_pc, rotation_matrices, transpose_b=True)
 
-        # Apply Color Augmentations
         for layer in self.color_layers:
             augmented_rgb = layer(augmented_rgb, training=True)
             
@@ -127,7 +106,6 @@ class SegmentationAugmentation(tf.keras.Model):
         return augmented_inputs, augmented_mask
 
 def parse_tfrecord_fn(example_proto, target_size, num_points):
-    """Parses a single tf.train.Example from a TFRecord file into tensors."""
     feature_description = {
         'rgb_image_raw': tf.io.FixedLenFeature([], tf.string),
         'mask_image_raw': tf.io.FixedLenFeature([], tf.string),
@@ -144,25 +122,15 @@ def parse_tfrecord_fn(example_proto, target_size, num_points):
     mask.set_shape([*target_size, 1])
     mask = tf.cast(mask, tf.float32)
 
-    def decode_depth():
-        d = tf.image.decode_png(example['depth_image_raw'], channels=1)
-        d.set_shape([*target_size, 1])
-        return tf.cast(d, tf.float32)
-    
-    depth = tf.cond(
-        tf.strings.length(example['depth_image_raw']) > 0, 
-        decode_depth, 
-        lambda: tf.zeros([*target_size, 1], dtype=tf.float32)
-    )
-    
-    # Replicate depth channels to match model input
+    depth = tf.image.decode_png(example['depth_image_raw'], channels=1)
+    depth.set_shape([*target_size, 1])
+    depth = tf.cast(depth, tf.float32)
     depth = tf.concat([depth, depth, depth], axis=-1)
 
     pc = tf.io.decode_raw(example['point_cloud_raw'], tf.float32)
     pc = tf.reshape(pc, [num_points, 3])
     pc.set_shape([num_points, 3])
     
-    # Return a TUPLE that the model expects: (x, y) where x can be a dictionary
     inputs = {
         "rgb_input": rgb,
         "depth_input": depth,
@@ -170,23 +138,25 @@ def parse_tfrecord_fn(example_proto, target_size, num_points):
     }
     return inputs, mask
 
-def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, int, int, int]:
+def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], ...]:
     try:
-        logger.info("--- [DEBUG MODE] Starting Simplified load_segmentation_data ---")
+        logger.info("--- Starting load_segmentation_data (Full-Featured) ---")
         
         data_cfg = config['data']
         paths_cfg = config['paths']
+        model_cfg = config['model']
+        aug_cfg = data_cfg.get('augmentation', {})
         
         target_size = tuple(data_cfg.get('image_size', (256, 256)))
         batch_size = data_cfg['batch_size']
+        num_classes = data_cfg.get('num_classes', 1)
         
-        tfrecord_dir = Path(paths_cfg.get('tfrecord_dir', paths_cfg['metadata_dir'] + "/tfrecords"))
+        tfrecord_dir = Path(paths_cfg.get('tfrecord_dir'))
         logger.info(f"TFRecord directory set to: {tfrecord_dir}")
 
         num_train_samples = data_cfg.get('num_train_samples', 0)
         num_val_samples = data_cfg.get('num_val_samples', 0)
         num_test_samples = data_cfg.get('num_test_samples', 0)
-        num_classes = data_cfg.get('num_classes', 1)
         
         pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
         num_points_target = pc_prep_cfg.get('num_points', 4096)
@@ -195,8 +165,13 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         preprocess_fn = _get_segmentation_preprocess_fn(model_cfg.get('backbone'))
         
         def finalize_pre_batch(inputs, mask):
-            inputs['rgb_input'] = (inputs['rgb_input'] / 127.5) - 1.0
-            inputs['depth_input'] = (inputs['depth_input'] / 127.5) - 1.0
+            if preprocess_fn:
+                inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
+                inputs['depth_input'] = preprocess_fn(inputs['depth_input'])
+            
+            inputs['rgb_input'] = tf.clip_by_value(inputs['rgb_input'], -10.0, 10.0)
+            inputs['depth_input'] = tf.clip_by_value(inputs['depth_input'], -10.0, 10.0)
+            inputs['pc_input'] = tf.clip_by_value(inputs['pc_input'], -10.0, 10.0)
             
             return inputs, mask
 
@@ -209,28 +184,20 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                 logger.error(f"FATAL: TFRecord file not found: {filepath}")
                 return None
             
-            dataset = tf.data.TFRecordDataset(
-                filepath, 
-                num_parallel_reads=tf.data.AUTOTUNE
-            )
+            dataset = tf.data.TFRecordDataset(filepath, num_parallel_reads=tf.data.AUTOTUNE)
             
             if is_training:
-                # IMPORTANT: repeat() is essential for multi-epoch training
                 dataset = dataset.shuffle(buffer_size=1024).repeat()
 
-            dataset = dataset.map(
-                lambda x: parse_tfrecord_fn(x, target_size, num_points_target),
-                num_parallel_calls=tf.data.AUTOTUNE
-            )
-            
+            dataset = dataset.map(lambda x: parse_tfrecord_fn(x, target_size, num_points_target), num_parallel_calls=tf.data.AUTOTUNE)
             dataset = dataset.map(finalize_pre_batch, num_parallel_calls=tf.data.AUTOTUNE)
             dataset = dataset.batch(batch_size, drop_remainder=True)
             
-            # if is_training and aug_cfg.get('enabled', False):
-            #     dataset = dataset.map(augment_batch, num_parallel_calls=tf.data.AUTOTUNE)
+            if is_training and aug_cfg.get('enabled', False):
+                dataset = dataset.map(augment_batch, num_parallel_calls=tf.data.AUTOTUNE)
             
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
-            logger.info(f"[{tfrecord_filename}] Test pipeline created (Preprocessing ONLY).")
+            logger.info(f"[{tfrecord_filename}] Full-featured pipeline created successfully.")
             return dataset
         
         logger.info("Creating training dataset...")
