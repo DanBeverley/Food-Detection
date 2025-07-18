@@ -43,70 +43,6 @@ def _get_segmentation_preprocess_fn(architecture: Optional[str]):
     _SEG_PREPROCESS_FN_CACHE[arch_key] = preprocess_input_fn
     return preprocess_input_fn
 
-class SegmentationAugmentation(tf.keras.Model):
-    def __init__(self, aug_config, **kwargs):
-        super().__init__(**kwargs)
-        self.aug_config = aug_config
-
-        self.geometric_layers = []
-        if self.aug_config.get("horizontal_flip", False):
-            self.geometric_layers.append(layers.RandomFlip("horizontal"))
-        if self.aug_config.get("rotation_range", 0) > 0:
-            rotation_factor = self.aug_config["rotation_range"] / 360.0
-            self.geometric_layers.append(layers.RandomRotation(rotation_factor))
-
-        self.color_layers = []
-        if self.aug_config.get("brightness_range", [1.0, 1.0]) != [1.0, 1.0]:
-            factor = max(abs(1.0 - self.aug_config["brightness_range"][0]), abs(self.aug_config["brightness_range"][1] - 1.0))
-            self.color_layers.append(layers.RandomBrightness(factor=factor, value_range=(0.0, 255.0)))
-        if self.aug_config.get("contrast_factor", 0) > 0:
-            self.color_layers.append(layers.RandomContrast(factor=self.aug_config["contrast_factor"]))
-
-    def call(self, inputs):
-        inputs_dict, mask = inputs
-        image_and_mask = tf.concat([inputs_dict['rgb_input'], inputs_dict['depth_input'], mask], axis=-1)
-        
-        for layer in self.geometric_layers:
-            image_and_mask = layer(image_and_mask, training=True)
-            
-        augmented_rgb = image_and_mask[..., :3]
-        augmented_depth = image_and_mask[..., 3:6]
-        augmented_mask = image_and_mask[..., 6:]
-        
-        augmented_pc = inputs_dict['pc_input']
-        pc_dtype = augmented_pc.dtype
-        
-        if self.aug_config.get("horizontal_flip", False):
-            batch_size = tf.shape(augmented_pc)[0]
-            flip_cond = tf.random.uniform(shape=[batch_size, 1, 1]) < 0.5
-            flip_multiplier = tf.where(flip_cond, tf.cast(-1.0, pc_dtype), tf.cast(1.0, pc_dtype))
-            pc_flip_transform = tf.concat([flip_multiplier, tf.ones_like(flip_multiplier), tf.ones_like(flip_multiplier)], axis=-1)
-            augmented_pc = augmented_pc * pc_flip_transform
-            
-        if self.aug_config.get("rotation_range", 0) > 0:
-            batch_size = tf.shape(augmented_pc)[0]
-            rotation_degrees = self.aug_config["rotation_range"]
-            angles = tf.random.uniform(shape=[batch_size], minval=-rotation_degrees, maxval=rotation_degrees)
-            angles_rad = angles * np.pi / 180.0
-            cos_angles, sin_angles = tf.cos(angles_rad), tf.sin(angles_rad)
-            zeros, ones = tf.zeros_like(cos_angles), tf.ones_like(cos_angles)
-            rotation_matrices = tf.stack([
-                tf.stack([cos_angles, -sin_angles, zeros], axis=1),
-                tf.stack([sin_angles, cos_angles, zeros], axis=1),
-                tf.stack([zeros, zeros, ones], axis=1)
-            ], axis=1)
-            rotation_matrices = tf.cast(rotation_matrices, pc_dtype)
-            augmented_pc = tf.linalg.matmul(augmented_pc, rotation_matrices, transpose_b=True)
-
-        for layer in self.color_layers:
-            augmented_rgb = layer(augmented_rgb, training=True)
-            
-        augmented_inputs = {
-            'rgb_input': augmented_rgb,
-            'depth_input': augmented_depth,
-            'pc_input': augmented_pc
-        }
-        return augmented_inputs, augmented_mask
 
 def parse_tfrecord_fn(example_proto, target_size, num_points):
     feature_description = {
@@ -164,8 +100,67 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
         num_points_target = pc_prep_cfg.get('num_points', 4096)
 
-        augmentation_pipeline = SegmentationAugmentation(aug_cfg)
         preprocess_fn = _get_segmentation_preprocess_fn(model_cfg.get('backbone'))
+        
+        geometric_layers = []
+        if aug_cfg.get("horizontal_flip", False):
+            geometric_layers.append(layers.RandomFlip("horizontal"))
+        if aug_cfg.get("rotation_range", 0) > 0:
+            rotation_factor = aug_cfg["rotation_range"] / 360.0
+            geometric_layers.append(layers.RandomRotation(rotation_factor))
+
+        color_layers = []
+        if aug_cfg.get("brightness_range", [1.0, 1.0]) != [1.0, 1.0]:
+            factor = max(abs(1.0 - aug_cfg["brightness_range"][0]), abs(aug_cfg["brightness_range"][1] - 1.0))
+            color_layers.append(layers.RandomBrightness(factor=factor, value_range=(0.0, 255.0)))
+        if aug_cfg.get("contrast_factor", 0) > 0:
+            color_layers.append(layers.RandomContrast(factor=aug_cfg["contrast_factor"]))
+
+        @tf.function
+        def augment_batch(inputs, mask):
+            image_and_mask = tf.concat([inputs['rgb_input'], inputs['depth_input'], mask], axis=-1)
+            
+            for layer in geometric_layers:
+                image_and_mask = layer(image_and_mask, training=True)
+                
+            augmented_rgb = image_and_mask[..., :3]
+            augmented_depth = image_and_mask[..., 3:6]
+            augmented_mask = image_and_mask[..., 6:]
+            
+            augmented_pc = inputs['pc_input']
+            pc_dtype = augmented_pc.dtype
+            
+            if aug_cfg.get("horizontal_flip", False):
+                batch_size = tf.shape(augmented_pc)[0]
+                flip_cond = tf.random.uniform(shape=[batch_size, 1, 1]) < 0.5
+                flip_multiplier = tf.where(flip_cond, tf.cast(-1.0, pc_dtype), tf.cast(1.0, pc_dtype))
+                pc_flip_transform = tf.concat([flip_multiplier, tf.ones_like(flip_multiplier), tf.ones_like(flip_multiplier)], axis=-1)
+                augmented_pc = augmented_pc * pc_flip_transform
+                
+            if aug_cfg.get("rotation_range", 0) > 0:
+                batch_size = tf.shape(augmented_pc)[0]
+                rotation_degrees = aug_cfg["rotation_range"]
+                angles = tf.random.uniform(shape=[batch_size], minval=-rotation_degrees, maxval=rotation_degrees)
+                angles_rad = angles * np.pi / 180.0
+                cos_angles, sin_angles = tf.cos(angles_rad), tf.sin(angles_rad)
+                zeros, ones = tf.zeros_like(cos_angles), tf.ones_like(cos_angles)
+                rotation_matrices = tf.stack([
+                    tf.stack([cos_angles, -sin_angles, zeros], axis=1),
+                    tf.stack([sin_angles, cos_angles, zeros], axis=1),
+                    tf.stack([zeros, zeros, ones], axis=1)
+                ], axis=1)
+                rotation_matrices = tf.cast(rotation_matrices, pc_dtype)
+                augmented_pc = tf.linalg.matmul(augmented_pc, rotation_matrices, transpose_b=True)
+
+            for layer in color_layers:
+                augmented_rgb = layer(augmented_rgb, training=True)
+                
+            augmented_inputs = {
+                'rgb_input': augmented_rgb,
+                'depth_input': augmented_depth,
+                'pc_input': augmented_pc
+            }
+            return augmented_inputs, augmented_mask
         
         def finalize_pre_batch(inputs, mask):
             if preprocess_fn:
@@ -183,8 +178,6 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
             
             return inputs, mask
 
-        def augment_batch(inputs, mask):
-            return augmentation_pipeline((inputs, mask))
 
         def create_dataset_from_tfrecord(tfrecord_filename, is_training):
             filepath = str(tfrecord_dir / tfrecord_filename)
@@ -202,7 +195,7 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
             dataset = dataset.batch(batch_size, drop_remainder=True)
             
             if is_training and aug_cfg.get('enabled', False):
-                dataset = dataset.map(augmentation_pipeline, num_parallel_calls=tf.data.AUTOTUNE)
+                dataset = dataset.map(augment_batch, num_parallel_calls=tf.data.AUTOTUNE)
             
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
             logger.info(f"[{tfrecord_filename}] Full-featured pipeline created successfully.")
