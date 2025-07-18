@@ -195,13 +195,8 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         preprocess_fn = _get_segmentation_preprocess_fn(model_cfg.get('backbone'))
         
         def finalize_pre_batch(inputs, mask):
-            if preprocess_fn:
-                inputs['rgb_input'] = preprocess_fn(inputs['rgb_input'])
-                inputs['depth_input'] = preprocess_fn(inputs['depth_input'])
-            
-            inputs['rgb_input'] = tf.clip_by_value(inputs['rgb_input'], -10.0, 10.0)
-            inputs['depth_input'] = tf.clip_by_value(inputs['depth_input'], -10.0, 10.0)
-            inputs['pc_input'] = tf.clip_by_value(inputs['pc_input'], -10.0, 10.0)
+            inputs['rgb_input'] = (inputs['rgb_input'] / 127.5) - 1.0
+            inputs['depth_input'] = (inputs['depth_input'] / 127.5) - 1.0
             
             return inputs, mask
 
