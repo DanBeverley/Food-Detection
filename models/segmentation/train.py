@@ -254,11 +254,18 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
     # Depth Encoder (Scratch MobileNetV3Small)
     depth_base_model = MobileNetV3Small(input_shape=[*image_size, 3], include_top=False, weights=None)
     depth_base_model._name = "depth_backbone"
+
+    print("-" * 50)
+    print("MobileNetV3Small Layer Map:")
+    for layer in depth_base_model.layers:
+        print(f"Name: {layer.name:<25} Output Shape: {layer.output.shape}")
+    print("-" * 50)
+
     depth_skip_names = [
-        'activation',            # Output: 128x128x16
-        'expanded_conv_1_project_bn',  # Output: 64x64x24
-        'expanded_conv_2_add',   # Output: 32x32x40
-        'expanded_conv_5_add',   # Output: 16x16x96
+        'activation',
+        're_lu_3',
+        'expanded_conv_2_add',
+        'expanded_conv_5_add',
     ]
     depth_skip_outputs = [depth_base_model.get_layer(name).output for name in depth_skip_names]
     depth_bottleneck = depth_base_model.get_layer('activation_17').output  # 8x8
