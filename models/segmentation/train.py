@@ -1,31 +1,19 @@
 
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'  # Reduce TensorFlow logging
 import sys
 import yaml
 import logging
 import tensorflow as tf
-
-# tf.debugging.enable_check_numerics()
-
-# Configure TensorFlow for TPU compatibility
-try:
-    tf.config.experimental.enable_tensor_float_32(False)  # Disable TF32 for TPU compatibility
-except AttributeError:
-    # TF32 control not available in this TensorFlow version
-    pass
 from pathlib import Path
 from datetime import datetime
-import traceback
-import argparse 
 import numpy as np
 from tqdm import tqdm
+from data import load_segmentation_data 
+from tensorflow.keras import layers
+from tensorflow.keras.optimizers import Adam
 
 def _get_project_root() -> Path:
-    """Assumes this script is in Food-Detection/models/segmentation/"""
-    return Path(__file__).resolve().parent.parent.parent
-
-from data import load_segmentation_data 
+    return Path(__file__).resolve().parent.parent.parent 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -68,80 +56,16 @@ def set_mixed_precision_policy(config: dict, strategy: tf.distribute.Strategy):
     else:
         logger.info("Mixed precision training not enabled in config.")
 
-def initialize_strategy() -> tf.distribute.Strategy:
-    """Initialize distributed strategy for TPU, GPU, or CPU."""
-    import os
-    import time
-    
-    logger.info("Initializing distributed strategy...")
-    
-    tf.keras.backend.clear_session()
-    
-    tpu_name = os.environ.get('TPU_NAME')
-    if tpu_name:
-        logger.info(f"TPU_NAME environment variable found: {tpu_name}")
-        resolver_address = tpu_name
-    else:
-        resolver_address = 'local'
-        logger.info("TPU_NAME not found, trying 'local' resolver")
-    
-    for attempt in range(3):
-        try:
-            logger.info(f"TPU initialization attempt {attempt + 1}/3")
-            resolver = tf.distribute.cluster_resolver.TPUClusterResolver(resolver_address)
-            logger.info(f"TPU resolver created: {resolver}")
-            
-            tf.config.experimental_connect_to_cluster(resolver)
-            logger.info("Successfully connected to TPU cluster")
-            
-            tf.tpu.experimental.initialize_tpu_system(resolver)
-            logger.info("TPU system initialized")
-            
-            strategy = tf.distribute.TPUStrategy(resolver)
-            logger.info(f"TPU strategy initialized with {strategy.num_replicas_in_sync} replicas")
-            return strategy
-            
-        except Exception as e:
-            logger.info(f"TPU initialization attempt {attempt + 1} failed: {e}")
-            if attempt < 2: 
-                time.sleep(2)
-    
-    # If TPU fails, try alternative resolver addresses
-    if resolver_address == 'local':
-        try:
-            logger.info("Trying empty string resolver as fallback")
-            resolver = tf.distribute.cluster_resolver.TPUClusterResolver('')
-            tf.config.experimental_connect_to_cluster(resolver)
-            tf.tpu.experimental.initialize_tpu_system(resolver)
-            strategy = tf.distribute.TPUStrategy(resolver)
-            logger.info(f"TPU strategy initialized with fallback resolver: {strategy.num_replicas_in_sync} replicas")
-            return strategy
-        except Exception as e:
-            logger.info(f"TPU fallback initialization failed: {e}")
-    
-    # Fallback to GPU/CPU
-    logger.info("TPU initialization failed, falling back to GPU/CPU")
+def initialize_strategy():
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
-        logger.info(f"Found {len(gpus)} GPUs. Forcing single-GPU strategy to avoid MirroredStrategy bugs.")
+        logger.info(f"Found {len(gpus)} GPUs. Forcing single-GPU strategy.")
         return tf.distribute.OneDeviceStrategy(device="/gpu:0")
     else:
+        logger.info("No GPUs found, using CPU strategy.")
         return tf.distribute.get_strategy()
 
-SEGMENTATION_CONFIG_PATH = os.path.join(_get_project_root(), "models", "segmentation", "config.yaml")
 
-from tensorflow.keras.callbacks import Callback
-from tensorflow.keras.applications import EfficientNetB0, ResNet50V2, MobileNetV3Small # Add more as needed
-from tensorflow.keras import layers
-
-class DetectNaNCallback(tf.keras.callbacks.Callback):
-    def on_batch_end(self, batch, logs=None):
-        if logs is None:
-            return
-        loss = logs.get('loss')
-        if loss is not None and (np.isnan(loss) or np.isinf(loss)):
-            print("\n\n!!! NaN or Inf detected in loss. Halting training. !!!\n\n")
-            self.model.stop_training = True
 
 class TqdmProgressCallback(tf.keras.callbacks.Callback):
     """Custom callback for robust progress tracking and logging during training."""
@@ -232,28 +156,16 @@ def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_ba
         
 
 
-def build_simple_fused_model(output_channels: int, image_size: tuple, model_config: dict, data_config: dict):
+def build_simple_fused_model(output_channels: int, image_size: tuple, data_config: dict):
+    logger.info("--- Building SIMPLIFIED and STABLE model ---")
     rgb_input = layers.Input(shape=[*image_size, 3], name='rgb_input')
     depth_input = layers.Input(shape=[*image_size, 3], name='depth_input')
     num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud',{}).get('num_points', 4096)
     pc_input = layers.Input(shape=[num_points, 3], name='pc_input')
     input_layers_dict = {'rgb_input': rgb_input, 'depth_input': depth_input, 'pc_input': pc_input}
 
-    aug_cfg = data_config.get('augmentation', {})
-    
-    image_concat = layers.Concatenate()([rgb_input, depth_input])
-    
-    if aug_cfg.get("horizontal_flip", False):
-        image_concat = layers.RandomFlip("horizontal")(image_concat)
-    if aug_cfg.get("rotation_range", 0) > 0:
-        rotation_factor = aug_cfg["rotation_range"] / 360.0
-        image_concat = layers.RandomRotation(rotation_factor)(image_concat)
-    
-    aug_rgb = image_concat[..., :3]
-    aug_depth = image_concat[..., 3:]
-    
-    rgb_scaled = layers.Rescaling(1./127.5, offset=-1)(aug_rgb)
-    depth_scaled = layers.Rescaling(1./127.5, offset=-1)(aug_depth)
+    rgb_scaled = layers.Rescaling(1./127.5, offset=-1)(rgb_input)
+    depth_scaled = layers.Rescaling(1./127.5, offset=-1)(depth_input)
     
     def conv_block(x, filters, name):
         x = layers.Conv2D(filters, 3, padding="same", activation="relu", name=f"{name}_conv1")(x)
@@ -450,164 +362,47 @@ def main():
     strategy = initialize_strategy()
     logger.info(f"Training will use strategy: {strategy.__class__.__name__}")
     
-    parser = argparse.ArgumentParser(description="Train a segmentation model.")
-    parser.add_argument('--config', type=str, default=str(project_root / 'models' / 'segmentation' / 'config.yaml'), help='Path to the configuration YAML file.')
-    parser.add_argument('--debug', action='store_true', help='Run in debug mode (overrides some config settings for quick testing).')
-    args = parser.parse_args()
-
-    config = load_config(args.config)
-    # set_mixed_precision_policy(config, strategy)
-
-    # Data Loading
-    logger.info("Loading data for training...")
+    config_path = project_root / 'models' / 'segmentation' / 'config.yaml'
+    config = load_config(str(config_path))
+    
+    logger.info("--- Using STABLE baseline configuration ---")
+    
     train_ds, val_ds, test_ds, num_train, num_val, num_test, num_classes = load_segmentation_data(config)
     if train_ds is None:
         logger.error("Data loading failed. Exiting.")
         return
 
-    # Calculate Steps
     data_cfg = config.get('data', {})
-    training_cfg = config.get('training', {})
-    optimizer_cfg = config.get('optimizer', {})
-    loss_cfg = config.get('loss', {})
-    
     per_replica_batch_size = data_cfg.get('batch_size', 16)
     steps_per_epoch = num_train // per_replica_batch_size
     validation_steps = num_val // per_replica_batch_size if val_ds else None
 
-    # MAXIMUM STABILITY: Use simplest possible loss function
-    loss_function = tf.keras.losses.BinaryCrossentropy(from_logits=True)
-    logger.info("Using simplified loss function: BinaryCrossentropy(from_logits=True)")
-    
-    # Original complex loss logic disabled for stability
-    # loss_fn_name = loss_cfg.get('name', 'binary_crossentropy').lower()
-    # if loss_fn_name == 'binary_crossentropy': 
-    #     label_smoothing = loss_cfg.get('label_smoothing', 0.0)
-    #     loss_function = tf.keras.losses.BinaryCrossentropy(
-    #         from_logits=True,
-    #         label_smoothing=label_smoothing
-    #     )
-    # elif loss_fn_name == 'combined_loss':
-    #     bce_config = loss_cfg.get('binary_crossentropy', {})
-    #     dice_config = loss_cfg.get('dice_loss', {})
-    #     focal_config = loss_cfg.get('focal_loss', {})
-    #     
-    #     bce_weight = bce_config.get('weight', 0.5)
-    #     dice_weight = dice_config.get('weight', 0.3)
-    #     focal_weight = focal_config.get('weight', 0.2)
-    #     label_smoothing = bce_config.get('label_smoothing', 0.1)
-    #     smooth = dice_config.get('smooth', 1.0)
-    #     alpha = focal_config.get('alpha', 0.25)
-    #     gamma = focal_config.get('gamma', 2.0)
-    #     
-    #     loss_function = lambda y_true, y_pred: combined_loss(
-    #         y_true, y_pred, 
-    #         bce_weight=bce_weight, 
-    #         dice_weight=dice_weight, 
-    #         focal_weight=focal_weight,
-    #         label_smoothing=label_smoothing,
-    #         smooth=smooth,
-    #         alpha=alpha,
-    #         gamma=gamma
-    #     )
-    #     logger.info(f"Using combined loss: BCE({bce_weight}) + Dice({dice_weight}) + Focal({focal_weight})")
-    # else:
-    #     logger.warning(f"Unsupported loss function: {loss_fn_name}. Defaulting to binary crossentropy.")
-    #     loss_function = tf.keras.losses.BinaryCrossentropy(from_logits=False)
-
-    metrics_cfg = training_cfg.get('metrics', ['binary_accuracy'])
-    metrics_list = []
-    for m_name in metrics_cfg:
-        m_name_lower = m_name.lower()
-        if m_name_lower == 'accuracy' or m_name_lower == 'binary_accuracy':
-            metrics_list.append(tf.keras.metrics.BinaryAccuracy(name="binary_accuracy",threshold=0.0))
-        elif m_name_lower == 'binary_iou':
-            metrics_list.append(IoUFromLogits(threshold=0.5, name='binary_iou'))
-        elif m_name_lower == 'dice_coefficient':
-            metrics_list.append(DiceFromLogits(threshold=0.5, name='dice_coefficient'))
-        elif m_name_lower == 'precision':
-            metrics_list.append(tf.keras.metrics.Precision(name='precision'))
-        elif m_name_lower == 'recall':
-            metrics_list.append(tf.keras.metrics.Recall(name='recall'))
-
-    logger.info(f"Using metrics: {[m.name if hasattr(m, 'name') else str(m) for m in metrics_list]}")
-
-    
-    # Pre-train New Branches
-    
-    logger.info("\n" + "="*60 + "\n=== STAGE 1: Pre-training Depth & Point Cloud Branches ===\n" + "="*60)
-    
     with strategy.scope():
         model = build_simple_fused_model(
             output_channels=num_classes, 
-            image_size=tuple(data_cfg.get('image_size')), 
-            model_config=config.get('model', {}),
+            image_size=tuple(data_cfg.get('image_size')),
             data_config=data_cfg
         )
         
-
-        # Compile for Stage 1
-        stage1_lr = optimizer_cfg.get('stage1_learning_rate', 1e-4)
-        optimizer_stage1 = tf.keras.optimizers.AdamW(learning_rate=stage1_lr, clipnorm=1.0)
-        model.compile(optimizer=optimizer_stage1, loss=loss_function, metrics=metrics_list)
-        logger.info(f"Model compiled for Stage 1 with Adam, STABLE LR: {stage1_lr}, and Simplified Loss")
+        loss_function = tf.keras.losses.BinaryCrossentropy(from_logits=True)
+        metrics_list = [
+            tf.keras.metrics.BinaryAccuracy(name="binary_accuracy", threshold=0.0),
+            IoUFromLogits(name='binary_iou'),
+            DiceFromLogits(name='dice_coefficient')
+        ]
+        optimizer = Adam(learning_rate=1e-4, clipnorm=1.0)
+        
+        model.compile(optimizer=optimizer, loss=loss_function, metrics=metrics_list)
     
-    stage1_epochs = training_cfg.get('stage1_epochs', 5)
-    logger.info(f"--- Starting Stage 1 training for {stage1_epochs} epochs ---")
-    
-    # Setup callbacks for Stage 1
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     model_save_dir_rel = config.get('paths', {}).get('model_save_dir', 'trained_models/segmentation')
     model_dir_abs = project_root / model_save_dir_rel
     model_dir_abs.mkdir(parents=True, exist_ok=True)
     
-    stage1_callbacks = [
-        DetectNaNCallback(),
+    callbacks = [
         TqdmProgressCallback(),
         tf.keras.callbacks.ModelCheckpoint(
-            filepath=str(model_dir_abs / f'stage1_best_{timestamp}.h5'),
-            monitor='val_binary_iou',
-            save_best_only=True,
-            verbose=0
-        ),
-        tf.keras.callbacks.EarlyStopping(
-            monitor='val_binary_iou',
-            patience=3,
-            restore_best_weights=True,
-            verbose=0
-        )
-    ]
-    
-    model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=stage1_epochs,
-        steps_per_epoch=steps_per_epoch,
-        validation_steps=validation_steps,
-        callbacks=stage1_callbacks,
-        verbose=0
-    )
-
-    #  STAGE 2: Fine-tune Entire Model
-    logger.info("\n" + "="*60 + "\n=== STAGE 2: Fine-tuning all branches together ===\n" + "="*60)
-    
-    with strategy.scope():
-            
-        # Compile with a very low learning rate
-        stage2_lr = optimizer_cfg.get('stage2_learning_rate', 1e-4)
-        optimizer_stage2 = tf.keras.optimizers.AdamW(learning_rate=stage2_lr, clipnorm=1.0)
-        model.compile(optimizer=optimizer_stage2, loss=loss_function, metrics=metrics_list)
-        logger.info(f"Model re-compiled for Stage 2 with LR: {stage2_lr}")
-
-    total_epochs = training_cfg.get('epochs', 30)
-    stage2_epochs = total_epochs - stage1_epochs
-    logger.info(f"--- Starting Stage 2 training for {stage2_epochs} epochs ---")
-    
-    # Setup callbacks for Stage 2
-    stage2_callbacks = [
-        TqdmProgressCallback(),
-        tf.keras.callbacks.ModelCheckpoint(
-            filepath=str(model_dir_abs / f'stage2_best_{timestamp}.h5'),
+            filepath=str(model_dir_abs / f'stable_model_{timestamp}.h5'),
             monitor='val_binary_iou',
             save_best_only=True,
             verbose=0
@@ -617,35 +412,25 @@ def main():
             patience=10,
             restore_best_weights=True,
             verbose=0
-        ),
-        tf.keras.callbacks.ReduceLROnPlateau(
-            monitor='val_binary_iou',
-            factor=0.5,
-            patience=5,
-            min_lr=1e-7,
-            verbose=0
         )
     ]
     
     model.fit(
         train_ds,
         validation_data=val_ds,
-        epochs=total_epochs,
-        initial_epoch=stage1_epochs,
+        epochs=30,
         steps_per_epoch=steps_per_epoch,
         validation_steps=validation_steps,
-        callbacks=stage2_callbacks,
+        callbacks=callbacks,
         verbose=0
     )
 
-    logger.info("🎉 Training finished.")
+    logger.info("Training finished.")
     
-    # Save the final model
     final_model_path = model_dir_abs / f'fused_segmentation_final_{timestamp}.h5'
     model.save(str(final_model_path)) 
     logger.info(f"Final trained model saved to: {final_model_path}")
 
-    # Evaluate on test set if available
     if test_ds and num_test > 0:
         logger.info("Evaluating model on the test set...")
         test_results = model.evaluate(test_ds, verbose=1)
@@ -657,9 +442,4 @@ def main():
             logger.info(f"  loss: {test_results}")
 
 if __name__ == '__main__':
-    try:
-        main()
-    except Exception as e:
-        logger.error("Exception in main execution:", exc_info=True)
-        traceback.print_exc() 
-        sys.exit(1) 
+    main() 
