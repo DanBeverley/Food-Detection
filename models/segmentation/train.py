@@ -208,7 +208,6 @@ def build_simple_fused_model(output_channels: int, image_size: tuple, data_confi
     u3 = upsample_block(u2, 32, "dec3")
     
     outputs = layers.Conv2D(output_channels, 1, padding="same", name='final_logits')(u3)
-    outputs = layers.Activation('tanh', name='constrained_logits')(outputs)
 
     model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
     return model
