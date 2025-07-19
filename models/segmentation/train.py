@@ -239,8 +239,21 @@ def build_simple_fused_model(output_channels: int, image_size: tuple, model_conf
     pc_input = layers.Input(shape=[num_points, 3], name='pc_input')
     input_layers_dict = {'rgb_input': rgb_input, 'depth_input': depth_input, 'pc_input': pc_input}
 
-    rgb_scaled = layers.Rescaling(1./127.5, offset=-1)(rgb_input)
-    depth_scaled = layers.Rescaling(1./127.5, offset=-1)(depth_input)
+    aug_cfg = data_config.get('augmentation', {})
+    
+    image_concat = layers.Concatenate()([rgb_input, depth_input])
+    
+    if aug_cfg.get("horizontal_flip", False):
+        image_concat = layers.RandomFlip("horizontal")(image_concat)
+    if aug_cfg.get("rotation_range", 0) > 0:
+        rotation_factor = aug_cfg["rotation_range"] / 360.0
+        image_concat = layers.RandomRotation(rotation_factor)(image_concat)
+    
+    aug_rgb = image_concat[..., :3]
+    aug_depth = image_concat[..., 3:]
+    
+    rgb_scaled = layers.Rescaling(1./127.5, offset=-1)(aug_rgb)
+    depth_scaled = layers.Rescaling(1./127.5, offset=-1)(aug_depth)
     
     def conv_block(x, filters, name):
         x = layers.Conv2D(filters, 3, padding="same", activation="relu", name=f"{name}_conv1")(x)
