@@ -232,96 +232,57 @@ def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_ba
         
 
 
-def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_config: dict, data_config: dict):
-    from tensorflow.keras.applications import efficientnet, mobilenet_v3
-    
+def build_simple_fused_model(output_channels: int, image_size: tuple, data_config: dict):
     rgb_input = layers.Input(shape=[*image_size, 3], name='rgb_input')
     depth_input = layers.Input(shape=[*image_size, 3], name='depth_input')
     num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud',{}).get('num_points', 4096)
     pc_input = layers.Input(shape=[num_points, 3], name='pc_input')
-    
     input_layers_dict = {'rgb_input': rgb_input, 'depth_input': depth_input, 'pc_input': pc_input}
-    
-    rgb_processed = efficientnet.preprocess_input(rgb_input)
-    depth_processed = mobilenet_v3.preprocess_input(depth_input)
-    
-    rgb_base_model = EfficientNetB0(input_tensor=rgb_processed, include_top=False, weights='imagenet')
-    rgb_base_model.trainable = model_config.get('backbone_trainable', True)
-    rgb_skip_names = [
-        'block1a_project_bn',
-        'block2b_add',
-        'block3b_add',
-        'block5c_add',
-    ]
-    rgb_skip_outputs = [rgb_base_model.get_layer(name).output for name in rgb_skip_names]
-    rgb_bottleneck = rgb_base_model.get_layer('top_activation').output
-    
-    depth_base_model = MobileNetV3Small(input_tensor=depth_processed, include_top=False, weights=None)
-    depth_base_model._name = "depth_backbone"
 
-    depth_skip_names = [
-        'activation',
-        'expanded_conv_project_bn',
-        'expanded_conv_2_add',
-        'expanded_conv_7_add',
-    ]
-    depth_skip_outputs = [depth_base_model.get_layer(name).output for name in depth_skip_names]
-    depth_bottleneck = depth_base_model.get_layer('activation_17').output
-
-    def conv_bn(x, filters):
-        x = layers.Conv1D(filters, kernel_size=1, padding="valid")(x)
-        x = layers.BatchNormalization(momentum=0.9)(x)
-        return layers.ReLU()(x)
-
-    pc_x = layers.LayerNormalization()(pc_input)
-    pc_x = conv_bn(pc_x, 64)
-    pc_x = conv_bn(pc_x, 128)
-    pc_features = conv_bn(pc_x, 1024)
-    pc_features = layers.GlobalMaxPooling1D(name='pc_gmp')(pc_features)
-
-    rgb_model = tf.keras.Model(
-        inputs=rgb_base_model.input, 
-        outputs=rgb_skip_outputs + [rgb_bottleneck],
-        name="rgb_encoder"
-    )
-    depth_model = tf.keras.Model(
-        inputs=depth_base_model.input, 
-        outputs=depth_skip_outputs + [depth_bottleneck],
-        name="depth_encoder"
-    )
+    rgb_scaled = layers.Rescaling(1./127.5, offset=-1)(rgb_input)
+    depth_scaled = layers.Rescaling(1./127.5, offset=-1)(depth_input)
     
-    *rgb_skips, rgb_bottle = rgb_model(rgb_processed)
-    *depth_skips, depth_bottle = depth_model(depth_processed)
-
-    # Bottleneck Fusion
-    # Resize PC features to match image bottleneck spatial dimensions (8x8)
-    pc_features_spatial = layers.Dense(8 * 8 * 256, activation='relu')(pc_features)
-    pc_features_spatial = layers.Reshape((8, 8, 256))(pc_features_spatial)
-    
-    fused_bottleneck = layers.Concatenate()([rgb_bottle, depth_bottle, pc_features_spatial])
-    fused_bottleneck = layers.Conv2D(512, 3, padding='same', activation='relu')(fused_bottleneck)
-    
-    # Decoder with Skip Connections
-    def upsample_block(x, skip_rgb, skip_depth, filters, name):
-        x = layers.UpSampling2D(2, interpolation='bilinear', name=f"{name}_upsample")(x)
-        # Concatenate with skip connections from BOTH encoders
-        x = layers.Concatenate(name=f"{name}_concat")([x, skip_rgb, skip_depth])
-        x = layers.Conv2D(filters, 3, padding='same', activation='relu', name=f"{name}_conv1")(x)
-        x = layers.Conv2D(filters, 3, padding='same', activation='relu', name=f"{name}_conv2")(x)
+    def conv_block(x, filters, name):
+        x = layers.Conv2D(filters, 3, padding="same", activation="relu", name=f"{name}_conv1")(x)
+        x = layers.Conv2D(filters, 3, padding="same", activation="relu", name=f"{name}_conv2")(x)
+        x = layers.BatchNormalization(name=f"{name}_bn")(x)
         return x
 
-    # Decoder Path
-    x = upsample_block(fused_bottleneck, rgb_skips[3], depth_skips[3], 256, 'decoder_block1')  # 8x8 -> 16x16
-    x = upsample_block(x, rgb_skips[2], depth_skips[2], 128, 'decoder_block2')  # 16x16 -> 32x32
-    x = upsample_block(x, rgb_skips[1], depth_skips[1], 64, 'decoder_block3')   # 32x32 -> 64x64
-    x = upsample_block(x, rgb_skips[0], depth_skips[0], 32, 'decoder_block4')   # 64x64 -> 128x128
-    
-    # Final upsampling to original size
-    x = layers.UpSampling2D(2, interpolation='bilinear')(x)
-    x = layers.Conv2D(16, 3, padding='same', activation='relu')(x)
+    x1 = conv_block(rgb_scaled, 32, "rgb_enc1")
+    p1 = layers.MaxPooling2D(2)(x1)
+    x2 = conv_block(p1, 64, "rgb_enc2")
+    p2 = layers.MaxPooling2D(2)(x2)
+    x3 = conv_block(p2, 128, "rgb_enc3")
+    rgb_features = layers.MaxPooling2D(2)(x3)
 
-    outputs = layers.Conv2D(output_channels, 1, padding="same", name='final_logits')(x)
-    outputs = layers.Activation('linear', dtype='float32', name='output_float32')(outputs)
+    d1 = conv_block(depth_scaled, 32, "depth_enc1")
+    dp1 = layers.MaxPooling2D(2)(d1)
+    d2 = conv_block(dp1, 64, "depth_enc2")
+    dp2 = layers.MaxPooling2D(2)(d2)
+    d3 = conv_block(dp2, 128, "depth_enc3")
+    depth_features = layers.MaxPooling2D(2)(d3)
+    
+    pc_x = layers.Conv1D(64, 1, activation='relu')(pc_input)
+    pc_x = layers.BatchNormalization()(pc_x)
+    pc_x = layers.Conv1D(128, 1, activation='relu')(pc_x)
+    pc_features_vec = layers.GlobalMaxPooling1D()(pc_x)
+
+    pc_features_spatial = layers.Dense(32 * 32 * 64, activation='relu')(pc_features_vec)
+    pc_features_spatial = layers.Reshape((32, 32, 64))(pc_features_spatial)
+    
+    fused = layers.Concatenate()([rgb_features, depth_features, pc_features_spatial])
+    fused = conv_block(fused, 256, "fused_bridge")
+
+    def upsample_block(x, filters, name):
+        x = layers.Conv2DTranspose(filters, 2, strides=2, padding="same", name=f"{name}_up")(x)
+        x = conv_block(x, filters, name)
+        return x
+
+    u1 = upsample_block(fused, 128, "dec1")
+    u2 = upsample_block(u1, 64, "dec2")
+    u3 = upsample_block(u2, 32, "dec3")
+    
+    outputs = layers.Conv2D(output_channels, 1, padding="same", name='final_logits')(u3)
 
     model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
     return model
@@ -481,7 +442,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
-    set_mixed_precision_policy(config, strategy)
+    # set_mixed_precision_policy(config, strategy)
 
     # Data Loading
     logger.info("Loading data for training...")
@@ -563,15 +524,12 @@ def main():
     logger.info("\n" + "="*60 + "\n=== STAGE 1: Pre-training Depth & Point Cloud Branches ===\n" + "="*60)
     
     with strategy.scope():
-        model = build_unet_style_fused_model(
+        model = build_simple_fused_model(
             output_channels=num_classes, 
             image_size=tuple(data_cfg.get('image_size')), 
-            model_config=config.get('model', {}), 
             data_config=data_cfg
         )
         
-        logger.info("Freezing RGB Backbone: 'rgb_encoder'")
-        model.get_layer('rgb_encoder').trainable = False
 
         # Compile for Stage 1
         stage1_lr = optimizer_cfg.get('stage1_learning_rate', 1e-4)
@@ -619,8 +577,6 @@ def main():
     logger.info("\n" + "="*60 + "\n=== STAGE 2: Fine-tuning all branches together ===\n" + "="*60)
     
     with strategy.scope():
-        logger.info("Unfreezing RGB Backbone: 'rgb_encoder'")
-        model.get_layer('rgb_encoder').trainable = True
             
         # Compile with a very low learning rate
         stage2_lr = optimizer_cfg.get('stage2_learning_rate', 1e-4)
