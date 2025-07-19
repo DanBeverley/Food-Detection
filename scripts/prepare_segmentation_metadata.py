@@ -37,8 +37,9 @@ def create_tfrecord_sample(rgb_path, mask_path, depth_path, pc_path, num_points,
     
     depth_bytes = b''
     if depth_path and os.path.exists(depth_path):
-        depth_img = Image.open(depth_path).convert('L').resize(target_size)
-        depth_bytes = tf.io.encode_png(tf.expand_dims(tf.constant(np.array(depth_img, dtype=np.uint8)), -1)).numpy()
+        depth_img = Image.open(depth_path).convert('I').resize(target_size)
+        depth_array = np.array(depth_img, dtype=np.uint16)
+        depth_bytes = tf.io.encode_png(tf.expand_dims(tf.constant(depth_array), -1)).numpy()
     
     pc_data = np.zeros((num_points, 3), dtype=np.float32)
     if pc_path and os.path.exists(pc_path):
