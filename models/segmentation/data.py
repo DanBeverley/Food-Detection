@@ -73,10 +73,6 @@ def parse_and_process_fn(example_proto, target_size, num_points):
     pc = tf.where(tf.math.is_nan(pc), 0.0, pc)
     pc = tf.where(tf.math.is_inf(pc), 0.0, pc)
     
-    rgb = rgb / 255.0
-    depth = depth / 255.0
-    
-    
     inputs = {
         "rgb_input": rgb,
         "depth_input": depth,
