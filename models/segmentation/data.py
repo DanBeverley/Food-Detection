@@ -122,20 +122,20 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                 pc_flip_transform = tf.concat([flip_multiplier, tf.ones_like(flip_multiplier), tf.ones_like(flip_multiplier)], axis=-1)
                 augmented_pc = augmented_pc * pc_flip_transform
                 
-            if aug_cfg.get("rotation_range", 0) > 0:
-                batch_size = tf.shape(augmented_pc)[0]
-                rotation_degrees = aug_cfg["rotation_range"]
-                angles = tf.random.uniform(shape=[batch_size], minval=-rotation_degrees, maxval=rotation_degrees)
-                angles_rad = angles * np.pi / 180.0
-                cos_angles, sin_angles = tf.cos(angles_rad), tf.sin(angles_rad)
-                zeros, ones = tf.zeros_like(cos_angles), tf.ones_like(cos_angles)
-                rotation_matrices = tf.stack([
-                    tf.stack([cos_angles, -sin_angles, zeros], axis=1),
-                    tf.stack([sin_angles, cos_angles, zeros], axis=1),
-                    tf.stack([zeros, zeros, ones], axis=1)
-                ], axis=1)
-                rotation_matrices = tf.cast(rotation_matrices, pc_dtype)
-                augmented_pc = tf.linalg.matmul(augmented_pc, rotation_matrices, transpose_b=True)
+            # if aug_cfg.get("rotation_range", 0) > 0:
+            #     batch_size = tf.shape(augmented_pc)[0]
+            #     rotation_degrees = aug_cfg["rotation_range"]
+            #     angles = tf.random.uniform(shape=[batch_size], minval=-rotation_degrees, maxval=rotation_degrees)
+            #     angles_rad = angles * np.pi / 180.0
+            #     cos_angles, sin_angles = tf.cos(angles_rad), tf.sin(angles_rad)
+            #     zeros, ones = tf.zeros_like(cos_angles), tf.ones_like(cos_angles)
+            #     rotation_matrices = tf.stack([
+            #         tf.stack([cos_angles, -sin_angles, zeros], axis=1),
+            #         tf.stack([sin_angles, cos_angles, zeros], axis=1),
+            #         tf.stack([zeros, zeros, ones], axis=1)
+            #     ], axis=1)
+            #     rotation_matrices = tf.cast(rotation_matrices, pc_dtype)
+            #     augmented_pc = tf.linalg.matmul(augmented_pc, rotation_matrices, transpose_b=True)
                 
             augmented_inputs = {
                 'rgb_input': augmented_rgb,
