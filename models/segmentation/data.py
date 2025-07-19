@@ -44,7 +44,7 @@ def _get_segmentation_preprocess_fn(architecture: Optional[str]):
     return preprocess_input_fn
 
 
-def parse_and_transform_fn(example_proto, target_size, num_points, is_training, aug_cfg):
+def parse_and_process_fn(example_proto, target_size, num_points):
     feature_description = {
         'rgb_image_raw': tf.io.FixedLenFeature([], tf.string),
         'mask_image_raw': tf.io.FixedLenFeature([], tf.string),
@@ -76,13 +76,6 @@ def parse_and_transform_fn(example_proto, target_size, num_points, is_training, 
     rgb = rgb / 255.0
     depth = depth / 255.0
     
-    # if is_training and aug_cfg.get('enabled', False):
-    #     if aug_cfg.get("horizontal_flip", False):
-    #         if tf.random.uniform(()) < 0.5:
-    #             rgb = tf.image.flip_left_right(rgb)
-    #             depth = tf.image.flip_left_right(depth)
-    #             mask = tf.image.flip_left_right(mask)
-    #             pc = pc * tf.constant([-1.0, 1.0, 1.0])
     
     inputs = {
         "rgb_input": rgb,
@@ -121,7 +114,7 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                 dataset = dataset.shuffle(buffer_size=1024).repeat()
 
             dataset = dataset.map(
-                lambda x: parse_and_transform_fn(x, target_size, num_points_target, is_training, aug_cfg),
+                lambda x: parse_and_process_fn(x, target_size, num_points_target),
                 num_parallel_calls=tf.data.AUTOTUNE
             )
             dataset = dataset.batch(batch_size, drop_remainder=True)
