@@ -94,49 +94,22 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
         num_points_target = pc_prep_cfg.get('num_points', 4096)
 
-        geometric_layers = []
-        if aug_cfg.get("horizontal_flip", False):
-            geometric_layers.append(layers.RandomFlip("horizontal"))
-        if aug_cfg.get("rotation_range", 0) > 0:
-            rotation_factor = aug_cfg["rotation_range"] / 360.0
-            geometric_layers.append(layers.RandomRotation(rotation_factor))
-
         @tf.function
         def augment_batch(inputs, mask):
             image_and_mask = tf.concat([inputs['rgb_input'], inputs['depth_input'], mask], axis=-1)
             
-            for layer in geometric_layers:
-                image_and_mask = layer(image_and_mask, training=True)
-                
+            if aug_cfg.get("horizontal_flip", False):
+                if tf.random.uniform(()) < 0.5:
+                    image_and_mask = tf.image.flip_left_right(image_and_mask)
+                    pc = inputs['pc_input']
+                    inputs['pc_input'] = pc * tf.constant([-1.0, 1.0, 1.0], dtype=pc.dtype)
+            
             augmented_rgb = image_and_mask[..., :3]
             augmented_depth = image_and_mask[..., 3:6]
             augmented_mask = image_and_mask[..., 6:]
-            
+
             augmented_pc = inputs['pc_input']
-            pc_dtype = augmented_pc.dtype
             
-            if aug_cfg.get("horizontal_flip", False):
-                batch_size = tf.shape(augmented_pc)[0]
-                flip_cond = tf.random.uniform(shape=[batch_size, 1, 1]) < 0.5
-                flip_multiplier = tf.where(flip_cond, tf.cast(-1.0, pc_dtype), tf.cast(1.0, pc_dtype))
-                pc_flip_transform = tf.concat([flip_multiplier, tf.ones_like(flip_multiplier), tf.ones_like(flip_multiplier)], axis=-1)
-                augmented_pc = augmented_pc * pc_flip_transform
-                
-            # if aug_cfg.get("rotation_range", 0) > 0:
-            #     batch_size = tf.shape(augmented_pc)[0]
-            #     rotation_degrees = aug_cfg["rotation_range"]
-            #     angles = tf.random.uniform(shape=[batch_size], minval=-rotation_degrees, maxval=rotation_degrees)
-            #     angles_rad = angles * np.pi / 180.0
-            #     cos_angles, sin_angles = tf.cos(angles_rad), tf.sin(angles_rad)
-            #     zeros, ones = tf.zeros_like(cos_angles), tf.ones_like(cos_angles)
-            #     rotation_matrices = tf.stack([
-            #         tf.stack([cos_angles, -sin_angles, zeros], axis=1),
-            #         tf.stack([sin_angles, cos_angles, zeros], axis=1),
-            #         tf.stack([zeros, zeros, ones], axis=1)
-            #     ], axis=1)
-            #     rotation_matrices = tf.cast(rotation_matrices, pc_dtype)
-            #     augmented_pc = tf.linalg.matmul(augmented_pc, rotation_matrices, transpose_b=True)
-                
             augmented_inputs = {
                 'rgb_input': augmented_rgb,
                 'depth_input': augmented_depth,
