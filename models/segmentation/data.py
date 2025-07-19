@@ -44,7 +44,7 @@ def _get_segmentation_preprocess_fn(architecture: Optional[str]):
     return preprocess_input_fn
 
 
-def parse_tfrecord_fn(example_proto, target_size, num_points):
+def parse_and_transform_fn(example_proto, target_size, num_points, is_training, aug_cfg):
     feature_description = {
         'rgb_image_raw': tf.io.FixedLenFeature([], tf.string),
         'mask_image_raw': tf.io.FixedLenFeature([], tf.string),
@@ -70,6 +70,20 @@ def parse_tfrecord_fn(example_proto, target_size, num_points):
     pc = tf.reshape(pc, [num_points, 3])
     pc.set_shape([num_points, 3])
     
+    pc = tf.where(tf.math.is_nan(pc), 0.0, pc)
+    pc = tf.where(tf.math.is_inf(pc), 0.0, pc)
+    
+    rgb = rgb / 255.0
+    depth = depth / 255.0
+    
+    # if is_training and aug_cfg.get('enabled', False):
+    #     if aug_cfg.get("horizontal_flip", False):
+    #         if tf.random.uniform(()) < 0.5:
+    #             rgb = tf.image.flip_left_right(rgb)
+    #             depth = tf.image.flip_left_right(depth)
+    #             mask = tf.image.flip_left_right(mask)
+    #             pc = pc * tf.constant([-1.0, 1.0, 1.0])
+    
     inputs = {
         "rgb_input": rgb,
         "depth_input": depth,
@@ -94,35 +108,6 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
         num_points_target = pc_prep_cfg.get('num_points', 4096)
 
-        @tf.function
-        def augment_batch(inputs, mask):
-            image_and_mask = tf.concat([inputs['rgb_input'], inputs['depth_input'], mask], axis=-1)
-            
-            if aug_cfg.get("horizontal_flip", False):
-                if tf.random.uniform(()) < 0.5:
-                    image_and_mask = tf.image.flip_left_right(image_and_mask)
-                    pc = inputs['pc_input']
-                    inputs['pc_input'] = pc * tf.constant([-1.0, 1.0, 1.0], dtype=pc.dtype)
-            
-            augmented_rgb = image_and_mask[..., :3]
-            augmented_depth = image_and_mask[..., 3:6]
-            augmented_mask = image_and_mask[..., 6:]
-
-            augmented_pc = inputs['pc_input']
-            
-            augmented_inputs = {
-                'rgb_input': augmented_rgb,
-                'depth_input': augmented_depth,
-                'pc_input': augmented_pc
-            }
-            return augmented_inputs, augmented_mask
-
-        def finalize_pre_batch(inputs, mask):
-            pc = inputs['pc_input']
-            pc = tf.where(tf.math.is_nan(pc), 0.0, pc)
-            pc = tf.where(tf.math.is_inf(pc), 0.0, pc)
-            inputs['pc_input'] = pc
-            return inputs, mask
 
         def create_dataset_from_tfrecord(tfrecord_filename, is_training):
             filepath = str(tfrecord_dir / tfrecord_filename)
@@ -135,13 +120,11 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
             if is_training:
                 dataset = dataset.shuffle(buffer_size=1024).repeat()
 
-            dataset = dataset.map(lambda x: parse_tfrecord_fn(x, target_size, num_points_target), num_parallel_calls=tf.data.AUTOTUNE)
-            dataset = dataset.map(finalize_pre_batch, num_parallel_calls=tf.data.AUTOTUNE)
+            dataset = dataset.map(
+                lambda x: parse_and_transform_fn(x, target_size, num_points_target, is_training, aug_cfg),
+                num_parallel_calls=tf.data.AUTOTUNE
+            )
             dataset = dataset.batch(batch_size, drop_remainder=True)
-            
-            if is_training and aug_cfg.get('enabled', False):
-                dataset = dataset.map(augment_batch, num_parallel_calls=tf.data.AUTOTUNE)
-            
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
             return dataset
         
