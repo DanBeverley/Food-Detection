@@ -232,7 +232,7 @@ def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_ba
         
 
 
-def build_simple_fused_model(output_channels: int, image_size: tuple, data_config: dict):
+def build_simple_fused_model(output_channels: int, image_size: tuple, model_config: dict, data_config: dict):
     rgb_input = layers.Input(shape=[*image_size, 3], name='rgb_input')
     depth_input = layers.Input(shape=[*image_size, 3], name='depth_input')
     num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud',{}).get('num_points', 4096)
@@ -283,6 +283,7 @@ def build_simple_fused_model(output_channels: int, image_size: tuple, data_confi
     u3 = upsample_block(u2, 32, "dec3")
     
     outputs = layers.Conv2D(output_channels, 1, padding="same", name='final_logits')(u3)
+    outputs = layers.Activation('tanh', name='constrained_logits')(outputs)
 
     model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
     return model
@@ -527,6 +528,7 @@ def main():
         model = build_simple_fused_model(
             output_channels=num_classes, 
             image_size=tuple(data_cfg.get('image_size')), 
+            model_config=config.get('model', {}),
             data_config=data_cfg
         )
         
