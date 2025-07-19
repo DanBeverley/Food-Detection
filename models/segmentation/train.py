@@ -212,91 +212,34 @@ def build_simple_fused_model(output_channels: int, image_size: tuple, data_confi
     model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
     return model
 
-# Custom metrics for segmentation
-class BinaryIoU(tf.keras.metrics.Metric):
-    """Binary IoU metric for segmentation."""
-    
-    def __init__(self, threshold=0.5, name='binary_iou', **kwargs):
+class StableIoU(tf.keras.metrics.Metric):
+    def __init__(self, from_logits=True, name='stable_iou', **kwargs):
         super().__init__(name=name, **kwargs)
-        self.threshold = threshold
+        self.from_logits = from_logits
         self.intersection = self.add_weight(name='intersection', initializer='zeros')
         self.union = self.add_weight(name='union', initializer='zeros')
-    
+
     def update_state(self, y_true, y_pred, sample_weight=None):
-        y_pred = tf.cast(y_pred > self.threshold, tf.float32)
-        y_true = tf.cast(y_true, tf.float32)
+        y_true = tf.cast(y_true, self.dtype)
+        y_pred = tf.cast(y_pred, self.dtype)
+
+        if self.from_logits:
+            y_pred = tf.nn.sigmoid(tf.nn.tanh(y_pred))
         
-        # Handle shape mismatch: model output [batch, H, W, 1] vs mask [batch, H, W]
-        if len(y_pred.shape) == 4 and y_pred.shape[-1] == 1:
-            y_pred = tf.squeeze(y_pred, axis=-1)
-        if len(y_true.shape) == 4 and y_true.shape[-1] == 1:
-            y_true = tf.squeeze(y_true, axis=-1)
+        y_pred = tf.cast(y_pred > 0.5, self.dtype)
         
         intersection = tf.reduce_sum(y_true * y_pred)
         union = tf.reduce_sum(y_true) + tf.reduce_sum(y_pred) - intersection
         
         self.intersection.assign_add(intersection)
-        self.union.assign_add(union)
-    
+        self.union.assign_add(union + tf.keras.backend.epsilon())
+
     def result(self):
-        return self.intersection / (self.union + tf.keras.backend.epsilon())
+        return self.intersection / self.union
     
     def reset_state(self):
         self.intersection.assign(0.0)
         self.union.assign(0.0)
-
-class DiceCoefficient(tf.keras.metrics.Metric):
-    """Dice coefficient metric for segmentation."""
-    
-    def __init__(self, threshold=0.5, smooth=1.0, name='dice_coefficient', **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.threshold = threshold
-        self.smooth = smooth
-        self.dice_sum = self.add_weight(name='dice_sum', initializer='zeros')
-        self.count = self.add_weight(name='count', initializer='zeros')
-    
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        y_pred = tf.cast(y_pred > self.threshold, tf.float32)
-        y_true = tf.cast(y_true, tf.float32)
-        
-        # Handle shape mismatch: model output [batch, H, W, 1] vs mask [batch, H, W]
-        if len(y_pred.shape) == 4 and y_pred.shape[-1] == 1:
-            y_pred = tf.squeeze(y_pred, axis=-1)
-        if len(y_true.shape) == 4 and y_true.shape[-1] == 1:
-            y_true = tf.squeeze(y_true, axis=-1)
-        
-        # Now both should be [batch, H, W]
-        reduce_axes = [1, 2]
-            
-        intersection = tf.reduce_sum(y_true * y_pred, axis=reduce_axes)
-        union = tf.reduce_sum(y_true, axis=reduce_axes) + tf.reduce_sum(y_pred, axis=reduce_axes)
-        dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
-        
-        self.dice_sum.assign_add(tf.reduce_sum(dice))
-        self.count.assign_add(tf.cast(tf.shape(y_true)[0], tf.float32))
-    
-    def result(self):
-        return self.dice_sum / (self.count + tf.keras.backend.epsilon())
-    
-    def reset_state(self):
-        self.dice_sum.assign(0.0)
-        self.count.assign(0.0)
-
-class IoUFromLogits(BinaryIoU):
-    def __init__(self, name='binary_iou', **kwargs):
-        super().__init__(name=name, **kwargs)
-
-    def update_state(self, y_true, y_pred_logits, sample_weight=None):
-        y_pred_probs = tf.nn.sigmoid(y_pred_logits)
-        super().update_state(y_true, y_pred_probs, sample_weight)
-
-class DiceFromLogits(DiceCoefficient):
-    def __init__(self, name='dice_coefficient', **kwargs):
-        super().__init__(name=name, **kwargs)
-
-    def update_state(self, y_true, y_pred_logits, sample_weight=None):
-        y_pred_probs = tf.nn.sigmoid(y_pred_logits)
-        super().update_state(y_true, y_pred_probs, sample_weight)
 
 # Custom loss functions
 def dice_loss(y_true, y_pred, smooth=1.0):
@@ -385,9 +328,8 @@ def main():
         
         loss_function = tf.keras.losses.BinaryCrossentropy(from_logits=True)
         metrics_list = [
-            tf.keras.metrics.BinaryAccuracy(name="binary_accuracy", threshold=0.0),
-            IoUFromLogits(name='binary_iou'),
-            DiceFromLogits(name='dice_coefficient')
+            tf.keras.metrics.BinaryAccuracy(name="binary_accuracy", from_logits=True),
+            StableIoU(name='stable_iou', from_logits=True)
         ]
         optimizer = Adam(learning_rate=1e-4, clipnorm=1.0)
         
