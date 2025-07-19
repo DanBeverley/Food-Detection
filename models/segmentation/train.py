@@ -156,24 +156,19 @@ def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_ba
         
 
 
-def build_simple_fused_model(output_channels: int, image_size: tuple, data_config: dict):
-    logger.info("--- Building STABLE simple_fused_model ---")
+def build_rgbd_only_model(output_channels: int, image_size: tuple, data_config: dict):
+    logger.info("--- Building RGB+Depth ONLY STABLE model ---")
     rgb_input = layers.Input(shape=[*image_size, 3], name='rgb_input')
     depth_input = layers.Input(shape=[*image_size, 3], name='depth_input')
-    num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud',{}).get('num_points', 4096)
-    pc_input = layers.Input(shape=[num_points, 3], name='pc_input')
-    input_layers_dict = {'rgb_input': rgb_input, 'depth_input': depth_input, 'pc_input': pc_input}
+    input_layers_dict = {'rgb_input': rgb_input, 'depth_input': depth_input}
 
     rgb_scaled = layers.Rescaling(1./127.5, offset=-1)(rgb_input)
     depth_scaled = layers.Rescaling(1./127.5, offset=-1)(depth_input)
     
     def conv_block(x, filters, name):
-        x = layers.Conv2D(filters, 3, padding="same", use_bias=False, name=f"{name}_conv1")(x)
-        x = layers.BatchNormalization(name=f"{name}_bn1")(x)
-        x = layers.ReLU(name=f"{name}_relu1")(x)
-        x = layers.Conv2D(filters, 3, padding="same", use_bias=False, name=f"{name}_conv2")(x)
-        x = layers.BatchNormalization(name=f"{name}_bn2")(x)
-        x = layers.ReLU(name=f"{name}_relu2")(x)
+        x = layers.Conv2D(filters, 3, padding="same", activation="relu", name=f"{name}_conv1")(x)
+        x = layers.Conv2D(filters, 3, padding="same", activation="relu", name=f"{name}_conv2")(x)
+        x = layers.BatchNormalization(name=f"{name}_bn")(x)
         return x
 
     x1 = conv_block(rgb_scaled, 32, "rgb_enc1")
@@ -190,20 +185,7 @@ def build_simple_fused_model(output_channels: int, image_size: tuple, data_confi
     d3 = conv_block(dp2, 128, "depth_enc3")
     depth_features = layers.MaxPooling2D(2)(d3)
     
-    pc_x = layers.Conv1D(64, 1, use_bias=False)(pc_input)
-    pc_x = layers.BatchNormalization()(pc_x)
-    pc_x = layers.ReLU()(pc_x)
-    pc_x = layers.Conv1D(128, 1, use_bias=False)(pc_x)
-    pc_x = layers.BatchNormalization()(pc_x)
-    pc_x = layers.ReLU()(pc_x)
-    pc_features_vec = layers.GlobalMaxPooling1D()(pc_x)
-
-    pc_features_spatial = layers.Dense(32 * 32 * 64, use_bias=False)(pc_features_vec)
-    pc_features_spatial = layers.BatchNormalization()(pc_features_spatial)
-    pc_features_spatial = layers.ReLU()(pc_features_spatial)
-    pc_features_spatial = layers.Reshape((32, 32, 64))(pc_features_spatial)
-    
-    fused = layers.Concatenate()([rgb_features, depth_features, pc_features_spatial])
+    fused = layers.Concatenate()([rgb_features, depth_features])
     fused = conv_block(fused, 256, "fused_bridge")
 
     def upsample_block(x, filters, name):
@@ -216,7 +198,6 @@ def build_simple_fused_model(output_channels: int, image_size: tuple, data_confi
     u3 = upsample_block(u2, 32, "dec3")
     
     outputs = layers.Conv2D(output_channels, 1, padding="same", name='final_logits')(u3)
-    outputs = layers.Activation('tanh', name='constrained_logits')(outputs)
 
     model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
     return model
@@ -329,7 +310,7 @@ def main():
     validation_steps = num_val // per_replica_batch_size if val_ds else None
 
     with strategy.scope():
-        model = build_simple_fused_model(
+        model = build_rgbd_only_model(
             output_channels=num_classes, 
             image_size=tuple(data_cfg.get('image_size')),
             data_config=data_cfg

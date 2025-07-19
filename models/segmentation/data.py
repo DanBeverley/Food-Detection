@@ -76,7 +76,7 @@ def parse_and_process_fn(example_proto, target_size, num_points):
     inputs = {
         "rgb_input": rgb,
         "depth_input": depth,
-        "pc_input": pc,
+        # "pc_input": pc,
     }
     return inputs, mask
 
