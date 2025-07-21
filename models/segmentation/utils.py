@@ -38,7 +38,7 @@ class StableIoU(tf.keras.metrics.Metric):
         y_pred = tf.cast(y_pred, self.dtype)
 
         if self.from_logits:
-            y_pred = tf.nn.sigmoid(tf.nn.tanh(y_pred))
+            y_pred = tf.nn.sigmoid(y_pred)
         
         y_pred = tf.cast(y_pred > 0.5, self.dtype)
         
@@ -46,10 +46,10 @@ class StableIoU(tf.keras.metrics.Metric):
         union = tf.reduce_sum(y_true) + tf.reduce_sum(y_pred) - intersection
         
         self.intersection.assign_add(intersection)
-        self.union.assign_add(union + tf.keras.backend.epsilon())
+        self.union.assign_add(union)
 
     def result(self):
-        return self.intersection / self.union
+        return self.intersection / (self.union + tf.keras.backend.epsilon())
     
     def reset_state(self):
         self.intersection.assign(0.0)
