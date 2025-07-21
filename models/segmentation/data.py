@@ -80,6 +80,8 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
                 
                 if is_training:
                     dataset = dataset.shuffle(buffer_size=1024).repeat()
+                else:
+                    dataset = dataset.repeat()
 
                 dataset = dataset.map(
                     lambda x: parse_and_sanitize_fn(x, target_size, num_points_target),
