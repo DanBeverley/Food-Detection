@@ -156,18 +156,46 @@ def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_ba
         
 
 
-def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_config: dict, data_config: dict):
-    logger.info("--- Building U-Net Style Fused Model ---")
+def build_unet_with_aug_layers(output_channels: int, image_size: tuple, model_config: dict, data_config: dict):
+    logger.info("Building U-Net with Augmentation Layers")
+    
+    # Inputs receive raw [0, 255] data
     rgb_input = layers.Input(shape=[*image_size, 3], name='rgb_input')
     depth_input = layers.Input(shape=[*image_size, 3], name='depth_input')
     num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
     pc_input = layers.Input(shape=[num_points, 3], name='pc_input')
+    
+    # Augmentation configuration
+    aug_cfg = data_config.get('augmentation', {})
+    
+    # Augmentation layers for images
+    aug_rgb = rgb_input
+    aug_depth = depth_input
+    
+    if aug_cfg.get('horizontal_flip', False):
+        # Concatenate for synchronized augmentation
+        combined = layers.Concatenate()([aug_rgb, aug_depth])
+        combined = layers.RandomFlip('horizontal')(combined)
+        aug_rgb = combined[..., :3]
+        aug_depth = combined[..., 3:6]
+    
+    if aug_cfg.get('brightness', False):
+        aug_rgb = layers.RandomBrightness(0.1)(aug_rgb)
+    
+    if aug_cfg.get('contrast', False):
+        aug_rgb = layers.RandomContrast(0.1)(aug_rgb)
+    
+    # Preprocessing for pretrained models
+    from tensorflow.keras.applications import efficientnet, mobilenet_v3
+    rgb_processed = efficientnet.preprocess_input(aug_rgb)
+    depth_processed = mobilenet_v3.preprocess_input(aug_depth)
+    
     input_layers_dict = {'rgb_input': rgb_input, 'depth_input': depth_input, 'pc_input': pc_input}
 
-    # RGB Encoder with skip connections
+    # RGB Encoder with skip connections using preprocessed data
     from tensorflow.keras.applications import EfficientNetB0
     rgb_encoder = EfficientNetB0(
-        input_tensor=rgb_input,
+        input_tensor=rgb_processed,
         weights='imagenet',
         include_top=False,
         input_shape=[*image_size, 3]
@@ -183,10 +211,10 @@ def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_
     rgb_skips = [rgb_encoder.get_layer(name).output for name in rgb_skip_names]
     rgb_bottleneck = rgb_encoder.output  # 8x8
 
-    # Depth Encoder with skip connections
+    # Depth Encoder with skip connections using preprocessed data
     from tensorflow.keras.applications import MobileNetV3Small
     depth_encoder = MobileNetV3Small(
-        input_tensor=depth_input,
+        input_tensor=depth_processed,
         weights=None,
         include_top=False,
         input_shape=[*image_size, 3],
@@ -362,7 +390,7 @@ def main():
     validation_steps = num_val // per_replica_batch_size if val_ds else None
 
     with strategy.scope():
-        model = build_unet_style_fused_model(
+        model = build_unet_with_aug_layers(
             output_channels=num_classes, 
             image_size=tuple(data_cfg.get('image_size')),
             model_config=config.get('model', {}),
