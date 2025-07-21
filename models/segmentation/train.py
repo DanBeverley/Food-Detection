@@ -156,50 +156,102 @@ def _test_data_loading(train_dataset: tf.data.Dataset, data_config: dict, num_ba
         
 
 
-def build_rgbd_only_model(output_channels: int, image_size: tuple, data_config: dict):
-    logger.info("--- Building RGB+Depth ONLY STABLE model ---")
+def build_unet_style_fused_model(output_channels: int, image_size: tuple, model_config: dict, data_config: dict):
+    logger.info("--- Building U-Net Style Fused Model ---")
     rgb_input = layers.Input(shape=[*image_size, 3], name='rgb_input')
     depth_input = layers.Input(shape=[*image_size, 3], name='depth_input')
-    input_layers_dict = {'rgb_input': rgb_input, 'depth_input': depth_input}
+    num_points = data_config.get('modalities_preprocessing', {}).get('point_cloud', {}).get('num_points', 4096)
+    pc_input = layers.Input(shape=[num_points, 3], name='pc_input')
+    input_layers_dict = {'rgb_input': rgb_input, 'depth_input': depth_input, 'pc_input': pc_input}
 
-    rgb_scaled = layers.Rescaling(1./127.5, offset=-1)(rgb_input)
-    depth_scaled = layers.Rescaling(1./127.5, offset=-1)(depth_input)
+    # RGB Encoder with skip connections
+    from tensorflow.keras.applications import EfficientNetB0
+    rgb_encoder = EfficientNetB0(
+        input_tensor=rgb_input,
+        weights='imagenet',
+        include_top=False,
+        input_shape=[*image_size, 3]
+    )
+    rgb_encoder._name = 'rgb_encoder'
     
-    def conv_block(x, filters, name):
-        x = layers.Conv2D(filters, 3, padding="same", activation="relu", name=f"{name}_conv1")(x)
-        x = layers.Conv2D(filters, 3, padding="same", activation="relu", name=f"{name}_conv2")(x)
-        x = layers.BatchNormalization(name=f"{name}_bn")(x)
+    rgb_skip_names = [
+        'block1a_project_bn',   # 128x128
+        'block2b_add',          # 64x64
+        'block3b_add',          # 32x32
+        'block5c_add',          # 16x16
+    ]
+    rgb_skips = [rgb_encoder.get_layer(name).output for name in rgb_skip_names]
+    rgb_bottleneck = rgb_encoder.output  # 8x8
+
+    # Depth Encoder with skip connections
+    from tensorflow.keras.applications import MobileNetV3Small
+    depth_encoder = MobileNetV3Small(
+        input_tensor=depth_input,
+        weights=None,
+        include_top=False,
+        input_shape=[*image_size, 3],
+        minimalistic=False
+    )
+    depth_encoder._name = 'depth_encoder'
+    
+    depth_skip_names = [
+        'multiply',           # 128x128
+        'multiply_1',         # 64x64
+        'multiply_2',         # 32x32
+        'multiply_3',         # 16x16
+    ]
+    depth_skips = [depth_encoder.get_layer(name).output for name in depth_skip_names]
+    depth_bottleneck = depth_encoder.output  # 8x8
+
+    # Point Cloud Encoder
+    pc_x = layers.Conv1D(64, 1, activation='relu', name='pc_conv1')(pc_input)
+    pc_x = layers.BatchNormalization(name='pc_bn1')(pc_x)
+    pc_x = layers.Conv1D(128, 1, activation='relu', name='pc_conv2')(pc_x)
+    pc_x = layers.BatchNormalization(name='pc_bn2')(pc_x)
+    pc_features_vec = layers.GlobalMaxPooling1D(name='pc_pool')(pc_x)
+    
+    # Project point cloud to spatial feature map
+    pc_bottleneck_size = rgb_bottleneck.shape[1] * rgb_bottleneck.shape[2]
+    pc_features_spatial = layers.Dense(pc_bottleneck_size * 64, activation='relu', name='pc_dense')(pc_features_vec)
+    pc_features_spatial = layers.Reshape((rgb_bottleneck.shape[1], rgb_bottleneck.shape[2], 64), name='pc_reshape')(pc_features_spatial)
+
+    # Bottleneck fusion
+    fused_bottleneck = layers.Concatenate(name='bottleneck_fusion')([rgb_bottleneck, depth_bottleneck, pc_features_spatial])
+    
+    # Bridge
+    x = layers.Conv2D(512, 3, padding='same', activation='relu', name='bridge_conv1')(fused_bottleneck)
+    x = layers.BatchNormalization(name='bridge_bn1')(x)
+    x = layers.Conv2D(512, 3, padding='same', activation='relu', name='bridge_conv2')(x)
+    x = layers.BatchNormalization(name='bridge_bn2')(x)
+    
+    # Decoder with skip connections
+    def upsample_block(x, skip_rgb, skip_depth, filters, name):
+        x = layers.UpSampling2D(2, interpolation='bilinear', name=f'{name}_upsample')(x)
+        x = layers.Concatenate(name=f'{name}_concat')([x, skip_rgb, skip_depth])
+        x = layers.Conv2D(filters, 3, padding='same', activation='relu', name=f'{name}_conv1')(x)
+        x = layers.BatchNormalization(name=f'{name}_bn1')(x)
+        x = layers.Conv2D(filters, 3, padding='same', activation='relu', name=f'{name}_conv2')(x)
+        x = layers.BatchNormalization(name=f'{name}_bn2')(x)
         return x
-
-    x1 = conv_block(rgb_scaled, 32, "rgb_enc1")
-    p1 = layers.MaxPooling2D(2)(x1)
-    x2 = conv_block(p1, 64, "rgb_enc2")
-    p2 = layers.MaxPooling2D(2)(x2)
-    x3 = conv_block(p2, 128, "rgb_enc3")
-    rgb_features = layers.MaxPooling2D(2)(x3)
-
-    d1 = conv_block(depth_scaled, 32, "depth_enc1")
-    dp1 = layers.MaxPooling2D(2)(d1)
-    d2 = conv_block(dp1, 64, "depth_enc2")
-    dp2 = layers.MaxPooling2D(2)(d2)
-    d3 = conv_block(dp2, 128, "depth_enc3")
-    depth_features = layers.MaxPooling2D(2)(d3)
     
-    fused = layers.Concatenate()([rgb_features, depth_features])
-    fused = conv_block(fused, 256, "fused_bridge")
-
-    def upsample_block(x, filters, name):
-        x = layers.Conv2DTranspose(filters, 2, strides=2, padding="same", name=f"{name}_up")(x)
-        x = conv_block(x, filters, name)
-        return x
-
-    u1 = upsample_block(fused, 128, "dec1")
-    u2 = upsample_block(u1, 64, "dec2")
-    u3 = upsample_block(u2, 32, "dec3")
+    # Progressive upsampling with skip connections
+    x = upsample_block(x, rgb_skips[3], depth_skips[3], 256, 'decode1')  # 16x16
+    x = upsample_block(x, rgb_skips[2], depth_skips[2], 128, 'decode2')  # 32x32
+    x = upsample_block(x, rgb_skips[1], depth_skips[1], 64, 'decode3')   # 64x64
+    x = upsample_block(x, rgb_skips[0], depth_skips[0], 32, 'decode4')   # 128x128
     
-    outputs = layers.Conv2D(output_channels, 1, padding="same", name='final_logits')(u3)
-
-    model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs)
+    # Final upsampling to original resolution
+    x = layers.UpSampling2D(2, interpolation='bilinear', name='final_upsample')(x)  # 256x256
+    x = layers.Conv2D(16, 3, padding='same', activation='relu', name='final_conv1')(x)
+    x = layers.BatchNormalization(name='final_bn1')(x)
+    x = layers.Conv2D(16, 3, padding='same', activation='relu', name='final_conv2')(x)
+    x = layers.BatchNormalization(name='final_bn2')(x)
+    
+    # Output layer
+    outputs = layers.Conv2D(output_channels, 1, padding='same', name='final_output')(x)
+    outputs = tf.cast(outputs, tf.float32, name='cast_to_float32')
+    
+    model = tf.keras.Model(inputs=input_layers_dict, outputs=outputs, name='UNet_Fused_Model')
     return model
 
 class StableIoU(tf.keras.metrics.Metric):
@@ -310,9 +362,10 @@ def main():
     validation_steps = num_val // per_replica_batch_size if val_ds else None
 
     with strategy.scope():
-        model = build_rgbd_only_model(
+        model = build_unet_style_fused_model(
             output_channels=num_classes, 
             image_size=tuple(data_cfg.get('image_size')),
+            model_config=config.get('model', {}),
             data_config=data_cfg
         )
         
@@ -330,17 +383,24 @@ def main():
     model_dir_abs = project_root / model_save_dir_rel
     model_dir_abs.mkdir(parents=True, exist_ok=True)
     
-    callbacks = [
+    # Stage 1: Pre-train new branches
+    logger.info("\n" + "="*60 + "\n=== STAGE 1: Pre-training Depth & Point Cloud Branches ===\n" + "="*60)
+    
+    rgb_encoder = model.get_layer('rgb_encoder')
+    rgb_encoder.trainable = False
+    logger.info("RGB encoder frozen for Stage 1")
+    
+    stage1_callbacks = [
         TqdmProgressCallback(),
         tf.keras.callbacks.ModelCheckpoint(
-            filepath=str(model_dir_abs / f'stable_model_{timestamp}.h5'),
-            monitor='val_binary_iou',
+            filepath=str(model_dir_abs / f'stage1_best_{timestamp}.h5'),
+            monitor='val_stable_iou',
             save_best_only=True,
             verbose=0
         ),
         tf.keras.callbacks.EarlyStopping(
-            monitor='val_binary_iou',
-            patience=10,
+            monitor='val_stable_iou',
+            patience=5,
             restore_best_weights=True,
             verbose=0
         )
@@ -349,10 +409,52 @@ def main():
     model.fit(
         train_ds,
         validation_data=val_ds,
-        epochs=30,
+        epochs=10,
         steps_per_epoch=steps_per_epoch,
         validation_steps=validation_steps,
-        callbacks=callbacks,
+        callbacks=stage1_callbacks,
+        verbose=0
+    )
+    
+    # Stage 2: Fine-tune entire model
+    logger.info("\n" + "="*60 + "\n=== STAGE 2: Fine-tuning all branches together ===\n" + "="*60)
+    
+    rgb_encoder.trainable = True
+    optimizer_stage2 = Adam(learning_rate=1e-5, clipnorm=1.0)
+    model.compile(optimizer=optimizer_stage2, loss=loss_function, metrics=metrics_list)
+    logger.info("RGB encoder unfrozen for Stage 2")
+    
+    stage2_callbacks = [
+        TqdmProgressCallback(),
+        tf.keras.callbacks.ModelCheckpoint(
+            filepath=str(model_dir_abs / f'stage2_best_{timestamp}.h5'),
+            monitor='val_stable_iou',
+            save_best_only=True,
+            verbose=0
+        ),
+        tf.keras.callbacks.EarlyStopping(
+            monitor='val_stable_iou',
+            patience=10,
+            restore_best_weights=True,
+            verbose=0
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_stable_iou',
+            factor=0.5,
+            patience=5,
+            min_lr=1e-7,
+            verbose=0
+        )
+    ]
+    
+    model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=30,
+        initial_epoch=10,
+        steps_per_epoch=steps_per_epoch,
+        validation_steps=validation_steps,
+        callbacks=stage2_callbacks,
         verbose=0
     )
 
