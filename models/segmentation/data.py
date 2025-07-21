@@ -2,7 +2,7 @@ import os
 import tensorflow as tf
 import numpy as np
 import logging
-from typing import Tuple, Dict, Optional
+from typing import Tuple, Dict, Optional, Any
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
