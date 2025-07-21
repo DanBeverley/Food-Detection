@@ -8,17 +8,26 @@ class TqdmProgressCallback(tf.keras.callbacks.Callback):
     def __init__(self):
         super().__init__()
         self.progress_bar = None
+        self.current_epoch = 0
 
     def on_epoch_begin(self, epoch, logs=None):
-        logger.info(f"Epoch {epoch + 1}")
-        self.progress_bar = tqdm(total=self.params['steps'], desc=f"Epoch {epoch + 1}")
+        self.current_epoch = epoch + 1
+        logger.info(f"Epoch {self.current_epoch}")
+        self.progress_bar = tqdm(total=self.params['steps'], desc=f"Epoch {self.current_epoch}")
 
     def on_batch_end(self, batch, logs=None):
         if self.progress_bar:
             self.progress_bar.update(1)
             if logs:
-                desc = f"Epoch {self.progress_bar.desc.split()[-1]} - "
-                desc += " - ".join([f"{k}: {v:.4f}" for k, v in logs.items() if k != 'batch' and k != 'size'])
+                desc = f"Epoch {self.current_epoch}"
+                
+                metrics_str = " - ".join([
+                    f"{k}: {v:.4f}" for k, v in logs.items() if k not in ['batch', 'size']
+                ])
+                
+                if metrics_str:
+                    desc += f" - {metrics_str}"
+
                 self.progress_bar.set_description(desc)
 
     def on_epoch_end(self, epoch, logs=None):
