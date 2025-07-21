@@ -10,7 +10,6 @@ from data import load_segmentation_data
 from model import build_simple_fused_model
 from utils import TqdmProgressCallback, StableIoU
 from tensorflow.keras.optimizers import Adam
-import tensorflow_addons as tfa
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -98,27 +97,21 @@ def main():
             StableIoU(name='stable_iou', from_logits=True)
         ]
         
-        initial_learning_rate = 1e-4
+        peak_lr = 1e-4
         warmup_steps = 1000
-        total_steps = steps_per_epoch * 30
         
-        lr_schedule = tf.keras.optimizers.schedules.PolynomialDecay(
-            initial_learning_rate=initial_learning_rate,
-            decay_steps=total_steps - warmup_steps,
-            end_learning_rate=1e-6,
-            power=1.0
+        boundaries = [warmup_steps] 
+        values = [peak_lr / 2, peak_lr]
+        
+        lr_schedule = tf.keras.optimizers.schedules.PiecewiseConstantDecay(
+            boundaries=boundaries,
+            values=values
         )
         
-        schedule_with_warmup = tfa.optimizers.WarmUp(
-            initial_learning_rate=0.0,
-            decay_schedule_fn=lr_schedule,
-            warmup_steps=warmup_steps
-        )
-        
-        optimizer = Adam(learning_rate=schedule_with_warmup, clipnorm=1.0)
+        optimizer = Adam(learning_rate=lr_schedule, clipnorm=1.0)
         
         model.compile(optimizer=optimizer, loss=loss_function, metrics=metrics_list)
-        logger.info("Model compiled with Adam optimizer and a warm-up learning rate schedule.")
+        logger.info("Model compiled with Adam optimizer and a step-based warm-up schedule (Core TF).")
     
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     model_save_dir_rel = config.get('paths', {}).get('model_save_dir', 'trained_models/segmentation')
