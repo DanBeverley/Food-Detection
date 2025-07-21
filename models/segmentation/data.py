@@ -27,6 +27,8 @@ def parse_and_sanitize_fn(example_proto, target_size, num_points):
     mask = tf.image.decode_png(example['mask_image_raw'], channels=1)
     mask.set_shape([*target_size, 1])
     mask = tf.cast(mask, tf.float32)
+    mask = mask / 255.0
+    mask = tf.cast(mask > 0.5, tf.float32)
 
     depth = tf.image.decode_png(example['depth_image_raw'], channels=1, dtype=tf.uint16)
     depth.set_shape([*target_size, 1])
