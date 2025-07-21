@@ -27,12 +27,19 @@ def set_mixed_precision_policy(config, strategy):
         logger.info("Mixed precision disabled")
 
 def initialize_strategy():
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
-        logger.info(f"Found {len(gpus)} GPUs. Using OneDeviceStrategy.")
-        return tf.distribute.OneDeviceStrategy(device="/gpu:0")
-    else:
-        logger.info("No GPUs found, using CPU strategy.")
+    try:
+        gpus = tf.config.experimental.list_physical_devices('GPU')
+        if len(gpus) > 1:
+            logger.info(f"Found {len(gpus)} GPUs. Using MirroredStrategy.")
+            return tf.distribute.MirroredStrategy()
+        elif len(gpus) == 1:
+            logger.info("Found 1 GPU. Using OneDeviceStrategy.")
+            return tf.distribute.OneDeviceStrategy(device="/gpu:0")
+        else:
+            logger.info("No GPUs found, using default CPU strategy.")
+            return tf.distribute.get_strategy()
+    except Exception as e:
+        logger.error(f"Could not initialize distribution strategy: {e}")
         return tf.distribute.get_strategy()
 
 def load_config(config_path: str) -> dict:
@@ -64,8 +71,18 @@ def main():
 
     data_cfg = config.get('data', {})
     per_replica_batch_size = data_cfg.get('batch_size', 16)
-    steps_per_epoch = num_train // per_replica_batch_size
-    validation_steps = num_val // per_replica_batch_size if val_ds else None
+    
+    global_batch_size = per_replica_batch_size * strategy.num_replicas_in_sync
+    
+    logger.info(f"Number of replicas: {strategy.num_replicas_in_sync}")
+    logger.info(f"Per-replica batch size: {per_replica_batch_size}")
+    logger.info(f"GLOBAL batch size: {global_batch_size}")
+    
+    steps_per_epoch = num_train // global_batch_size
+    validation_steps = num_val // global_batch_size if val_ds else None
+    
+    logger.info(f"Steps per epoch: {steps_per_epoch}")
+    logger.info(f"Validation steps: {validation_steps}")
 
     with strategy.scope():
         model = build_simple_fused_model(
