@@ -53,7 +53,7 @@ def parse_and_sanitize_fn(example_proto, target_size, num_points):
 
 def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], ...]:
     try:
-        logger.info("Loading data with ultra-stable pipeline")
+        logger.info("Loading data with TPU-compatible pipeline")
         data_cfg = config['data']
         paths_cfg = config['paths']
         
@@ -69,38 +69,42 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
         num_points_target = pc_prep_cfg.get('num_points', 4096)
         
-        def create_dataset_from_tfrecord(tfrecord_filename, is_training):
-            filepath = str(tfrecord_dir / tfrecord_filename)
-            if not os.path.exists(filepath):
-                logger.error(f"TFRecord file not found: {filepath}")
-                return None
-            
-            dataset = tf.data.TFRecordDataset(filepath, num_parallel_reads=tf.data.AUTOTUNE)
-            
-            if is_training:
-                dataset = dataset.shuffle(buffer_size=1024).repeat()
+        with tf.device('/cpu:0'):
+            def create_dataset_from_tfrecord(tfrecord_filename, is_training):
+                filepath = str(tfrecord_dir / tfrecord_filename)
+                if not os.path.exists(filepath):
+                    logger.error(f"TFRecord file not found: {filepath}")
+                    return None
+                
+                dataset = tf.data.TFRecordDataset(filepath, num_parallel_reads=tf.data.AUTOTUNE)
+                
+                if is_training:
+                    dataset = dataset.shuffle(buffer_size=1024).repeat()
 
-            # ONLY ONE MAP CALL - the simplest possible function
-            dataset = dataset.map(
-                lambda x: parse_and_sanitize_fn(x, target_size, num_points_target),
-                num_parallel_calls=tf.data.AUTOTUNE
-            )
-            
-            dataset = dataset.batch(batch_size, drop_remainder=True)
-            dataset = dataset.prefetch(tf.data.AUTOTUNE)
-            logger.info(f"Ultra-stable pipeline created for {tfrecord_filename}")
-            return dataset
-        
-        logger.info("Creating training dataset...")
-        train_dataset = create_dataset_from_tfrecord("train.tfrecord", is_training=True)
-        
-        logger.info("Creating validation dataset...")
-        val_dataset = create_dataset_from_tfrecord("validation.tfrecord", is_training=False)
-        
-        logger.info("Creating test dataset...")
-        test_dataset = create_dataset_from_tfrecord("test.tfrecord", is_training=False)
+                dataset = dataset.map(
+                    lambda x: parse_and_sanitize_fn(x, target_size, num_points_target),
+                    num_parallel_calls=tf.data.AUTOTUNE
+                )
+                
+                return dataset
 
-        logger.info("Data loading completed")
+            logger.info("Creating training dataset on CPU...")
+            train_dataset = create_dataset_from_tfrecord("train.tfrecord", is_training=True)
+            
+            logger.info("Creating validation dataset on CPU...")
+            val_dataset = create_dataset_from_tfrecord("validation.tfrecord", is_training=False)
+            
+            logger.info("Creating test dataset on CPU...")
+            test_dataset = create_dataset_from_tfrecord("test.tfrecord", is_training=False)
+
+        if train_dataset:
+            train_dataset = train_dataset.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+        if val_dataset:
+            val_dataset = val_dataset.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+        if test_dataset:
+            test_dataset = test_dataset.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+
+        logger.info("Data loading and parsing pinned to CPU. Batching and prefetching are optimized.")
         return train_dataset, val_dataset, test_dataset, num_train_samples, num_val_samples, num_test_samples, num_classes
 
     except Exception as e:
