@@ -13,7 +13,7 @@ def build_simple_fused_model(output_channels: int, image_size: tuple, data_confi
     input_layers_dict = {'rgb_input': rgb_input, 'depth_input': depth_input, 'pc_input': pc_input}
 
     rgb_scaled = layers.Rescaling(1./127.5, offset=-1)(rgb_input)
-    depth_scaled = layers.Rescaling(1./127.5, offset=-1)(depth_input)
+    depth_scaled = depth_input
     
     def conv_block(x, filters, name):
         x = layers.Conv2D(filters, 3, padding="same", activation="relu", name=f"{name}_conv1")(x)

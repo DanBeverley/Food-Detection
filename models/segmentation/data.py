@@ -33,6 +33,7 @@ def parse_and_sanitize_fn(example_proto, target_size, num_points):
     depth = tf.image.decode_png(example['depth_image_raw'], channels=1, dtype=tf.uint16)
     depth.set_shape([*target_size, 1])
     depth = tf.cast(depth, tf.float32)
+    depth = depth / 65535.0
     depth = tf.concat([depth, depth, depth], axis=-1)
 
     pc = tf.io.decode_raw(example['point_cloud_raw'], tf.float32)
