@@ -35,12 +35,9 @@ def main(args):
     logger.info("Preparing data pipeline...")
     data_cfg = config.get('data', {})
     
-    KAGGLE_IMAGE_DATA_PATH = "/kaggle/input/metafood3d-rgbd-videos/RGBD_videos"
-    if Path(KAGGLE_IMAGE_DATA_PATH).exists():
-        logger.info(f"Kaggle data path detected. Setting base_data_dir.")
-        data_cfg['base_data_dir'] = KAGGLE_IMAGE_DATA_PATH
-    else:
-        logger.warning(f"Expected Kaggle data path not found at '{KAGGLE_IMAGE_DATA_PATH}'. Check your dataset path.")
+    if args.base_data_dir:
+        logger.info(f"Overriding base_data_dir with provided path: {args.base_data_dir}")
+        data_cfg['base_data_dir'] = args.base_data_dir
 
     config['data'] = data_cfg
     
@@ -115,5 +112,6 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train a food classification model.")
     parser.add_argument("--config", type=str, required=True, help="Path to the YAML configuration file.")
+    parser.add_argument("--base_data_dir", type=str, default=None, help="Absolute path to the base directory for images. Overrides config.")
     args = parser.parse_args()
     main(args)
