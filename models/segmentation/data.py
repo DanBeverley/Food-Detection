@@ -2,49 +2,16 @@ import os
 import tensorflow as tf
 import numpy as np
 import logging
-from typing import Tuple, Dict, Optional, List, Any
+from typing import Tuple, Dict, Optional, Any
 from pathlib import Path
-from tensorflow.keras import layers
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-_SEG_PREPROCESS_FN_CACHE = {}
-
 def _get_project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
-def _get_segmentation_preprocess_fn(architecture: Optional[str]):
-    if architecture is None:
-        return None
-    
-    arch_key = architecture.lower()
-    if arch_key in _SEG_PREPROCESS_FN_CACHE:
-        return _SEG_PREPROCESS_FN_CACHE[arch_key]
-    
-    preprocess_input_fn = None
-    try:
-        if 'efficientnet' in arch_key:
-            from tensorflow.keras.applications.efficientnet import preprocess_input as efficientnet_preprocess
-            preprocess_input_fn = efficientnet_preprocess
-        elif 'resnet' in arch_key:
-            from tensorflow.keras.applications.resnet_v2 import preprocess_input as resnet_preprocess
-            preprocess_input_fn = resnet_preprocess
-        elif 'mobilenet' in arch_key:
-            from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as mobilenet_preprocess
-            preprocess_input_fn = mobilenet_preprocess
-        else:
-            logger.warning(f"Unknown architecture '{architecture}' for preprocessing. Using identity function.")
-            preprocess_input_fn = lambda x: x
-    except ImportError as e:
-        logger.error(f"Could not import preprocessing function for '{architecture}': {e}")
-        preprocess_input_fn = lambda x: x
-    
-    _SEG_PREPROCESS_FN_CACHE[arch_key] = preprocess_input_fn
-    return preprocess_input_fn
-
-
-def parse_tfrecord_fn(example_proto, target_size, num_points):
+def parse_and_sanitize_fn(example_proto, target_size, num_points):
     feature_description = {
         'rgb_image_raw': tf.io.FixedLenFeature([], tf.string),
         'mask_image_raw': tf.io.FixedLenFeature([], tf.string),
@@ -60,15 +27,22 @@ def parse_tfrecord_fn(example_proto, target_size, num_points):
     mask = tf.image.decode_png(example['mask_image_raw'], channels=1)
     mask.set_shape([*target_size, 1])
     mask = tf.cast(mask, tf.float32)
+    mask = mask / 255.0
+    mask = tf.cast(mask > 0.5, tf.float32)
 
-    depth = tf.image.decode_png(example['depth_image_raw'], channels=1)
+    depth = tf.image.decode_png(example['depth_image_raw'], channels=1, dtype=tf.uint16)
     depth.set_shape([*target_size, 1])
     depth = tf.cast(depth, tf.float32)
+    depth = depth / 65535.0
     depth = tf.concat([depth, depth, depth], axis=-1)
 
     pc = tf.io.decode_raw(example['point_cloud_raw'], tf.float32)
     pc = tf.reshape(pc, [num_points, 3])
     pc.set_shape([num_points, 3])
+    
+    # Sanitize point cloud only
+    pc = tf.where(tf.math.is_nan(pc), 0.0, pc)
+    pc = tf.where(tf.math.is_inf(pc), 0.0, pc)
     
     inputs = {
         "rgb_input": rgb,
@@ -79,6 +53,7 @@ def parse_tfrecord_fn(example_proto, target_size, num_points):
 
 def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dataset], ...]:
     try:
+        logger.info("Loading data with TPU-compatible pipeline")
         data_cfg = config['data']
         paths_cfg = config['paths']
         
@@ -93,43 +68,47 @@ def load_segmentation_data(config: Dict[str, Any]) -> Tuple[Optional[tf.data.Dat
         
         pc_prep_cfg = data_cfg.get('modalities_preprocessing', {}).get('point_cloud', {})
         num_points_target = pc_prep_cfg.get('num_points', 4096)
+        
+        with tf.device('/cpu:0'):
+            def create_dataset_from_tfrecord(tfrecord_filename, is_training):
+                filepath = str(tfrecord_dir / tfrecord_filename)
+                if not os.path.exists(filepath):
+                    logger.error(f"TFRecord file not found: {filepath}")
+                    return None
+                
+                dataset = tf.data.TFRecordDataset(filepath, num_parallel_reads=tf.data.AUTOTUNE)
+                
+                if is_training:
+                    dataset = dataset.shuffle(buffer_size=1024).repeat()
+                else:
+                    dataset = dataset.repeat()
 
-        def finalize_pre_batch(inputs, mask):
-            pc = inputs['pc_input']
-            pc = tf.where(tf.math.is_nan(pc), 0.0, pc)
-            pc = tf.where(tf.math.is_inf(pc), 0.0, pc)
-            inputs['pc_input'] = pc
-            return inputs, mask
+                dataset = dataset.map(
+                    lambda x: parse_and_sanitize_fn(x, target_size, num_points_target),
+                    num_parallel_calls=tf.data.AUTOTUNE
+                )
+                
+                return dataset
 
-        def create_dataset_from_tfrecord(tfrecord_filename, is_training):
-            filepath = str(tfrecord_dir / tfrecord_filename)
-            if not os.path.exists(filepath):
-                logger.error(f"TFRecord file not found: {filepath}")
-                return None
+            logger.info("Creating training dataset on CPU...")
+            train_dataset = create_dataset_from_tfrecord("train.tfrecord", is_training=True)
             
-            dataset = tf.data.TFRecordDataset(filepath, num_parallel_reads=tf.data.AUTOTUNE)
+            logger.info("Creating validation dataset on CPU...")
+            val_dataset = create_dataset_from_tfrecord("validation.tfrecord", is_training=False)
             
-            if is_training:
-                dataset = dataset.shuffle(buffer_size=1024).repeat()
+            logger.info("Creating test dataset on CPU...")
+            test_dataset = create_dataset_from_tfrecord("test.tfrecord", is_training=False)
 
-            dataset = dataset.map(lambda x: parse_tfrecord_fn(x, target_size, num_points_target), num_parallel_calls=tf.data.AUTOTUNE)
-            dataset = dataset.map(finalize_pre_batch, num_parallel_calls=tf.data.AUTOTUNE)
-            dataset = dataset.batch(batch_size, drop_remainder=True)
-            dataset = dataset.prefetch(tf.data.AUTOTUNE)
-            return dataset
-        
-        logger.info("Creating training dataset...")
-        train_dataset = create_dataset_from_tfrecord("train.tfrecord", is_training=True)
-        
-        logger.info("Creating validation dataset...")
-        val_dataset = create_dataset_from_tfrecord("validation.tfrecord", is_training=False)
-        
-        logger.info("Creating test dataset...")
-        test_dataset = create_dataset_from_tfrecord("test.tfrecord", is_training=False)
+        if train_dataset:
+            train_dataset = train_dataset.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+        if val_dataset:
+            val_dataset = val_dataset.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+        if test_dataset:
+            test_dataset = test_dataset.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
-        logger.info("--- Finished load_segmentation_data (Full-Featured) ---")
+        logger.info("Data loading and parsing pinned to CPU. Batching and prefetching are optimized.")
         return train_dataset, val_dataset, test_dataset, num_train_samples, num_val_samples, num_test_samples, num_classes
 
     except Exception as e:
-        logger.error(f"An unexpected error occurred in load_segmentation_data: {e}", exc_info=True)
+        logger.error(f"Error in load_segmentation_data: {e}", exc_info=True)
         return None, None, None, 0, 0, 0, 0
