@@ -1,3 +1,4 @@
+import sys
 import yaml
 import argparse
 import logging
@@ -47,7 +48,7 @@ def main(args):
 
     if not train_ds:
         logger.critical("Data loading failed. Cannot proceed with training.")
-        return
+        sys.exit(1)
         
     logger.info(f"Data loaded successfully: {num_train} train samples, {num_val} validation samples.")
 
