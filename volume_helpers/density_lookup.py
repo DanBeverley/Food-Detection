@@ -147,7 +147,44 @@ def lookup_nutritional_info(food_item: str, api_key: str = None) -> dict | None:
                     if len(debug_nutrients) > 15:
                         print(f"DEBUG USDA API:   ... and {len(debug_nutrients) - 15} more nutrients not logged for brevity.")
 
-            for food_data_item in foods: # Renamed 'food' to 'food_data_item' to avoid conflict
+            # Score and prioritize foods by description relevance
+            scored_foods = []
+            for food_data_item in foods:
+                food_description = food_data_item.get('description', 'N/A').lower()
+                
+                # Calculate relevance score (higher = more relevant/natural)
+                score = 0
+                
+                # Prefer raw/fresh forms
+                if any(term in food_description for term in ['raw', 'fresh', 'whole']):
+                    score += 10
+                    
+                # Avoid processed forms
+                if any(term in food_description for term in ['dried', 'concentrate', 'juice', 'powder', 'extract', 'canned', 'frozen']):
+                    score -= 5
+                    
+                # Avoid commercial/branded products  
+                if any(term in food_description for term in ['brand', 'inc', 'company', 'corp', 'ltd']):
+                    score -= 3
+                    
+                # Prefer simple descriptions (fewer words usually = more basic form)
+                word_count = len(food_description.split())
+                if word_count <= 3:
+                    score += 3
+                elif word_count > 6:
+                    score -= 2
+                    
+                scored_foods.append((score, food_data_item))
+                
+            # Sort by score (highest first) - most relevant foods first
+            scored_foods.sort(key=lambda x: x[0], reverse=True)
+            
+            print(f"USDA API: Evaluating {len(scored_foods)} foods, top 3 by relevance:")
+            for i, (score, food_item) in enumerate(scored_foods[:3]):
+                desc = food_item.get('description', 'N/A')
+                print(f"  {i+1}. Score: {score}, Description: '{desc}'")
+
+            for score, food_data_item in scored_foods:
                 # Only process if we still need density or calories
                 if api_found_density is not None and api_found_calories is not None:
                     break # Already found both
