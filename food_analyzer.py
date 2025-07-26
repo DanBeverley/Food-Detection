@@ -444,14 +444,21 @@ def analyze_food_item(
             interpolation=cv2.INTER_NEAREST
         ).astype(bool)
 
-        if not np.any(resized_segmentation_mask_for_clf):
-            logging.warning(f"Image: {image_basename} - Resized segmentation mask for classification is empty. Classification might be unreliable.")
-            # Optional: use original image if mask is empty, or skip classification
-            # For now, proceed with potentially empty masked_img_for_clf which will be black
-
-        masked_img_for_clf = np.zeros_like(img_for_clf_rgb)
-        masked_img_for_clf[resized_segmentation_mask_for_clf] = img_for_clf_rgb[resized_segmentation_mask_for_clf]
-        cropped_image_for_classification = masked_img_for_clf
+        mask_coverage = np.sum(resized_segmentation_mask_for_clf) / (resized_segmentation_mask_for_clf.shape[0] * resized_segmentation_mask_for_clf.shape[1])
+        
+        if mask_coverage < 0.05:
+            logging.warning(f"Image: {image_basename} - Mask coverage is only {mask_coverage*100:.1f}%. Using full image for classification.")
+            cropped_image_for_classification = img_for_clf_rgb
+        else:
+            coords = np.where(resized_segmentation_mask_for_clf)
+            if len(coords[0]) > 0 and len(coords[1]) > 0:
+                y_min, y_max = coords[0].min(), coords[0].max()
+                x_min, x_max = coords[1].min(), coords[1].max()
+                cropped_image_for_classification = img_for_clf_rgb[y_min:y_max+1, x_min:x_max+1]
+            else:
+                masked_img_for_clf = np.zeros_like(img_for_clf_rgb)
+                masked_img_for_clf[resized_segmentation_mask_for_clf] = img_for_clf_rgb[resized_segmentation_mask_for_clf]
+                cropped_image_for_classification = masked_img_for_clf
         logging.debug(f"Image: {image_basename} - Successfully created masked image for classification.")
 
     except Exception as e_crop:

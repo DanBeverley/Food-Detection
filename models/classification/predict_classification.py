@@ -162,15 +162,8 @@ def preprocess_classification_image(
         target_size_wh = (target_size_hw[1], target_size_hw[0])
         img_resized = img.resize(target_size_wh, Image.BILINEAR) # Or other interpolation like ANTIALIAS
 
-        # Ensure image is float32 in [0, 255] range before preprocessing
         img_array = np.array(img_resized, dtype=np.float32)
-        
-        # Get and apply the correct preprocessing function
-        preprocess_fn = _get_preprocess_fn(architecture)
-        preprocessed_img = preprocess_fn(img_array)
-
-        # Add batch dimension
-        input_data = np.expand_dims(preprocessed_img, axis=0)
+        input_data = np.expand_dims(img_array, axis=0)
         return input_data
 
     except FileNotFoundError: # Only relevant if image_path was used
@@ -246,12 +239,17 @@ def run_classification_inference(
                  logging.warning("Output tensor is quantized (UINT8) but scale is zero. Using raw values.")
                  output_data = output_data.astype(np.float32)
 
+        logging.info(f"Raw model output stats: min={np.min(output_data):.4f}, max={np.max(output_data):.4f}, sum={np.sum(output_data):.4f}")
+        top_5_indices = np.argsort(output_data)[-5:][::-1]
+        top_5_scores = output_data[top_5_indices]
+        logging.info(f"Top 5 predictions: indices={top_5_indices}, scores={top_5_scores}")
+
         if not np.isclose(np.sum(output_data), 1.0, atol=0.1):
              logging.debug("Output doesn't sum to 1, applying softmax.")
              output_data = tf.nn.softmax(output_data).numpy()
 
         predicted_index = np.argmax(output_data)
-        confidence = float(output_data[predicted_index]) # Convert numpy float
+        confidence = float(output_data[predicted_index])
 
         # Get label string if available
         if class_labels:
