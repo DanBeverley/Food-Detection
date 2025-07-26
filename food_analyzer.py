@@ -5,6 +5,7 @@ import yaml
 from pathlib import Path
 import time 
 import cv2
+import json
 
 try:
     from models.segmentation.predict_segmentation import run_segmentation_inference, load_segmentation_model
@@ -261,7 +262,7 @@ def analyze_food_item(
 
     logging.info(f"Analyzing food item: {image_basename}") 
     logging.info(f"Volume estimation method: {volume_estimation_method}")
-    logging.info(f"FOOD_ANALYZER_DEBUG: Received camera_intrinsics_key = '{camera_intrinsics_key}' (Type: {type(camera_intrinsics_key)})") # Cascade: Modified for debugging
+    logging.info(f"Received camera_intrinsics_key = '{camera_intrinsics_key}' (Type: {type(camera_intrinsics_key)})")
 
     # Ensure output_dir exists if save_steps is True
     if save_steps and output_dir:
@@ -313,153 +314,46 @@ def analyze_food_item(
         segmentation_source = "failed"
 
     # 3. Food Classification
-        t0_seg_mask_load = time.time()
-        try:
-            loaded_mask_gray = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-            if loaded_mask_gray is not None:
-                _, thresholded_mask = cv2.threshold(loaded_mask_gray, 1, 255, cv2.THRESH_BINARY)
-                segmentation_mask = thresholded_mask.astype(bool)
-                logging.info(f"Image: {image_basename} - Successfully loaded pre-computed mask from: {mask_path} with initial shape {segmentation_mask.shape}")
-                # --- SEG_DEBUG: Log loaded mask properties ---
-                if segmentation_mask is not None:
-                    logging.info(f"SEG_DEBUG (Loaded Mask): Shape={segmentation_mask.shape}, dtype={segmentation_mask.dtype}, "
-                                 f"Min={segmentation_mask.min()}, Max={segmentation_mask.max()}, "
-                                 f"Non-zero pixels={np.count_nonzero(segmentation_mask)}")
-                # --- End SEG_DEBUG ---
-                segmentation_source = f"precomputed_mask_file: {os.path.basename(mask_path)}"
-            else:
-                logging.warning(f"Image: {image_basename} - cv2.imread returned None for pre-computed mask {mask_path}. Falling back to model generation.")
-        except Exception as e_load_mask:
-            logging.warning(f"Image: {image_basename} - Error loading pre-computed mask from {mask_path}: {e_load_mask}. Falling back to model generation.")
-        results['timing']['segmentation_mask_load_precomputed'] = time.time() - t0_seg_mask_load
-
-    if segmentation_mask is None: # Fallback if not loaded or path not provided or load failed
-        logging.info(f"Image: {image_basename} - No valid pre-computed mask, attempting to generate mask using model.")
-        try:
-            models_config = config.get('models', {})
-            seg_model_path_rel = models_config.get('segmentation_tflite')
-            model_params_config = config.get('model_params', {})
-            seg_input_size_config = model_params_config.get('segmentation_input_size')
-            seg_num_classes_config = model_params_config.get('segmentation_num_classes', 1) # Default to 1 if not found
-            seg_threshold_config = model_params_config.get('segmentation_threshold', 0.5) # Default to 0.5
-
-            if not seg_model_path_rel or not seg_input_size_config:
-                logging.error(f"Image: {image_basename} - Segmentation model path or input size missing in config. Skipping model-based segmentation.")
-                results['error_messages'].append("SegModelConfigMissing;")
-            else:
-                t0_seg_load_model = time.time()
-                seg_model_path = str(project_root / seg_model_path_rel)
-                seg_interpreter, seg_input_details, seg_output_details = load_segmentation_model(seg_model_path, tuple(seg_input_size_config))
-                results['timing']['segmentation_load_model'] = time.time() - t0_seg_load_model
-                
-                model_input_size_hw = tuple(seg_input_size_config)
-                
-                # Determine the target shape for the output segmentation mask
-                output_target_shape_hw = None
-                resize_info_log = "unknown"
-                if depth_map is not None and hasattr(depth_map, 'shape') and len(depth_map.shape) >= 2 and depth_map.shape[0] > 0 and depth_map.shape[1] > 0:
-                    output_target_shape_hw = depth_map.shape[:2]
-                    resize_info_log = "depth map shape"
-                elif image is not None and hasattr(image, 'shape') and len(image.shape) >= 2 and image.shape[0] > 0 and image.shape[1] > 0:
-                    output_target_shape_hw = image.shape[:2]
-                    resize_info_log = "original RGB image shape"
-                else:
-                    # Fallback: This case should ideally not be reached if image loading was successful.
-                    # Using model_input_size_hw as a last resort.
-                    logging.warning(f"Image: {image_basename} - Could not determine a valid target output shape from depth_map or image. Using model input size {model_input_size_hw} as fallback for output resize.")
-                    output_target_shape_hw = model_input_size_hw 
-                    resize_info_log = "model input size (fallback)"
-                logging.info(f"Image: {image_basename} - Segmentation mask will be produced at target shape: {output_target_shape_hw} (based on {resize_info_log}).")
-                
-                t0_seg_inference = time.time()
-                segmentation_mask = run_segmentation_inference(
-                    seg_interpreter, seg_input_details, seg_output_details,
-                    image_path, 
-                    model_input_size_hw=model_input_size_hw, # Explicitly named
-                    output_resize_shape_hw=output_target_shape_hw, # New argument
-                    num_classes=seg_num_classes_config, # Pass num_classes
-                    threshold=seg_threshold_config # Pass threshold
-                )
-                results['timing']['segmentation_inference'] = time.time() - t0_seg_inference
-                # --- SEG_DEBUG: Log model-generated mask properties ---
-                if segmentation_mask is not None:
-                    logging.info(f"SEG_DEBUG (Model Output Raw - from run_segmentation_inference): "
-                                 f"Shape={segmentation_mask.shape}, dtype={segmentation_mask.dtype}, "
-                                 f"Min={segmentation_mask.min()}, Max={segmentation_mask.max()}, "
-                                 f"Non-zero pixels={np.count_nonzero(segmentation_mask)}")
-                else:
-                    logging.info("SEG_DEBUG (Model Output Raw - from run_segmentation_inference): Mask is None.")
-                # --- End SEG_DEBUG ---
-                logging.info(f"Image: {image_basename} - Generated mask using model, shape: {segmentation_mask.shape if segmentation_mask is not None else 'None'}")
-                if segmentation_mask is not None:
-                    segmentation_source = "model_generated"
-                else:
-                    logging.warning(f"Image: {image_basename} - Model-based segmentation returned None.")
-                    results['error_messages'].append("SegModelReturnedNone;")
-        except Exception as e_seg_model:
-            logging.exception(f"Image: {image_basename} - Error during model-based segmentation: {e_seg_model}")
-            results['error_messages'].append(f"SegModelError: {e_seg_model};")
-
-    if segmentation_mask is not None:
-        results['segmentation_mask_shape'] = segmentation_mask.shape
-        logging.info(f"Image: {image_basename} - Final segmentation mask shape: {segmentation_mask.shape} (Source: {segmentation_source})")
-        if save_steps and output_dir:
-            try:
-                mask_filename = os.path.join(output_dir, f"{Path(image_path).stem}_final_mask.png")
-                # Ensure mask is in a savable format (e.g., 0-255 uint8)
-                saveable_mask = (segmentation_mask.astype(np.uint8) * 255) if segmentation_mask.dtype == bool else segmentation_mask.astype(np.uint8)
-                cv2.imwrite(mask_filename, saveable_mask)
-                logging.info(f"Image: {image_basename} - Saved final segmentation mask to {mask_filename}")
-            except Exception as e_save_mask:
-                logging.warning(f"Image: {image_basename} - Failed to save final segmentation mask: {e_save_mask}")
-    else:
-        logging.warning(f"Image: {image_basename} - No segmentation mask available to record shape or save.")
-        results['segmentation_mask_shape'] = None
-
-    results['timing']['segmentation_overall'] = time.time() - t0_seg_overall
-    logging.info(f"Image: {image_basename} - Segmentation complete. Source: {segmentation_source}, Final Mask Shape: {results['segmentation_mask_shape']}")
-
-    # 4. Food Classification
     food_label = None
     confidence = 0.0
-    t0_class_overall = time.time() 
+    t0_class_overall = time.time()
 
-    # Prepare image for classification (cropping)
     t0_class_img_prep = time.time()
     cropped_image_for_classification = None
     try:
-        # Load image for classification
         img_for_clf = cv2.imread(image_path)
         if img_for_clf is None:
             logging.error(f"Image: {image_basename} - Failed to load image for classification from {image_path}")
             return None
         img_for_clf_rgb = cv2.cvtColor(img_for_clf, cv2.COLOR_BGR2RGB)
 
-        # Resize segmentation_mask to match img_for_clf_rgb dimensions
-        # segmentation_mask is (H_mask, W_mask), img_for_clf_rgb is (H_img, W_img, C)
-        # We need to resize mask to (H_img, W_img)
-        resized_segmentation_mask_for_clf = cv2.resize(
-            segmentation_mask.astype(np.uint8), 
-            (img_for_clf_rgb.shape[1], img_for_clf_rgb.shape[0]), # (W, H) for cv2.resize
-            interpolation=cv2.INTER_NEAREST
-        ).astype(bool)
-
-        mask_coverage = np.sum(resized_segmentation_mask_for_clf) / (resized_segmentation_mask_for_clf.shape[0] * resized_segmentation_mask_for_clf.shape[1])
-        
-        if mask_coverage < 0.05:
-            logging.warning(f"Image: {image_basename} - Mask coverage is only {mask_coverage*100:.1f}%. Using full image for classification.")
-            cropped_image_for_classification = img_for_clf_rgb
-        else:
+        if segmentation_mask is not None:
+            resized_segmentation_mask_for_clf = cv2.resize(
+                segmentation_mask.astype(np.uint8), 
+                (img_for_clf_rgb.shape[1], img_for_clf_rgb.shape[0]),
+                interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
             coords = np.where(resized_segmentation_mask_for_clf)
+            
             if len(coords[0]) > 0 and len(coords[1]) > 0:
                 y_min, y_max = coords[0].min(), coords[0].max()
                 x_min, x_max = coords[1].min(), coords[1].max()
-                cropped_image_for_classification = img_for_clf_rgb[y_min:y_max+1, x_min:x_max+1]
+                
+                padding = 10
+                h, w = img_for_clf_rgb.shape[:2]
+                y_min = max(0, y_min - padding)
+                y_max = min(h, y_max + padding)
+                x_min = max(0, x_min - padding)
+                x_max = min(w, x_max + padding)
+                
+                cropped_image_for_classification = img_for_clf_rgb[y_min:y_max, x_min:x_max]
+                logging.info(f"Image: {image_basename} - Cropped to bounding box: ({x_min},{y_min}) to ({x_max},{y_max})")
             else:
-                masked_img_for_clf = np.zeros_like(img_for_clf_rgb)
-                masked_img_for_clf[resized_segmentation_mask_for_clf] = img_for_clf_rgb[resized_segmentation_mask_for_clf]
-                cropped_image_for_classification = masked_img_for_clf
-        logging.debug(f"Image: {image_basename} - Successfully created masked image for classification.")
+                logging.warning(f"Image: {image_basename} - Empty segmentation mask. Using full image for classification.")
+                cropped_image_for_classification = img_for_clf_rgb
+        else:
+            logging.warning(f"Image: {image_basename} - No segmentation mask. Using full image.")
+            cropped_image_for_classification = img_for_clf_rgb
 
     except Exception as e_crop:
         logging.error(f"Image: {image_basename} - Error during image preparation for classification: {e_crop}", exc_info=True)
@@ -468,113 +362,78 @@ def analyze_food_item(
 
     if known_food_class:
         food_label = known_food_class
-        confidence = 1.0  
+        confidence = 1.0
         logging.info(f"Image: {image_basename} - Using known food class: {food_label}")
         results['classification_status'] = "Known (Pre-defined)"
     elif cropped_image_for_classification is not None:
-        logging.info(f"Image: {image_basename} - Attempting classification on the cropped/masked image.")
+        logging.info(f"Image: {image_basename} - Attempting classification on prepared image.")
         try:
             models_config = config.get('models', {})
-            class_model_path_rel = models_config.get('classification_tflite')
             model_params_config = config.get('model_params', {})
+            class_model_path_rel = models_config.get('classification_tflite')
+            class_labels_path_rel = model_params_config.get('classification_labels')
             class_input_size_config = model_params_config.get('classification_input_size')
-            class_labels_path_rel = model_params_config.get('classification_labels') # Corrected to use 'classification_labels'
-            # Get the confidence threshold, default to 0.6 if not in config
             confidence_threshold = model_params_config.get('classification_confidence_threshold', 0.6)
-            # Get architecture from the classification's own config file
-            classification_config_rel_path = model_params_config.get('classification_config_path', 'models/classification/config.yaml')
-            classification_config_abs_path = project_root / classification_config_rel_path
-            clf_architecture = "Unknown"
-            if os.path.exists(classification_config_abs_path):
-                try:
-                    with open(classification_config_abs_path, 'r') as f_clf_cfg:
-                        clf_cfg_content = yaml.safe_load(f_clf_cfg)
-                        clf_architecture = clf_cfg_content.get('model',{}).get('architecture', 'Unknown')
-                    logging.info(f"Image: {image_basename} - Determined classification architecture: {clf_architecture} from {classification_config_abs_path}")
-                except Exception as e_clf_cfg:
-                    logging.warning(f"Image: {image_basename} - Error loading classification config {classification_config_abs_path} to get architecture: {e_clf_cfg}. Defaulting to 'Unknown'.")
-            else:
-                logging.warning(f"Image: {image_basename} - Classification config {classification_config_abs_path} not found. Defaulting architecture to 'Unknown'.")
-
-            # Debugging classification config
-            logging.info(f"Image: {image_basename} - Checking classification config values:")
-            logging.info(f"  class_model_path_rel: '{class_model_path_rel}' (type: {type(class_model_path_rel)}) (Exists relative to project: {Path(project_root / class_model_path_rel).exists() if class_model_path_rel else False})")
-            logging.info(f"  class_input_size_config: {class_input_size_config} (type: {type(class_input_size_config)}) (Valid: {isinstance(class_input_size_config, list) and len(class_input_size_config) == 2})")
-            logging.info(f"  class_labels_path_rel: '{class_labels_path_rel}' (type: {type(class_labels_path_rel)}) (Exists relative to project: {Path(project_root / class_labels_path_rel).exists() if class_labels_path_rel else False})")
-
-            config_check_class_model = bool(class_model_path_rel and Path(project_root / class_model_path_rel).exists())
-            config_check_input_size = bool(class_input_size_config and isinstance(class_input_size_config, list) and len(class_input_size_config) == 2)
-            config_check_labels = bool(class_labels_path_rel and Path(project_root / class_labels_path_rel).exists())
             
-            if not (config_check_class_model and config_check_input_size and config_check_labels):
-                logging.error(f"Image: {image_basename} - Classification model path, input size, or label map missing/invalid in config. Skipping classification.")
-                results['error_messages'].append("ClassModelConfigMissingOrInvalid;")
+            if not all([class_model_path_rel, class_labels_path_rel, class_input_size_config]):
+                logging.error(f"Image: {image_basename} - Classification model config missing.")
+                results['error_messages'].append("ClassModelConfigMissing")
             else:
-                t0_class_load_model = time.time()
                 class_model_path = str(project_root / class_model_path_rel)
                 class_label_map_path = str(project_root / class_labels_path_rel)
-
+                
+                from models.classification.predict_classification import load_classification_model, run_classification_inference
+                
                 class_model, class_input_details, class_output_details, class_labels = load_classification_model(
-                    class_model_path,
-                    class_label_map_path
+                    class_model_path, class_label_map_path
                 )
-                results['timing']['classification_load_model'] = time.time() - t0_class_load_model
-                target_class_size = tuple(class_input_size_config)
-
-                if class_model and class_labels is not None:
+                
+                if class_model and class_labels:
                     t0_class_inference = time.time()
                     classified_label, classified_confidence = run_classification_inference(
-                        class_model,                    # interpreter
-                        class_input_details,            # input_details
-                        class_output_details,           # output_details
-                        target_class_size,              # model_input_size_hw (positional)
-                        clf_architecture,               # architecture (positional)
-                        class_labels=class_labels,      # class_labels (keyword)
-                        image_data=cropped_image_for_classification # image_data (keyword)
+                        class_model, class_input_details, class_output_details,
+                        model_input_size_hw=tuple(class_input_size_config),
+                        architecture="mobilenet_v2",
+                        class_labels=class_labels,
+                        image_data=cropped_image_for_classification
                     )
                     results['timing']['classification_inference'] = time.time() - t0_class_inference
 
-                    if classified_label and classified_confidence is not None:
-                        raw_food_label = classified_label
-                        raw_confidence = float(classified_confidence)
-                        logging.info(f"Image: {image_basename} - Raw Classification: '{raw_food_label}' (Confidence: {raw_confidence:.2f})")
-
-                        if raw_confidence < confidence_threshold:
-                            food_label = f"Uncertain: {raw_food_label}"
-                            confidence = raw_confidence # Store raw confidence even if uncertain
-                            logging.warning(f"Image: {image_basename} - Classification confidence {raw_confidence:.2f} is below threshold {confidence_threshold}. Final label: '{food_label}'")
-                            results['classification_status'] = f"BelowConfidenceThreshold (Score: {raw_confidence:.2f})"
+                    if classified_label is not None and classified_confidence is not None:
+                        if classified_confidence < confidence_threshold:
+                            food_label = f"Uncertain: {classified_label}"
+                            confidence = float(classified_confidence)
+                            results['classification_status'] = f"BelowThreshold ({confidence:.2f})"
                         else:
-                            food_label = raw_food_label
-                            confidence = raw_confidence
-                            results['classification_status'] = f"Confident (Score: {confidence:.2f})"
-                            logging.info(f"Image: {image_basename} - Final Classification: '{food_label}' (Confidence: {confidence:.2f})")
+                            food_label = classified_label  
+                            confidence = float(classified_confidence)
+                            results['classification_status'] = f"Confident ({confidence:.2f})"
                     else:
-                        logging.warning(f"Image: {image_basename} - Classification model returned None for label or confidence.")
-                        results['error_messages'].append("ClassModelReturnNone;")
                         results['classification_status'] = "Error (ModelReturnNone)"
                 else:
-                    logging.error(f"Image: {image_basename} - Failed to load classification model or labels. Skipping classification.")
-                    results['error_messages'].append("ClassModelLoadFail;")
                     results['classification_status'] = "Error (ModelLoadFail)"
 
         except Exception as e_class_model:
             logging.exception(f"Image: {image_basename} - Error during classification: {e_class_model}")
-            results['error_messages'].append(f"ClassModelError: {e_class_model};")
-            results['classification_status'] = f"Error ({e_class_model})"
-    else: # known_food_class was not provided AND cropped_image_for_classification is None
-        logging.warning(f"Image: {image_basename} - Skipping classification as no valid image for classification and no known_food_class provided.")
+            results['classification_status'] = "Error (Exception)" 
+    else:
+        logging.warning(f"Image: {image_basename} - Skipping classification - no image prepared.")
         results['classification_status'] = "Skipped (NoImageForClf)"
 
     results['food_label'] = food_label
     results['confidence'] = confidence
     results['timing']['classification_overall'] = time.time() - t0_class_overall
-    logging.info(f"Image: {image_basename} - Classification phase complete. Determined Food Label: '{food_label}', Confidence: {confidence:.2f}")
+    logging.info(f"Image: {image_basename} - Classification complete: '{food_label}', Confidence: {confidence:.2f}")
 
     # 5. Volume Estimation
     t0_vol_overall = time.time()
     calculated_volume_cm3 = 0.0
     volume_method_used = "N/A"
+
+    if volume_estimation_method == 'depth':
+        t0_vol_overall = time.time()
+        calculated_volume_cm3 = 0.0
+        volume_method_used = "N/A"
 
     if volume_estimation_method == 'depth':
         if depth_map is not None and segmentation_mask is not None and segmentation_mask.shape[:2] == depth_map.shape[:2]:
@@ -593,15 +452,7 @@ def analyze_food_item(
                     os.makedirs(debug_output_path_volume, exist_ok=True)
                     logging.info(f"Volume estimator debug output will be saved to: {debug_output_path_volume}")
 
-                # --- Debugging: Log mask properties before passing to volume estimator ---
-                if segmentation_mask is not None:
-                    logging.info(f"FOOD_ANALYZER_DEBUG: Passing segmentation_mask to volume_estimator with: "
-                                 f"Shape={segmentation_mask.shape}, dtype={segmentation_mask.dtype}, "
-                                 f"Non-zero pixels={np.count_nonzero(segmentation_mask)}")
-                else:
-                    logging.info("FOOD_ANALYZER_DEBUG: segmentation_mask is None before calling volume_estimator.")
-                # --- End Debugging ---
-
+            
                 calculated_volume_cm3 = estimate_volume_from_depth(
                     depth_map=depth_map, 
                     segmentation_mask=segmentation_mask,
@@ -639,32 +490,13 @@ def analyze_food_item(
                 logging.error(f"Image: {image_basename} - Error during mesh volume estimation: {e}", exc_info=True)
                 calculated_volume_cm3 = 0.0
             results['timing']['volume_mesh_load_calc'] = time.time() - t0_vol_mesh
-        # Fallback to point cloud convex hull if mesh failed or not provided, but method is 'mesh'
-        # This part might need review: if method is 'mesh', should it only use mesh?
-        # For now, keeping existing potential fallback to point_cloud_path if mesh is primary but fails/missing.
+        # Fallback to point cloud convex hull if mesh failed or not provided
         elif point_cloud_path and os.path.exists(point_cloud_path) and depth_map is not None and segmentation_mask is not None:
             logging.info(f"Image: {image_basename} - 'mesh' method selected, but no mesh file. Trying point cloud file: {point_cloud_path} with convex hull.")
-            # This reuses the old convex hull logic. Consider if this is desired for 'mesh' method.
-            # Or if 'mesh' should strictly mean .obj files.
-            # The following is effectively the old 'depth_map_to_masked_points' + 'estimate_volume_convex_hull'
-            # which might be redundant if 'depth' method is preferred for non-mesh scenarios.
             t0_vol_depth_hull = time.time()
             try:
-                # Assuming camera_intrinsics are needed for depth_map_to_masked_points if it's used.
-                # The original depth_map_to_masked_points might not have used full intrinsics.
-                # This part needs careful review against volume_helpers.py content.
-                # For now, let's assume it can proceed or we log a warning.
-                # Placeholder for actual camera intrinsics if needed by depth_map_to_masked_points
-                # This is a bit tricky as the old convex hull method might not have used full intrinsics from config
-                # For simplicity, if we reach here, it implies a configuration that might be suboptimal
-                # as the new 'depth' method is more robust for depth map based calculation.
-                logging.warning(f"Image: {image_basename} - Using convex hull from point cloud file as fallback for 'mesh' method. This path might be deprecated in favor of 'depth' method for non-OBJ inputs.")
-                # This part of the logic might be simplified or removed if 'depth' method is the sole path for non-mesh volume.
-                # The original call was: points = depth_map_to_masked_points(depth_map, segmentation_mask, camera_params_from_config)
-                # And then: calculated_volume_cm3 = estimate_volume_convex_hull(points)
-                # This is complex to replicate here without knowing exact camera_params_from_config structure.
-                # For now, let's log it as not fully supported in this refactor if mesh is missing.
-                logging.warning(f"Image: {image_basename} - Fallback to convex hull from PLY for 'mesh' method is not fully implemented with new intrinsics flow. Please use 'depth' method or provide a valid .obj file for 'mesh' method.")
+                logging.warning(f"Image: {image_basename} - Using convex hull from point cloud file as fallback for 'mesh' method.")
+                logging.warning(f"Image: {image_basename} - Fallback to convex hull from PLY for 'mesh' method is not fully implemented. Please use 'depth' method or provide a valid .obj file for 'mesh' method.")
                 calculated_volume_cm3 = 0.0 
                 volume_method_used = "point_cloud_convex_hull_fallback_unsupported"
             except Exception as e:
@@ -753,21 +585,10 @@ def analyze_food_item(
     results['nutritional_info'] = nutritional_info
     results['timing']['nutritional_lookup'] = time.time() - t0_nutrition
 
-    # ... (existing logic for density lookup and mass calculation) ...
 
     results['timing']['total_pipeline'] = time.time() - start_time_total_pipeline
     logging.info(f"Image: {image_basename} - Food analysis pipeline completed in {results['timing']['total_pipeline']:.2f} seconds.")
     
-    # Save final mask if save_steps is True and mask exists
-    if save_steps and output_dir and segmentation_mask is not None:
-        try:
-            mask_filename = os.path.join(output_dir, f"{Path(image_path).stem}_final_mask.png")
-            # Ensure mask is in a savable format (e.g., 0-255 uint8)
-            saveable_mask = (segmentation_mask.astype(np.uint8) * 255) if segmentation_mask.dtype == bool else segmentation_mask.astype(np.uint8)
-            cv2.imwrite(mask_filename, saveable_mask)
-            logging.info(f"Image: {image_basename} - Saved final segmentation mask to {mask_filename}")
-        except Exception as e:
-            logging.warning(f"Image: {image_basename} - Failed to save final segmentation mask: {e}")
 
     # Display results if enabled (basic console print for now)
     if display_results:
@@ -796,10 +617,10 @@ def analyze_food_item(
     summary_nutrition_source = "USDA API" if results.get('nutritional_info_status', '').startswith('Success') else "N/A"
     summary_total_calories = results.get('estimated_total_calories', 'N/A')
     
-        if isinstance(summary_total_calories, (float, int)):
-            summary_total_calories = f"{summary_total_calories:.2f}"
-        if isinstance(summary_calories_per_100g, (float, int)):
-            summary_calories_per_100g = f"{summary_calories_per_100g:.2f}"
+    if isinstance(summary_total_calories, (float, int)):
+        summary_total_calories = f"{summary_total_calories:.2f}"
+    if isinstance(summary_calories_per_100g, (float, int)):
+        summary_calories_per_100g = f"{summary_calories_per_100g:.2f}"
 
     logging.info(f"--- PRODUCTION SUMMARY LOG [{image_basename}] ---"
                  f"\n  Food: {summary_food_label} (Confidence: {summary_confidence:.2f})"
