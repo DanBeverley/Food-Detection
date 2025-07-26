@@ -1,13 +1,13 @@
 data:
   paths:
-    metadata_file: "data/classification/metadata.json"
+    train_metadata_file: "data/classification/train_metadata.json"
+    val_metadata_file: "data/classification/val_metadata.json"
     label_map_file: "data/classification/label_map.json"
   
   base_data_dir: "path/to/local/RGBD_videos"
 
   image_size: [224, 224]
   batch_size: 64
-  validation_split: 0.2
   random_seed: 42
   
   augmentation:
