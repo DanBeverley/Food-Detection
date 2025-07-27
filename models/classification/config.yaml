@@ -12,8 +12,12 @@ data:
   
   augmentation:
     enabled: true
-    rotation_range: 20
-    zoom_range: 0.15
+    horizontal_flip: true
+    rotation_range: 30
+    width_shift_range: 0.2
+    height_shift_range: 0.2
+    zoom_range: 0.2
+    brightness_range: [0.8, 1.2]
 
 model:
   architecture: "MobileNetV2"
