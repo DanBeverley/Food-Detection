@@ -7,6 +7,43 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def build_augmentation_pipeline(aug_cfg: Dict[str, Any], seed: int) -> tf.keras.Sequential:
+    """Builds a tf.keras.Sequential model for image augmentation from a config dict."""
+    layers_list = []
+    
+    if aug_cfg.get('horizontal_flip', False):
+        layers_list.append(tf.keras.layers.RandomFlip("horizontal", seed=seed))
+        logger.info("Augmentation enabled: RandomFlip (horizontal)")
+
+    if 'rotation_range' in aug_cfg and aug_cfg['rotation_range'] > 0:
+        factor = aug_cfg['rotation_range'] / 360.0
+        layers_list.append(tf.keras.layers.RandomRotation(factor, seed=seed))
+        logger.info(f"Augmentation enabled: RandomRotation (factor={factor:.2f})")
+
+    width_shift = aug_cfg.get('width_shift_range', 0.0)
+    height_shift = aug_cfg.get('height_shift_range', 0.0)
+    if width_shift > 0 or height_shift > 0:
+        layers_list.append(tf.keras.layers.RandomTranslation(
+            height_factor=height_shift, width_factor=width_shift, seed=seed
+        ))
+        logger.info(f"Augmentation enabled: RandomTranslation (h={height_shift}, w={width_shift})")
+
+    if 'zoom_range' in aug_cfg and aug_cfg['zoom_range'] > 0:
+        layers_list.append(tf.keras.layers.RandomZoom(
+            height_factor=aug_cfg['zoom_range'], seed=seed
+        ))
+        logger.info(f"Augmentation enabled: RandomZoom (factor={aug_cfg['zoom_range']})")
+        
+    if 'brightness_range' in aug_cfg:
+        factor = max(1.0 - aug_cfg['brightness_range'][0], aug_cfg['brightness_range'][1] - 1.0)
+        layers_list.append(tf.keras.layers.RandomBrightness(factor=factor, seed=seed))
+        logger.info(f"Augmentation enabled: RandomBrightness (factor={factor:.2f})")
+
+    if not layers_list:
+        return None
+        
+    return tf.keras.Sequential(layers_list, name="image_augmentation")
+
 def load_and_decode_image(path: tf.Tensor, label: tf.Tensor, image_size: tuple) -> Tuple[tf.Tensor, tf.Tensor]:
     """Loads, decodes, and resizes an image file, returning it in [0, 255] range."""
     image_data = tf.io.read_file(path)
@@ -19,11 +56,10 @@ def load_and_decode_image(path: tf.Tensor, label: tf.Tensor, image_size: tuple) 
 def load_classification_data(
     config: Dict[str, Any]
 ) -> Tuple[Optional[tf.data.Dataset], Optional[tf.data.Dataset], int, int, List[str], int]:
-    """Loads pre-split classification dataset using separate train/val metadata files."""
+    """Loads pre-split classification dataset and applies augmentation."""
     data_cfg = config.get('data', {})
     paths_cfg = data_cfg.get('paths', {})
     
-    # Use Path objects for robust path handling
     train_metadata_path = Path(paths_cfg.get('train_metadata_file'))
     val_metadata_path = Path(paths_cfg.get('val_metadata_file'))
     label_map_path = Path(paths_cfg.get('label_map_file'))
@@ -32,6 +68,15 @@ def load_classification_data(
     image_size = tuple(data_cfg.get('image_size', [224, 224]))
     batch_size = data_cfg.get('batch_size', 32)
     seed = data_cfg.get('random_seed', 42)
+
+    aug_cfg = data_cfg.get('augmentation', {})
+    use_augmentation = aug_cfg.get('enabled', False)
+    augmentation_pipeline = None
+    if use_augmentation:
+        logger.info("Building data augmentation pipeline...")
+        augmentation_pipeline = build_augmentation_pipeline(aug_cfg, seed)
+    else:
+        logger.info("Data augmentation is disabled.")
 
     logger.info(f"Loading train metadata from: {train_metadata_path}")
     logger.info(f"Loading val metadata from: {val_metadata_path}")
@@ -78,16 +123,22 @@ def load_classification_data(
     train_dataset_raw = tf.data.Dataset.from_tensor_slices((train_paths, train_labels))
     val_dataset_raw = tf.data.Dataset.from_tensor_slices((val_paths, val_labels)) if val_paths else None
 
-    def configure_dataset(ds: tf.data.Dataset, is_training: bool) -> tf.data.Dataset:
+    def configure_dataset(ds: tf.data.Dataset, is_training: bool, aug_pipeline: Optional[tf.keras.Sequential]) -> tf.data.Dataset:
         ds = ds.map(lambda path, label: load_and_decode_image(path, label, image_size), num_parallel_calls=tf.data.AUTOTUNE)
+        
         if is_training:
-            ds = ds.shuffle(1024).repeat()
+            ds = ds.shuffle(1024, seed=seed)
+            if aug_pipeline:
+                ds = ds.map(lambda image, label: (aug_pipeline(image, training=True), label), 
+                            num_parallel_calls=tf.data.AUTOTUNE)
+            ds = ds.repeat()
+        
         ds = ds.batch(batch_size)
         ds = ds.map(lambda img, lbl: (img, tf.one_hot(tf.cast(lbl, tf.int32), depth=num_classes)), num_parallel_calls=tf.data.AUTOTUNE)
         ds = ds.prefetch(buffer_size=tf.data.AUTOTUNE)
         return ds
         
-    train_ds = configure_dataset(train_dataset_raw, is_training=True)
-    val_ds = configure_dataset(val_dataset_raw, is_training=False) if val_dataset_raw is not None else None
+    train_ds = configure_dataset(train_dataset_raw, is_training=True, aug_pipeline=augmentation_pipeline)
+    val_ds = configure_dataset(val_dataset_raw, is_training=False, aug_pipeline=None) if val_dataset_raw is not None else None
 
     return train_ds, val_ds, num_train_samples, num_val_samples, class_names, num_classes
