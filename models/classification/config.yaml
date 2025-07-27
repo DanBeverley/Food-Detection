@@ -20,10 +20,10 @@ data:
     brightness_range: [0.8, 1.2]
 
 model:
-  architecture: "MobileNetV2"
+  architecture: "EfficientNetV2B0"
   use_pretrained_weights: true
   fine_tune: true
-  fine_tune_layers: 20
+  fine_tune_layers: 30
 
   classification_head:
     dense_layers:
