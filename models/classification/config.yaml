@@ -27,9 +27,14 @@ model:
 
   classification_head:
     dense_layers:
-      - units: 512
+      - units: 1024
+        activation: 'relu'
         batch_norm: true
         dropout: 0.5
+      - units: 512
+        activation: 'relu'
+        batch_norm: true
+        dropout: 0.4
     
 optimizer:
   learning_rate: 0.0001

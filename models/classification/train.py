@@ -54,8 +54,17 @@ def main(args):
         model = build_classification_model(num_classes=num_classes, config=config)
 
         optimizer_cfg = config.get('optimizer', {})
+        batch_size = data_cfg.get('batch_size', 32)
+        
+        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+            initial_learning_rate=optimizer_cfg.get('learning_rate', 1e-4),
+            decay_steps=num_train // batch_size * 2,
+            decay_rate=0.96,
+            staircase=True
+        )
+
         optimizer = tf.keras.optimizers.AdamW(
-            learning_rate=optimizer_cfg.get('learning_rate', 1e-3),
+            learning_rate=lr_schedule,
             weight_decay=optimizer_cfg.get('weight_decay', 1e-4)
         )
         loss_fn = tf.keras.losses.CategoricalCrossentropy(
@@ -80,14 +89,6 @@ def main(args):
             patience=10,
             mode='max',
             restore_best_weights=True,
-            verbose=1
-        ),
-        tf.keras.callbacks.ReduceLROnPlateau(
-            monitor='val_accuracy',
-            factor=0.2,
-            patience=5,
-            mode='max',
-            min_lr=1e-6,
             verbose=1
         ),
         tf.keras.callbacks.TensorBoard(log_dir="/kaggle/working/logs")
