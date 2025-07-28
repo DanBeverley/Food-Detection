@@ -23,21 +23,17 @@ model:
   architecture: "EfficientNetV2B0"
   use_pretrained_weights: true
   fine_tune: true
-  fine_tune_layers: 120
+  fine_tune_layers: 80
 
   classification_head:
     dense_layers:
-      - units: 1024
-        activation: 'relu'
-        batch_norm: true
-        dropout: 0.5
       - units: 512
         activation: 'relu'
         batch_norm: true
-        dropout: 0.4
+        dropout: 0.3
     
 optimizer:
-  learning_rate: 0.0001
+  learning_rate: 0.0003
   weight_decay: 0.0001
 
 loss:
