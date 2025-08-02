@@ -11,6 +11,19 @@ def build_augmentation_pipeline(aug_cfg: Dict[str, Any], seed: int) -> tf.keras.
     """Builds a tf.keras.Sequential model for image augmentation from a config dict."""
     layers_list = []
     
+    def color_jitter(image):
+        if aug_cfg.get('random_hue', False):
+            image = tf.image.random_hue(image, max_delta=0.08, seed=seed)
+        if aug_cfg.get('random_saturation', False):
+            image = tf.image.random_saturation(image, lower=0.7, upper=1.3, seed=seed)
+        if aug_cfg.get('random_contrast', False):
+            image = tf.image.random_contrast(image, lower=0.7, upper=1.3, seed=seed)
+        return image
+
+    if any(k in aug_cfg for k in ['random_hue', 'random_saturation', 'random_contrast']):
+        layers_list.append(tf.keras.layers.Lambda(color_jitter))
+        logger.info("Augmentation enabled: Color Jitter (Hue/Saturation/Contrast)")
+    
     if aug_cfg.get('horizontal_flip', False):
         layers_list.append(tf.keras.layers.RandomFlip("horizontal", seed=seed))
         logger.info("Augmentation enabled: RandomFlip (horizontal)")
