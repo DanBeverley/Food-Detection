@@ -47,9 +47,9 @@ def main(args):
         model = build_classification_model(num_classes=num_classes, config=config)
         
         optimizer_cfg = config.get('optimizer', {})
-        optimizer = tf.keras.optimizers.AdamW(
+        optimizer = tf.keras.optimizers.Adam(
             learning_rate=optimizer_cfg.get('learning_rate', 1e-4),
-            weight_decay=optimizer_cfg.get('weight_decay', 1e-4)
+            clipnorm=1.0
         )
         loss_fn = tf.keras.losses.CategoricalCrossentropy(
             label_smoothing=config.get('loss', {}).get('params', {}).get('label_smoothing', 0.1)
