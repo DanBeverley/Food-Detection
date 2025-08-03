@@ -12,9 +12,7 @@ data:
   
   augmentation:
     enabled: true
-    random_hue: true
-    random_saturation: true
-    random_contrast: true
+    mixup_alpha: 0.2
     horizontal_flip: true
     rotation_range: 30
     width_shift_range: 0.2

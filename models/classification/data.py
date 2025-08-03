@@ -11,19 +11,6 @@ def build_augmentation_pipeline(aug_cfg: Dict[str, Any], seed: int) -> tf.keras.
     """Builds a tf.keras.Sequential model for image augmentation from a config dict."""
     layers_list = []
     
-    def color_jitter(image):
-        if aug_cfg.get('random_hue', False):
-            image = tf.image.random_hue(image, max_delta=0.08, seed=seed)
-        if aug_cfg.get('random_saturation', False):
-            image = tf.image.random_saturation(image, lower=0.7, upper=1.3, seed=seed)
-        if aug_cfg.get('random_contrast', False):
-            image = tf.image.random_contrast(image, lower=0.7, upper=1.3, seed=seed)
-        return image
-
-    if any(k in aug_cfg for k in ['random_hue', 'random_saturation', 'random_contrast']):
-        layers_list.append(tf.keras.layers.Lambda(color_jitter))
-        logger.info("Augmentation enabled: Color Jitter (Hue/Saturation/Contrast)")
-    
     if aug_cfg.get('horizontal_flip', False):
         layers_list.append(tf.keras.layers.RandomFlip("horizontal", seed=seed))
         logger.info("Augmentation enabled: RandomFlip (horizontal)")
@@ -56,6 +43,22 @@ def build_augmentation_pipeline(aug_cfg: Dict[str, Any], seed: int) -> tf.keras.
         return None
         
     return tf.keras.Sequential(layers_list, name="image_augmentation")
+
+def mixup_batch(images, labels, alpha=0.2):
+    """Apply MixUp augmentation to a batch of images and labels."""
+    batch_size = tf.shape(images)[0]
+    
+    # Generate mixing coefficients
+    lambda_mix = tf.random.uniform([], 0.0, alpha)
+    
+    # Shuffle indices for mixing
+    indices = tf.random.shuffle(tf.range(batch_size))
+    
+    # Mix images and labels
+    mixed_images = lambda_mix * images + (1 - lambda_mix) * tf.gather(images, indices)
+    mixed_labels = lambda_mix * labels + (1 - lambda_mix) * tf.gather(labels, indices)
+    
+    return mixed_images, mixed_labels
 
 def load_and_decode_image(path: tf.Tensor, label: tf.Tensor, image_size: tuple) -> Tuple[tf.Tensor, tf.Tensor]:
     """Loads, decodes, and resizes an image file, returning it in [0, 255] range."""
@@ -136,6 +139,11 @@ def load_classification_data(
     train_dataset_raw = tf.data.Dataset.from_tensor_slices((train_paths, train_labels))
     val_dataset_raw = tf.data.Dataset.from_tensor_slices((val_paths, val_labels)) if val_paths else None
 
+    # Get MixUp configuration
+    mixup_alpha = aug_cfg.get('mixup_alpha', 0.0) if use_augmentation else 0.0
+    if mixup_alpha > 0.0:
+        logger.info(f"MixUp augmentation enabled with alpha={mixup_alpha}")
+
     def configure_dataset(ds: tf.data.Dataset, is_training: bool, aug_pipeline: Optional[tf.keras.Sequential]) -> tf.data.Dataset:
         ds = ds.map(lambda path, label: load_and_decode_image(path, label, image_size), num_parallel_calls=tf.data.AUTOTUNE)
         
@@ -148,6 +156,11 @@ def load_classification_data(
         
         ds = ds.batch(batch_size)
         ds = ds.map(lambda img, lbl: (img, tf.one_hot(tf.cast(lbl, tf.int32), depth=num_classes)), num_parallel_calls=tf.data.AUTOTUNE)
+        
+        # Apply MixUp only to training data
+        if is_training and mixup_alpha > 0.0:
+            ds = ds.map(lambda img, lbl: mixup_batch(img, lbl, mixup_alpha), num_parallel_calls=tf.data.AUTOTUNE)
+        
         ds = ds.prefetch(buffer_size=tf.data.AUTOTUNE)
         return ds
         
