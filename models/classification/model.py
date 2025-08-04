@@ -1,7 +1,7 @@
 # new_model.py
 
 import tensorflow as tf
-from tensorflow.keras import models, layers, applications
+from keras import models, layers, applications
 from typing import Dict
 import logging
 

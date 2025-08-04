@@ -15,48 +15,41 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
 def initialize_strategy() -> tf.distribute.Strategy:
     gpus = tf.config.list_physical_devices('GPU')
-    if gpus:
-        logger.info(f"Found {len(gpus)} GPU(s). Using OneDeviceStrategy.")
-        try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-        except RuntimeError as e:
-            logger.error(f"Could not set memory growth: {e}")
-        return tf.distribute.OneDeviceStrategy(device="/gpu:0")
+    if len(gpus) > 1:
+        logger.info(f"Found {len(gpus)} GPUs. Using MirroredStrategy.")
+        return tf.distribute.MirroredStrategy()
+    elif len(gpus) == 1:
+        logger.info("Found 1 GPU. Using default strategy.")
+        return tf.distribute.get_strategy()
     
-    logger.warning("No GPU found. Using default CPU strategy.")
+    logger.warning("No GPU found. Using CPU strategy.")
     return tf.distribute.get_strategy()
 
 def main(args):
+    MODEL_CHECKPOINT_PATH = "/kaggle/working/best_classification_model.keras"
+
     logger.info(f"Loading configuration from: {args.config}")
     config = yaml.safe_load(Path(args.config).read_text())
     strategy = initialize_strategy()
 
     logger.info("Preparing data pipeline...")
     data_cfg = config.get('data', {})
-    
     if args.base_data_dir:
-        logger.info(f"Overriding base_data_dir with provided path: {args.base_data_dir}")
         data_cfg['base_data_dir'] = args.base_data_dir
-
     config['data'] = data_cfg
-    
     train_ds, val_ds, num_train, num_val, class_names, num_classes = load_classification_data(config)
-
     if not train_ds:
-        logger.critical("Data loading failed. Cannot proceed with training.")
+        logger.critical("Data loading failed. Cannot proceed.")
         sys.exit(1)
-        
-    logger.info(f"Data loaded successfully: {num_train} train samples, {num_val} validation samples.")
+    logger.info(f"Data loaded: {num_train} train, {num_val} val samples.")
 
-    logger.info("Building and compiling the model...")
     with strategy.scope():
         model = build_classification_model(num_classes=num_classes, config=config)
-
+        
         optimizer_cfg = config.get('optimizer', {})
-        optimizer = tf.keras.optimizers.AdamW(
-            learning_rate=optimizer_cfg.get('learning_rate', 1e-3),
-            weight_decay=optimizer_cfg.get('weight_decay', 1e-4)
+        optimizer = tf.keras.optimizers.Adam(
+            learning_rate=optimizer_cfg.get('learning_rate', 1e-4),
+            clipnorm=1.0
         )
         loss_fn = tf.keras.losses.CategoricalCrossentropy(
             label_smoothing=config.get('loss', {}).get('params', {}).get('label_smoothing', 0.1)
@@ -65,11 +58,18 @@ def main(args):
 
         model.compile(optimizer=optimizer, loss=loss_fn, metrics=metrics_list)
     
+    if Path(MODEL_CHECKPOINT_PATH).exists():
+        logger.info(f"Found existing model at {MODEL_CHECKPOINT_PATH}. Loading weights to resume training.")
+        model.load_weights(MODEL_CHECKPOINT_PATH)
+        logger.info("Weights loaded successfully.")
+    else:
+        logger.info("No existing model found. Starting a new training run from scratch.")
+
     model.summary(print_fn=logger.info)
 
     callbacks_list = [
         tf.keras.callbacks.ModelCheckpoint(
-            filepath="/kaggle/working/best_classification_model.keras",
+            filepath=MODEL_CHECKPOINT_PATH,
             monitor='val_accuracy',
             save_best_only=True,
             mode='max',
@@ -85,9 +85,9 @@ def main(args):
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor='val_accuracy',
             factor=0.2,
-            patience=5,
+            patience=3,
             mode='max',
-            min_lr=1e-6,
+            min_lr=1e-7,
             verbose=1
         ),
         tf.keras.callbacks.TensorBoard(log_dir="/kaggle/working/logs")
@@ -95,8 +95,8 @@ def main(args):
 
     logger.info("Starting model training...")
     training_cfg = config.get('training', {})
-    epochs = training_cfg.get('epochs', 30)
-    batch_size = data_cfg.get('batch_size', 32)
+    epochs = training_cfg.get('epochs', 50)
+    batch_size = data_cfg.get('batch_size', 64)
     
     model.fit(
         train_ds,
@@ -112,6 +112,6 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train a food classification model.")
     parser.add_argument("--config", type=str, required=True, help="Path to the YAML configuration file.")
-    parser.add_argument("--base_data_dir", type=str, default=None, help="Absolute path to the base directory for images. Overrides config.")
+    parser.add_argument("--base_data_dir", type=str, default=None, help="Absolute path to images.")
     args = parser.parse_args()
     main(args)
