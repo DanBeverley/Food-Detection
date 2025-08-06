@@ -54,15 +54,15 @@ def main(args):
         
         architecture = model_cfg.get('architecture', 'EfficientNetV2B0')
         base_model_name = {
-            'EfficientNetV2B0': 'efficientnetv2b0',
-            'MobileNetV2': 'mobilenetv2',
-            'MobileNetV3Small': 'mobilenetv3small'
-        }.get(architecture, 'efficientnetv2b0')
+            'EfficientNetV2B0': 'efficientnetv2-b0',
+            'MobileNetV2': 'mobilenetv2_1.00_224',
+            'MobileNetV3Small': 'mobilenetv3_small'
+        }.get(architecture)
         
+        if base_model_name is None:
+            raise ValueError(f"Architecture '{architecture}' not found in base_model_name map.")
+
         base_model = model.get_layer(name=base_model_name)
-        
-        if base_model is None:
-            raise ValueError(f"Could not find the base model layer '{base_model_name}'. Ensure it has the correct name.")
         
         logger.info("Stage 1: Training classification head only")
         
