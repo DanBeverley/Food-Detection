@@ -80,7 +80,7 @@ def main(args):
     logger.info(f"Loading configuration from: {args.config}")
     config = yaml.safe_load(Path(args.config).read_text())
     
-    config['data']['batch_size'] = 32
+    config['data']['batch_size'] = 16
     
     train_ds, val_ds, num_train, num_val, class_names, num_classes = load_classification_data(config)
     if not train_ds:
@@ -101,8 +101,8 @@ def main(args):
         train_ds,
         validation_data=val_ds,
         epochs=5,
-        steps_per_epoch=num_train // 32,
-        validation_steps=num_val // 32
+        steps_per_epoch=num_train // 16,
+        validation_steps=num_val // 16
     )
     
     logger.info("Stage 2: Progressive unfreezing")
@@ -155,8 +155,8 @@ def main(args):
         validation_data=val_ds,
         epochs=50,
         initial_epoch=5,
-        steps_per_epoch=num_train // 32,
-        validation_steps=num_val // 32,
+        steps_per_epoch=num_train // 16,
+        validation_steps=num_val // 16,
         callbacks=callbacks_list,
         verbose=1
     )
