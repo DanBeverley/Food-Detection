@@ -44,21 +44,78 @@ def build_augmentation_pipeline(aug_cfg: Dict[str, Any], seed: int) -> tf.keras.
         
     return tf.keras.Sequential(layers_list, name="image_augmentation")
 
+def cutmix(images, labels, alpha=1.0):
+    """Apply CutMix augmentation to a batch of images and labels."""
+    batch_size = tf.shape(images)[0]
+    img_h, img_w = tf.shape(images)[1], tf.shape(images)[2]
+    
+    lambda_val = tf.random.uniform([], 0.0, 1.0)
+    lambda_val = tf.maximum(lambda_val, 1.0 - lambda_val)
+    
+    cut_rat = tf.sqrt(1. - lambda_val)
+    cut_w = tf.cast(tf.cast(img_w, tf.float32) * cut_rat, tf.int32)
+    cut_h = tf.cast(tf.cast(img_h, tf.float32) * cut_rat, tf.int32)
+    
+    cx = tf.random.uniform([], 0, img_w, dtype=tf.int32)
+    cy = tf.random.uniform([], 0, img_h, dtype=tf.int32)
+    
+    bbx1 = tf.clip_by_value(cx - cut_w // 2, 0, img_w)
+    bby1 = tf.clip_by_value(cy - cut_h // 2, 0, img_h)
+    bbx2 = tf.clip_by_value(cx + cut_w // 2, 0, img_w)
+    bby2 = tf.clip_by_value(cy + cut_h // 2, 0, img_h)
+    
+    mask_shape = [batch_size, img_h, img_w, 1]
+    mask = tf.ones(mask_shape, dtype=tf.float32)
+    
+    y_grid, x_grid = tf.meshgrid(tf.range(img_h), tf.range(img_w), indexing='ij')
+    box_mask = tf.logical_and(
+        tf.logical_and(x_grid >= bbx1, x_grid < bbx2),
+        tf.logical_and(y_grid >= bby1, y_grid < bby2)
+    )
+    box_mask = tf.cast(box_mask, tf.float32)
+    box_mask = tf.expand_dims(tf.expand_dims(box_mask, 0), -1)
+    box_mask = tf.tile(box_mask, [batch_size, 1, 1, 1])
+    
+    mask = mask - box_mask
+    
+    indices = tf.random.shuffle(tf.range(batch_size))
+    shuffled_images = tf.gather(images, indices)
+    shuffled_labels = tf.gather(labels, indices)
+    
+    mixed_images = images * mask + shuffled_images * (1.0 - mask)
+    
+    box_area = tf.cast((bbx2 - bbx1) * (bby2 - bby1), tf.float32)
+    total_area = tf.cast(img_h * img_w, tf.float32)
+    lambda_adj = 1.0 - (box_area / total_area)
+    
+    mixed_labels = labels * lambda_adj + shuffled_labels * (1.0 - lambda_adj)
+    
+    return mixed_images, mixed_labels
+
 def mixup_batch(images, labels, alpha=0.2):
     """Apply MixUp augmentation to a batch of images and labels."""
     batch_size = tf.shape(images)[0]
     
-    # Generate mixing coefficients
-    lambda_mix = tf.random.uniform([], 0.0, alpha)
+    if alpha > 0:
+        lambda_mix = tf.random.uniform([], 0.0, alpha)
+    else:
+        lambda_mix = 1.0
     
-    # Shuffle indices for mixing
     indices = tf.random.shuffle(tf.range(batch_size))
     
-    # Mix images and labels
     mixed_images = lambda_mix * images + (1 - lambda_mix) * tf.gather(images, indices)
     mixed_labels = lambda_mix * labels + (1 - lambda_mix) * tf.gather(labels, indices)
     
     return mixed_images, mixed_labels
+
+def augment_batch(images, labels, mixup_alpha=0.2, cutmix_alpha=1.0, use_cutmix_prob=0.5):
+    """Apply either MixUp or CutMix augmentation randomly."""
+    if tf.random.uniform([]) < use_cutmix_prob and cutmix_alpha > 0:
+        return cutmix(images, labels, alpha=cutmix_alpha)
+    elif mixup_alpha > 0:
+        return mixup_batch(images, labels, alpha=mixup_alpha)
+    else:
+        return images, labels
 
 def load_and_decode_image(path: tf.Tensor, label: tf.Tensor, image_size: tuple) -> Tuple[tf.Tensor, tf.Tensor]:
     """Loads, decodes, and resizes an image file, returning it in [0, 255] range."""
@@ -139,10 +196,12 @@ def load_classification_data(
     train_dataset_raw = tf.data.Dataset.from_tensor_slices((train_paths, train_labels))
     val_dataset_raw = tf.data.Dataset.from_tensor_slices((val_paths, val_labels)) if val_paths else None
 
-    # Get MixUp configuration
+    # Get MixUp and CutMix configuration
     mixup_alpha = aug_cfg.get('mixup_alpha', 0.0) if use_augmentation else 0.0
-    if mixup_alpha > 0.0:
-        logger.info(f"MixUp augmentation enabled with alpha={mixup_alpha}")
+    cutmix_alpha = aug_cfg.get('cutmix_alpha', 0.0) if use_augmentation else 0.0
+    
+    if mixup_alpha > 0.0 or cutmix_alpha > 0.0:
+        logger.info(f"MixUp/CutMix augmentation enabled: mixup_alpha={mixup_alpha}, cutmix_alpha={cutmix_alpha}")
 
     def configure_dataset(ds: tf.data.Dataset, is_training: bool, aug_pipeline: Optional[tf.keras.Sequential]) -> tf.data.Dataset:
         ds = ds.map(lambda path, label: load_and_decode_image(path, label, image_size), num_parallel_calls=tf.data.AUTOTUNE)
@@ -157,9 +216,10 @@ def load_classification_data(
         ds = ds.batch(batch_size)
         ds = ds.map(lambda img, lbl: (img, tf.one_hot(tf.cast(lbl, tf.int32), depth=num_classes)), num_parallel_calls=tf.data.AUTOTUNE)
         
-        # Apply MixUp only to training data
-        if is_training and mixup_alpha > 0.0:
-            ds = ds.map(lambda img, lbl: mixup_batch(img, lbl, mixup_alpha), num_parallel_calls=tf.data.AUTOTUNE)
+        # Apply MixUp/CutMix only to training data
+        if is_training and (mixup_alpha > 0.0 or cutmix_alpha > 0.0):
+            ds = ds.map(lambda img, lbl: augment_batch(img, lbl, mixup_alpha=mixup_alpha, cutmix_alpha=cutmix_alpha), 
+                       num_parallel_calls=tf.data.AUTOTUNE)
         
         ds = ds.prefetch(buffer_size=tf.data.AUTOTUNE)
         return ds
