@@ -20,18 +20,21 @@ def build_classification_model(num_classes: int, config: Dict) -> models.Model:
     if architecture == "EfficientNetV2B0":
         preprocess_fn = applications.efficientnet_v2.preprocess_input
         base_model = applications.EfficientNetV2B0(
-            input_shape=(*image_size, 3), include_top=False, weights=weights, name='efficientnetv2b0'
+            input_shape=(*image_size, 3), include_top=False, weights=weights
         )
+        base_model._name = 'efficientnetv2b0'
     elif architecture == "MobileNetV2":
         preprocess_fn = applications.mobilenet_v2.preprocess_input
         base_model = applications.MobileNetV2(
-            input_shape=(*image_size, 3), include_top=False, weights=weights, name='mobilenetv2'
+            input_shape=(*image_size, 3), include_top=False, weights=weights
         )
+        base_model._name = 'mobilenetv2'
     elif architecture == "MobileNetV3Small":
         preprocess_fn = applications.mobilenet_v3.preprocess_input
         base_model = applications.MobileNetV3Small(
-            input_shape=(*image_size, 3), include_top=False, weights=weights, name='mobilenetv3small'
+            input_shape=(*image_size, 3), include_top=False, weights=weights
         )
+        base_model._name = 'mobilenetv3small'
     else:
         raise ValueError(f"Unsupported architecture: {architecture}")
 
