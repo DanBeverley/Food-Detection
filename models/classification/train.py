@@ -5,8 +5,6 @@ import logging
 from pathlib import Path
 import os
 import tensorflow as tf
-from tensorflow.keras import layers
-import numpy as np
 
 from data import load_classification_data
 from model import build_classification_model
@@ -16,62 +14,17 @@ logger = logging.getLogger(__name__)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
 
-def create_regularized_model(num_classes, config):
-    model_cfg = config.get('model', {})
-    data_cfg = config.get('data', {})
+def initialize_strategy() -> tf.distribute.Strategy:
+    gpus = tf.config.list_physical_devices('GPU')
+    if len(gpus) > 1:
+        logger.info(f"Found {len(gpus)} GPUs. Using MirroredStrategy.")
+        return tf.distribute.MirroredStrategy()
+    elif len(gpus) == 1:
+        logger.info("Found 1 GPU. Using default strategy.")
+        return tf.distribute.get_strategy()
     
-    architecture = model_cfg.get('architecture', 'EfficientNetV2B0')
-    image_size = tuple(data_cfg.get('image_size', [224, 224]))
-    use_pretrained = model_cfg.get('use_pretrained_weights', True)
-    weights = 'imagenet' if use_pretrained else None
-    
-    inputs = layers.Input(shape=(*image_size, 3), name='input')
-    
-    augmented = tf.keras.Sequential([
-        layers.RandomFlip("horizontal"),
-        layers.RandomRotation(0.15),
-        layers.RandomZoom(0.2),
-        layers.RandomTranslation(0.1, 0.1),
-        layers.RandomContrast(0.2),
-    ], name='augmentation')(inputs)
-    
-    if architecture == "EfficientNetV2B0":
-        base_model = tf.keras.applications.EfficientNetV2B0(
-            input_shape=(*image_size, 3),
-            include_top=False,
-            weights=weights,
-            input_tensor=augmented
-        )
-    else:
-        raise ValueError(f"Unsupported architecture: {architecture}")
-    
-    base_model.trainable = False
-    
-    x = base_model.output
-    x = layers.GlobalAveragePooling2D()(x)
-    
-    x = layers.Dropout(0.5)(x)
-    x = layers.Dense(256, kernel_regularizer=tf.keras.regularizers.l2(0.01))(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation('relu')(x)
-    x = layers.Dropout(0.6)(x)
-    
-    residual = layers.Dense(128)(x)
-    x = layers.Dense(128, kernel_regularizer=tf.keras.regularizers.l2(0.01))(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation('relu')(x)
-    x = layers.Add()([x, residual])
-    x = layers.Dropout(0.7)(x)
-    
-    outputs = layers.Dense(
-        num_classes,
-        activation='softmax',
-        kernel_regularizer=tf.keras.regularizers.l2(0.02),
-        activity_regularizer=tf.keras.regularizers.l1(0.01)
-    )(x)
-    
-    model = tf.keras.Model(inputs=inputs, outputs=outputs)
-    return model, base_model
+    logger.warning("No GPU found. Using CPU strategy.")
+    return tf.distribute.get_strategy()
 
 
 def main(args):
@@ -79,102 +32,131 @@ def main(args):
     
     logger.info(f"Loading configuration from: {args.config}")
     config = yaml.safe_load(Path(args.config).read_text())
+    strategy = initialize_strategy()
     
-    config['data']['batch_size'] = 16
+    data_cfg = config.get('data', {})
+    model_cfg = config.get('model', {})
+    optimizer_cfg = config.get('optimizer', {})
+    training_cfg = config.get('training', {})
+    
+    if args.base_data_dir:
+        data_cfg['base_data_dir'] = args.base_data_dir
+    config['data'] = data_cfg
     
     train_ds, val_ds, num_train, num_val, class_names, num_classes = load_classification_data(config)
     if not train_ds:
         logger.critical("Data loading failed. Cannot proceed.")
         sys.exit(1)
-    
-    model, base_model = create_regularized_model(num_classes, config)
-    
-    logger.info("Stage 1: Training classification head only")
-    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
-    model.compile(
-        optimizer=optimizer,
-        loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.2),
-        metrics=[tf.keras.metrics.CategoricalAccuracy(name='accuracy')]
-    )
-    
-    model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=5,
-        steps_per_epoch=num_train // 16,
-        validation_steps=num_val // 16
-    )
-    
-    logger.info("Stage 2: Progressive unfreezing")
-    base_model.trainable = True
-    
-    for layer in base_model.layers[:-20]:
-        layer.trainable = False
-    
-    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
-    model.compile(
-        optimizer=optimizer,
-        loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.2),
-        metrics=[
-            tf.keras.metrics.CategoricalAccuracy(name='accuracy'),
-            tf.keras.metrics.TopKCategoricalAccuracy(k=5, name='top5_accuracy')
-        ]
-    )
-    
-    callbacks_list = [
-        tf.keras.callbacks.ModelCheckpoint(
-            filepath=MODEL_CHECKPOINT_PATH,
-            monitor='val_accuracy',
-            save_best_only=True,
-            mode='max',
-            verbose=1
-        ),
-        tf.keras.callbacks.EarlyStopping(
-            monitor='val_accuracy',
-            patience=15,
-            mode='max',
-            restore_best_weights=True,
-            verbose=1,
-            min_delta=0.001
-        ),
-        tf.keras.callbacks.ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.5,
-            patience=5,
-            mode='min',
-            min_lr=1e-7,
-            verbose=1
-        ),
-        tf.keras.callbacks.LearningRateScheduler(
-            lambda epoch: 1e-4 * (0.95 ** epoch)
-        ),
-    ]
-    
-    history = model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=50,
-        initial_epoch=5,
-        steps_per_epoch=num_train // 16,
-        validation_steps=num_val // 16,
-        callbacks=callbacks_list,
-        verbose=1
-    )
-    
-    final_train_acc = history.history['accuracy'][-1]
-    final_val_acc = history.history['val_accuracy'][-1]
-    overfitting_gap = final_train_acc - final_val_acc
-    
-    logger.info(f"Final training accuracy: {final_train_acc:.4f}")
-    logger.info(f"Final validation accuracy: {final_val_acc:.4f}")
-    logger.info(f"Overfitting gap: {overfitting_gap:.4f}")
-    
-    if overfitting_gap > 0.2:
-        logger.warning("Model is still overfitting significantly.")
+    logger.info(f"Data loaded: {num_train} train, {num_val} val samples.")
 
+    with strategy.scope():
+        model = build_classification_model(num_classes, config)
+        
+        architecture = model_cfg.get('architecture', 'EfficientNetV2B0')
+        base_model_name = {
+            'EfficientNetV2B0': 'efficientnetv2b0',
+            'MobileNetV2': 'mobilenetv2',
+            'MobileNetV3Small': 'mobilenetv3small'
+        }.get(architecture, 'efficientnetv2b0')
+        
+        base_model = model.get_layer(name=base_model_name)
+        
+        if base_model is None:
+            raise ValueError(f"Could not find the base model layer '{base_model_name}'. Ensure it has the correct name.")
+        
+        logger.info("Stage 1: Training classification head only")
+        
+        if base_model:
+            base_model.trainable = False
+        
+        optimizer_stage1 = tf.keras.optimizers.Adam(
+            learning_rate=optimizer_cfg.get('stage1_learning_rate', 1e-3),
+            clipnorm=optimizer_cfg.get('clipnorm', 1.0)
+        )
+        
+        model.compile(
+            optimizer=optimizer_stage1,
+            loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=config['loss']['params']['label_smoothing']),
+            metrics=['accuracy']
+        )
+
+        stage1_epochs = training_cfg.get('stage1_epochs', 5)
+        if stage1_epochs > 0:
+            model.fit(
+                train_ds,
+                validation_data=val_ds,
+                epochs=stage1_epochs,
+                steps_per_epoch=num_train // data_cfg['batch_size'],
+                validation_steps=num_val // data_cfg['batch_size']
+            )
+        
+        logger.info("Stage 2: Fine-tuning the model")
+        
+        if base_model:
+            base_model.trainable = True
+            num_fine_tune_layers = model_cfg.get('stage2_trainable_layers', 0)
+            
+            if num_fine_tune_layers > 0:
+                for layer in base_model.layers[:-num_fine_tune_layers]:
+                    layer.trainable = False
+                logger.info(f"Fine-tuning top {num_fine_tune_layers} layers.")
+
+        optimizer_stage2 = tf.keras.optimizers.Adam(
+            learning_rate=optimizer_cfg.get('stage2_learning_rate', 1e-4),
+            clipnorm=optimizer_cfg.get('clipnorm', 1.0)
+        )
+
+        model.compile(
+            optimizer=optimizer_stage2,
+            loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=config['loss']['params']['label_smoothing']),
+            metrics=['accuracy', tf.keras.metrics.TopKCategoricalAccuracy(k=5, name='top5_accuracy')]
+        )
+
+        callbacks_list = [
+            tf.keras.callbacks.ModelCheckpoint(
+                filepath=MODEL_CHECKPOINT_PATH,
+                monitor='val_accuracy',
+                save_best_only=True,
+                mode='max',
+                verbose=1
+            ),
+            tf.keras.callbacks.EarlyStopping(
+                monitor='val_accuracy',
+                patience=10,
+                mode='max',
+                restore_best_weights=True,
+                verbose=1
+            ),
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.2,
+                patience=3,
+                mode='min',
+                min_lr=1e-7,
+                verbose=1
+            ),
+        ]
+
+        history = model.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=training_cfg.get('stage2_epochs', 50),
+            initial_epoch=stage1_epochs,
+            steps_per_epoch=num_train // data_cfg['batch_size'],
+            validation_steps=num_val // data_cfg['batch_size'],
+            callbacks=callbacks_list
+        )
+        
+        final_train_acc = history.history['accuracy'][-1]
+        final_val_acc = history.history['val_accuracy'][-1]
+        overfitting_gap = final_train_acc - final_val_acc
+        
+        logger.info(f"Final training accuracy: {final_train_acc:.4f}")
+        logger.info(f"Final validation accuracy: {final_val_acc:.4f}")
+        logger.info(f"Overfitting gap: {overfitting_gap:.4f}")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Train a food classification model with anti-overfitting measures.")
+    parser = argparse.ArgumentParser(description="Train a food classification model.")
     parser.add_argument("--config", type=str, required=True, help="Path to the YAML configuration file.")
     parser.add_argument("--base_data_dir", type=str, default=None, help="Absolute path to images.")
     args = parser.parse_args()
