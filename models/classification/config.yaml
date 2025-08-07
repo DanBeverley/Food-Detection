@@ -3,29 +3,25 @@ data:
     train_metadata_file: "data/classification/train_metadata.json"
     val_metadata_file: "data/classification/val_metadata.json"
     label_map_file: "data/classification/label_map.json"
-  
   base_data_dir: "path/to/local/RGBD_videos"
-
   image_size: [224, 224]
-  batch_size: 64
+  batch_size: 32
   random_seed: 42
-  
   augmentation:
     enabled: true
     mixup_alpha: 0.2
     horizontal_flip: true
-    rotation_range: 30
-    width_shift_range: 0.2
-    height_shift_range: 0.2
-    zoom_range: 0.2
+    rotation_range: 20
+    width_shift_range: 0.1
+    height_shift_range: 0.1
+    zoom_range: 0.1
     brightness_range: [0.8, 1.2]
 
 model:
   architecture: "EfficientNetV2B0"
   use_pretrained_weights: true
-  fine_tune: true
-  fine_tune_layers: 80
-
+  stage1_trainable_layers: 0
+  stage2_trainable_layers: 80
   classification_head:
     dense_layers:
       - units: 512
@@ -34,11 +30,14 @@ model:
         dropout: 0.4
     
 optimizer:
-  learning_rate: 0.0001
+  stage1_learning_rate: 0.0002
+  stage2_learning_rate: 0.0001
+  clipnorm: 1.0
 
 loss:
   params:
     label_smoothing: 0.1
 
 training:
-  epochs: 50
+  stage1_epochs: 5
+  stage2_epochs: 50

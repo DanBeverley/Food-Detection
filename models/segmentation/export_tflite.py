@@ -14,10 +14,7 @@ logger = logging.getLogger(__name__)
 
 def representative_dataset_gen(dataset: tf.data.Dataset, num_samples: int):
     """Generator for representative dataset for INT8 quantization."""
-    # Take a sample from the dataset
     for image, _ in dataset.take(num_samples):
-        # Model expects batch dimension
-        # Ensure image is float32 as expected by the original model input
         yield [tf.cast(image, tf.float32)] 
 
 def export_model(config_path: str):
@@ -33,7 +30,6 @@ def export_model(config_path: str):
         ValueError: If configuration settings are invalid.
         RuntimeError: If export fails.
     """
-    # Load Config
     try:
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
@@ -45,7 +41,6 @@ def export_model(config_path: str):
         logger.error(f"Error parsing configuration file: {e}")
         raise ValueError(f"Invalid YAML format in {config_path}")
 
-    # Get Paths
     project_root = _get_project_root()
     paths_config = config.get('paths', {})
     model_save_dir_rel = paths_config.get('model_save_dir', 'trained_models/segmentation/')
@@ -57,7 +52,6 @@ def export_model(config_path: str):
     tflite_export_dir = os.path.join(project_root, tflite_export_dir_rel)
     output_tflite_path = os.path.join(tflite_export_dir, tflite_filename)
 
-    # --- Dynamically find the Keras model file ---
     keras_model_path = None
     specified_model_filename = export_config.get('keras_model_filename')
 
@@ -72,26 +66,24 @@ def export_model(config_path: str):
                 Attempting to find latest model in '{model_save_dir}'."
             )
 
-    if not keras_model_path:  # If not specified or specified file not found
+    if not keras_model_path:  
         if not os.path.isdir(model_save_dir):
             logger.error(f"Model save directory not found: {model_save_dir}")
             raise FileNotFoundError(f"Model save directory missing: {model_save_dir}")
 
-        h5_files = [
+        model_files = [
             f for f in os.listdir(model_save_dir) 
-            if f.endswith('.h5') and os.path.isfile(os.path.join(model_save_dir, f))
+            if (f.endswith('.h5') or f.endswith('.keras')) and os.path.isfile(os.path.join(model_save_dir, f))
         ]
 
-        if not h5_files:
-            logger.error(f"No .h5 model files found in directory: {model_save_dir}")
-            raise FileNotFoundError(f"No .h5 Keras model files found in {model_save_dir}")
+        if not model_files:
+            logger.error(f"No .h5 or .keras model files found in directory: {model_save_dir}")
+            raise FileNotFoundError(f"No .h5 or .keras Keras model files found in {model_save_dir}")
 
-        # Prefer files with "final" in their name (case-insensitive)
-        final_files = [f for f in h5_files if "final" in f.lower()]
+        final_files = [f for f in model_files if "final" in f.lower()]
         
-        selected_file_list = final_files if final_files else h5_files
+        selected_file_list = final_files if final_files else model_files
         
-        # Get the most recently modified file from the selected list
         try:
             latest_model_file = max(
                 selected_file_list, 
@@ -102,41 +94,37 @@ def export_model(config_path: str):
                 logger.info(f"Found 'final' model. Using latest: {latest_model_file} from {model_save_dir}")
             else:
                 logger.info(f"No 'final' model found or specified one missing. Using latest .h5 model: {latest_model_file} from {model_save_dir}")
-        except ValueError: # Should not happen if h5_files is not empty
+        except ValueError: 
              logger.error(f"Could not determine latest model file in {model_save_dir} from list: {selected_file_list}")
              raise FileNotFoundError(f"Could not determine latest model file in {model_save_dir}")
 
-    # Load Keras Model
-    # The check os.path.exists(keras_model_path) is still good as a final validation
     if not os.path.exists(keras_model_path):
         logger.error(f"Keras model file not found at: {keras_model_path}")
         raise FileNotFoundError(f"Model file missing: {keras_model_path}")
         
     logger.info(f"Loading Keras model from: {keras_model_path}")
     try:
-        # Try to load with custom objects first
         try:
             from train import dice_loss, focal_loss, combined_loss, BinaryIoU, DiceCoefficient
+            from utils import StableIoU
             custom_objects = {
                 'dice_loss': dice_loss,
                 'focal_loss': focal_loss,
                 'combined_loss': combined_loss,
                 'BinaryIoU': BinaryIoU,
                 'DiceCoefficient': DiceCoefficient,
+                'StableIoU': StableIoU,
             }
             model = keras.models.load_model(keras_model_path, custom_objects=custom_objects)
             logger.info("Model loaded with custom objects")
         except ValueError as ve:
             if "lambda" in str(ve):
                 logger.warning("Model contains lambda functions that can't be loaded. Creating inference model...")
-                # Load model architecture and weights separately
                 from train import build_fused_encoder_decoder_model
                 
-                # Get model config to rebuild architecture
                 model_config = config.get('model', {})
                 data_config = config.get('data', {})
                 
-                # Rebuild the model architecture
                 output_channels = data_config.get('num_classes', 1)
                 image_size = tuple(data_config.get('image_size', [128, 128])[:2])
                 
@@ -147,7 +135,6 @@ def export_model(config_path: str):
                     data_config=data_config
                 )
                 
-                # Load weights from the saved model
                 model.load_weights(keras_model_path)
                 logger.info("Model architecture rebuilt and weights loaded successfully")
             else:
@@ -159,11 +146,9 @@ def export_model(config_path: str):
         logger.error(f"Error loading Keras model: {e}", exc_info=True)
         raise RuntimeError("Failed to load Keras model.")
 
-    # Configure TFLite Converter 
     logger.info("Configuring TFLite converter...")
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
 
-    # Handle Quantization
     quant_config = export_config.get('quantization', {})
     quant_type = quant_config.get('type', 'none').lower()
     use_repr_dataset = quant_config.get('use_representative_dataset', False)
@@ -174,8 +159,8 @@ def export_model(config_path: str):
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         converter.target_spec.supported_types = [tf.float16]
         converter.target_spec.supported_ops = [
-             tf.lite.OpsSet.TFLITE_BUILTINS, # Enable TensorFlow Lite ops.
-             tf.lite.OpsSet.SELECT_TF_OPS    # Enable TensorFlow ops (if needed).
+             tf.lite.OpsSet.TFLITE_BUILTINS, 
+             tf.lite.OpsSet.SELECT_TF_OPS    
         ]
 
     elif quant_type == 'int8':
@@ -185,25 +170,19 @@ def export_model(config_path: str):
         if use_repr_dataset:
             logger.info(f"Using representative dataset with {num_repr_samples} samples.")
             try:
-                # Load a dataset for representative data (e.g., using train_ds)
-                # Consider using a smaller batch size or unbatching for the generator
                 repr_conf = config.copy() 
-                repr_conf['data']['batch_size'] = 1 # Use batch size 1 for generator
-                repr_conf['data']['shuffle'] = False # No need to shuffle for representative data
-                repr_conf['data']['augment'] = False # Don't augment representative data
+                repr_conf['data']['batch_size'] = 1 
+                repr_conf['data']['shuffle'] = False 
+                repr_conf['data']['augment'] = False 
                 
-                # Temporarily adjust config to load only what's needed
                 if 'validation_split' in repr_conf['data']:
                      del repr_conf['data']['validation_split']
                 if 'test_split' in repr_conf['data']:
                      del repr_conf['data']['test_split']
-                repr_conf['data']['split_ratios'] = [1.0, 0.0, 0.0] # Load all as 'train'
+                repr_conf['data']['split_ratios'] = [1.0, 0.0, 0.0] 
 
-                # CORRECTED USAGE:
-                # train_ds, _, _ = load_segmentation_datasets(repr_conf) 
-                # datasets_tuple returns: (train_dataset, val_dataset, test_dataset, steps_per_epoch, validation_steps, test_steps, num_classes)
                 datasets_tuple = load_segmentation_data(repr_conf) 
-                train_ds = datasets_tuple[0] # train_dataset is the first element
+                train_ds = datasets_tuple[0]
 
                 if train_ds is None:
                     raise ValueError("Failed to load dataset for representative data.")
@@ -220,33 +199,40 @@ def export_model(config_path: str):
             except Exception as e:
                 logger.error(f"Error preparing representative dataset: {e}", exc_info=True)
                 logger.warning("Falling back to INT8 quantization WITHOUT representative dataset.")
-                # Fallback: Remove representative dataset if loading failed
                 converter.representative_dataset = None 
-                # Ensure ops support standard float fallback
                 converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
         else:
             logger.warning("Performing INT8 quantization WITHOUT a representative dataset. "
                            "Accuracy may be impacted. Consider enabling 'use_representative_dataset'.")
-            # Ensure ops support standard float fallback if no representative data
             converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
 
     elif quant_type == 'none' or quant_type == 'default':
         logger.info("No quantization applied (default conversion).")
-        # ensure TF ops are allowed if needed by the model
         converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
     else:
         logger.warning(f"Unsupported quantization type '{quant_type}' specified in config. Performing default conversion.")
 
-    # Convert Model
     logger.info("Converting model to TFLite...")
     try:
-        tflite_model = converter.convert()
+        import tempfile
+        import shutil
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            saved_model_path = os.path.join(temp_dir, "saved_model")
+            logger.info(f"Saving model as SavedModel to {saved_model_path}")
+            tf.saved_model.save(model, saved_model_path)
+            
+            # Convert from SavedModel
+            converter = tf.lite.TFLiteConverter.from_saved_model(saved_model_path)
+            if use_quantization and quantization_type == 'int8':
+                converter.optimizations = [tf.lite.Optimize.DEFAULT]
+            
+            tflite_model = converter.convert()
         logger.info("Model converted successfully.")
     except Exception as e:
         logger.error(f"TFLite conversion failed: {e}", exc_info=True)
         raise RuntimeError("TFLite conversion process failed.")
 
-    # Save TFLite Model
     os.makedirs(tflite_export_dir, exist_ok=True)
     try:
         with open(output_tflite_path, 'wb') as f:

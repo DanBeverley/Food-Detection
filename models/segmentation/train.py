@@ -14,6 +14,91 @@ from tensorflow.keras.optimizers import Adam
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Custom loss functions and metrics for model loading
+def dice_loss(y_true, y_pred, smooth=1e-6):
+    """Dice loss function for binary segmentation."""
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    
+    intersection = tf.reduce_sum(y_true * y_pred)
+    union = tf.reduce_sum(y_true) + tf.reduce_sum(y_pred)
+    dice = (2.0 * intersection + smooth) / (union + smooth)
+    return 1.0 - dice
+
+def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
+    """Focal loss function for binary segmentation."""
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    
+    # Clip predictions to prevent log(0)
+    epsilon = tf.keras.backend.epsilon()
+    y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
+    
+    # Compute focal loss
+    pt = tf.where(tf.equal(y_true, 1), y_pred, 1 - y_pred)
+    alpha_t = tf.where(tf.equal(y_true, 1), alpha, 1 - alpha)
+    focal_weight = alpha_t * tf.pow(1 - pt, gamma)
+    focal_loss = -focal_weight * tf.math.log(pt)
+    
+    return tf.reduce_mean(focal_loss)
+
+def combined_loss(y_true, y_pred, dice_weight=0.5, focal_weight=0.5):
+    """Combined dice and focal loss."""
+    dice = dice_loss(y_true, y_pred)
+    focal = focal_loss(y_true, y_pred)
+    return dice_weight * dice + focal_weight * focal
+
+class BinaryIoU(tf.keras.metrics.Metric):
+    """Binary IoU metric."""
+    def __init__(self, threshold=0.5, name='binary_iou', **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.threshold = threshold
+        self.intersection = self.add_weight(name='intersection', initializer='zeros')
+        self.union = self.add_weight(name='union', initializer='zeros')
+    
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true = tf.cast(y_true, self.dtype)
+        y_pred = tf.cast(y_pred > self.threshold, self.dtype)
+        
+        intersection = tf.reduce_sum(y_true * y_pred)
+        union = tf.reduce_sum(y_true) + tf.reduce_sum(y_pred) - intersection
+        
+        self.intersection.assign_add(intersection)
+        self.union.assign_add(union)
+    
+    def result(self):
+        return tf.math.divide_no_nan(self.intersection, self.union)
+    
+    def reset_state(self):
+        self.intersection.assign(0.0)
+        self.union.assign(0.0)
+
+class DiceCoefficient(tf.keras.metrics.Metric):
+    """Dice coefficient metric."""
+    def __init__(self, threshold=0.5, smooth=1e-6, name='dice_coefficient', **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.threshold = threshold
+        self.smooth = smooth
+        self.intersection = self.add_weight(name='intersection', initializer='zeros')
+        self.total = self.add_weight(name='total', initializer='zeros')
+    
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true = tf.cast(y_true, self.dtype)
+        y_pred = tf.cast(y_pred > self.threshold, self.dtype)
+        
+        intersection = tf.reduce_sum(y_true * y_pred)
+        total = tf.reduce_sum(y_true) + tf.reduce_sum(y_pred)
+        
+        self.intersection.assign_add(intersection)
+        self.total.assign_add(total)
+    
+    def result(self):
+        return (2.0 * self.intersection + self.smooth) / (self.total + self.smooth)
+    
+    def reset_state(self):
+        self.intersection.assign(0.0)
+        self.total.assign(0.0)
+
 def _get_project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 

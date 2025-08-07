@@ -11,14 +11,14 @@ try:
     from models.segmentation.predict_segmentation import run_segmentation_inference, load_segmentation_model
 except ImportError:
     logging.error("Failed to import segmentation functions. Ensure predict_segmentation.py is refactored.")
-    def load_segmentation_model(path): raise NotImplementedError("Segmentation model loading not implemented/imported.")
+    def load_segmentation_model(path, expected_input_size_hw=None): raise NotImplementedError("Segmentation model loading not implemented/imported.")
     def run_segmentation_inference(*args): raise NotImplementedError("Segmentation inference not implemented/imported.")
 
 try:
     from models.classification.predict_classification import run_classification_inference, load_classification_model
 except ImportError:
     logging.error("Failed to import classification functions. Ensure predict_classification.py is refactored.")
-    def load_classification_model(path): return None, None, None, None # type: ignore
+    def load_classification_model(path, labels_path=None): return None, None, None, None # type: ignore
     def run_classification_inference(*args): return None, 0.0 # type: ignore
 
 try:
@@ -156,7 +156,8 @@ def _perform_segmentation(image: np.ndarray, config: dict, mask_path: str | None
                 raise FileNotFoundError(f"Segmentation model not found: {segmentation_tflite_path}")
             
             # Load model and run inference
-            model, input_details, output_details = load_segmentation_model(segmentation_tflite_path)
+            expected_input_size_hw = (256, 256)  # Standard input size for segmentation model
+            model, input_details, output_details = load_segmentation_model(segmentation_tflite_path, expected_input_size_hw)
             segmentation_mask, predicted_prob = run_segmentation_inference(
                 model, input_details, output_details, image, input_size, threshold
             )
