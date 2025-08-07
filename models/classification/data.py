@@ -7,6 +7,14 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def _get_project_root() -> Path:
+    """Get the project root directory."""
+    return Path(__file__).resolve().parent.parent.parent
+
+def _get_preprocess_fn():
+    """Get the preprocessing function for EfficientNetV2."""
+    return tf.keras.applications.efficientnet_v2.preprocess_input
+
 def build_augmentation_pipeline(aug_cfg: Dict[str, Any], seed: int) -> tf.keras.Sequential:
     """Builds a tf.keras.Sequential model for image augmentation from a config dict."""
     layers_list = []
