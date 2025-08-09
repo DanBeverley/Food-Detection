@@ -17,12 +17,28 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 def get_project_root()->Path:
     return Path(__file__).parent.parent.parent
 
-def load_and_preprocess_image(image_path:str, target_size_hw:tuple) -> tuple[np.ndarray, tuple]:
-    """Loads, resizes, flattens, normalizes, and batches an image."""
+def load_and_preprocess_image(image_input, target_size_hw:tuple) -> tuple[np.ndarray, tuple]:
+    """Loads, resizes, flattens, normalizes, and batches an image.
+    
+    Args:
+        image_input: Either a file path (str) or numpy array (np.ndarray)
+        target_size_hw: Target size as (height, width)
+    """
     try:
         target_h, target_w = target_size_hw # e.g., (64, 64)
 
-        img = Image.open(image_path).convert("RGB")
+        # Handle both file path and numpy array inputs
+        if isinstance(image_input, str):
+            # File path input
+            img = Image.open(image_input).convert("RGB")
+            image_name = Path(image_input).name
+        elif isinstance(image_input, np.ndarray):
+            # Numpy array input
+            img = Image.fromarray(image_input.astype(np.uint8))
+            image_name = "numpy_array"
+        else:
+            raise ValueError(f"Unsupported image input type: {type(image_input)}")
+            
         original_size_wh = img.size
         original_size_hw = (original_size_wh[1], original_size_wh[0])
         
@@ -35,14 +51,14 @@ def load_and_preprocess_image(image_path:str, target_size_hw:tuple) -> tuple[np.
         
         # Add batch dimension: (H, W, C) -> (1, H, W, C)
         input_data = np.expand_dims(img_array, axis=0) # Shape e.g. (1, 128, 128, 3)
-        logging.info(f"Image {Path(image_path).name}: Resized to {img_array.shape}, final shape: {input_data.shape}")
-        logging.info(f"Image {Path(image_path).name}: Final preprocessed shape for TFLite: {input_data.shape}")
+        logging.info(f"Image {image_name}: Resized to {img_array.shape}, final shape: {input_data.shape}")
+        logging.info(f"Image {image_name}: Final preprocessed shape for TFLite: {input_data.shape}")
         return input_data, original_size_hw
     except FileNotFoundError:
-        logging.error(f"Image file not found: {image_path}")
+        logging.error(f"Image file not found: {image_input}")
         raise
     except Exception as e:
-        logging.error(f"Error loading or preprocessing image {image_path}: {e}")
+        logging.error(f"Error loading or preprocessing image {image_input}: {e}")
         raise
 
 def postprocess_mask(raw_mask:np.ndarray, target_size_hw:tuple, num_classes:int, threshold:float=0.5) -> np.ndarray:
@@ -135,8 +151,16 @@ def postprocess_mask(raw_mask:np.ndarray, target_size_hw:tuple, num_classes:int,
 
     # Resize mask back to target size using NEAREST
     # OpenCV resize takes (w, h)
-    target_size_wh = (target_size_hw[1], target_size_hw[0])
-    final_mask = cv2.resize(processed_mask, target_size_wh, interpolation=cv2.INTER_NEAREST)
+    processed_mask_2d = processed_mask.squeeze()
+    
+    if target_size_hw and len(target_size_hw) == 2 and target_size_hw[0] > 0 and target_size_hw[1] > 0:
+        if processed_mask_2d.shape[:2] != target_size_hw:
+            target_size_wh = (target_size_hw[1], target_size_hw[0])
+            final_mask = cv2.resize(processed_mask_2d, target_size_wh, interpolation=cv2.INTER_NEAREST)
+        else:
+            final_mask = processed_mask_2d
+    else:
+        final_mask = processed_mask_2d
     logging.info(f"PREDICT_SEG_DEBUG (postprocess_mask - final_mask AFTER resize to {target_size_hw}):\n"
                  f"  Shape={final_mask.shape}, dtype={final_mask.dtype}\n"
                  f"  Min={final_mask.min()}, Max={final_mask.max()}, Non-zero pixels={np.count_nonzero(final_mask)}")
@@ -191,65 +215,93 @@ def load_segmentation_model(tflite_model_path:str, expected_input_size_hw: tuple
 
 def run_segmentation_inference(
     interpreter:tf.lite.Interpreter,
-    input_details:list, # These are now details AFTER potential resize and alloc
+    input_details:list,
     output_details:list,
-    image_path:str,
-    model_input_size_hw:tuple, # e.g. (256,256) from config
-    output_resize_shape_hw:tuple, # e.g., original image shape or depth map shape
+    image_input,
+    model_input_size_hw:tuple,
+    output_resize_shape_hw:tuple,
     num_classes:int = 2,
-    threshold:float = 0.5): # Add threshold parameter with a default
+    threshold:float = 0.5,
+    depth_input=None,
+    pc_input=None):
     """
-    Runs segmentation inference on a single image.
+    Runs multimodal segmentation inference.
 
     Args:
         interpreter: Loaded TFLite interpreter.
         input_details: Interpreter input details.
         output_details: Interpreter output details.
-        image_path: Path to the input image.
+        image_input: RGB image as numpy array.
         model_input_size_hw: Expected input size (H, W) of the TFLite model.
         output_resize_shape_hw: Target shape (H, W) to resize the final mask to.
         num_classes: Number of output classes for the model.
         threshold: Confidence threshold for binary segmentation (if num_classes <= 2).
+        depth_input: Optional depth map as numpy array.
+        pc_input: Optional point cloud data as numpy array.
 
     Returns:
         Processed segmentation mask (resized to output_resize_shape_hw) or None on failure.
     """
     try:
-        logging.debug(f"Running inference for image: {image_path}")
+        logging.debug(f"Running multimodal inference for image input")
         logging.debug(f"Model Input Size (H,W): {model_input_size_hw}, Output Resize Shape (H,W): {output_resize_shape_hw}, Num Classes: {num_classes}")
 
-        # Load and preprocess image
-        try:
-            preprocessed_image, original_size_hw = load_and_preprocess_image(image_path, model_input_size_hw)
-            if preprocessed_image is None:
-                logging.error(f"Preprocessing failed for image: {image_path}")
-                return None
-            logging.debug(f"Image preprocessed successfully. Shape: {preprocessed_image.shape}, Dtype: {preprocessed_image.dtype}")
-            logging.info(f"PREDICT_SEG_DEBUG (Preprocessed Image for TFLite): "
-                         f"Shape={preprocessed_image.shape}, dtype={preprocessed_image.dtype}, "
-                         f"Min={np.min(preprocessed_image)}, Max={np.max(preprocessed_image)}, "
-                         f"Mean={np.mean(preprocessed_image)}, "
-                         f"Sample values (first 5 from flattened): {preprocessed_image.flatten()[:5]}")
-        except Exception as preproc_e:
-            logging.exception(f"Error during preprocessing for {image_path}: {preproc_e}")
+        # Prepare RGB input
+        preprocessed_image, original_size_hw = load_and_preprocess_image(image_input, model_input_size_hw)
+        if preprocessed_image is None:
+            logging.error(f"RGB preprocessing failed")
             return None
+        logging.info(f"RGB input prepared: Shape={preprocessed_image.shape}, dtype={preprocessed_image.dtype}")
 
-        input_index = input_details[0]['index']
-        logging.info(f"--- Pre-set_tensor --- Input shape: {preprocessed_image.shape}, Expected by model: {input_details[0]['shape']}")
-        
-        expected_dtype = input_details[0]['dtype']
-        if preprocessed_image.dtype != expected_dtype:
-            logging.warning(f"Dtype mismatch! Casting from {preprocessed_image.dtype} to {expected_dtype}.")
-            preprocessed_image = preprocessed_image.astype(expected_dtype)
+        # Prepare depth input (use dummy if not provided)
+        if depth_input is not None:
+            # Handle depth map as grayscale, then expand to 3 channels
+            if isinstance(depth_input, np.ndarray) and depth_input.ndim == 2:
+                depth_resized = cv2.resize(depth_input, (model_input_size_hw[1], model_input_size_hw[0]))
+                depth_3ch = np.stack([depth_resized] * 3, axis=-1).astype(np.float32)  # Convert to 3 channels
+                preprocessed_depth = np.expand_dims(depth_3ch, axis=0)  # Add batch dimension
+            else:
+                preprocessed_depth, _ = load_and_preprocess_image(depth_input, model_input_size_hw)
+                if preprocessed_depth is None:
+                    logging.warning("Depth preprocessing failed, using dummy depth")
+                    preprocessed_depth = np.ones_like(preprocessed_image) * 128.0
+        else:
+            # Create dummy depth input (same shape as RGB)
+            preprocessed_depth = np.ones_like(preprocessed_image) * 128.0
+        logging.info(f"Depth input prepared: Shape={preprocessed_depth.shape}, dtype={preprocessed_depth.dtype}")
 
-        interpreter.set_tensor(input_index, preprocessed_image)
+        # Prepare point cloud input (use dummy if not provided) 
+        if pc_input is not None and len(pc_input.shape) == 2 and pc_input.shape[1] == 3:
+            # Pad or truncate to 4096 points
+            if pc_input.shape[0] < 4096:
+                padding = np.zeros((4096 - pc_input.shape[0], 3), dtype=np.float32)
+                preprocessed_pc = np.vstack([pc_input, padding])
+            else:
+                preprocessed_pc = pc_input[:4096]
+            preprocessed_pc = np.expand_dims(preprocessed_pc, axis=0)  # Add batch dimension
+        else:
+            # Create dummy point cloud input: [1, 4096, 3]
+            preprocessed_pc = np.zeros((1, 4096, 3), dtype=np.float32)
+        logging.info(f"Point cloud input prepared: Shape={preprocessed_pc.shape}, dtype={preprocessed_pc.dtype}")
+
+        # Set all three inputs
+        for i, detail in enumerate(input_details):
+            if detail['name'] == 'rgb_input':
+                interpreter.set_tensor(detail['index'], preprocessed_image.astype(detail['dtype']))
+                logging.info(f"Set RGB input: {preprocessed_image.shape} -> {detail['shape']}")
+            elif detail['name'] == 'depth_input':
+                interpreter.set_tensor(detail['index'], preprocessed_depth.astype(detail['dtype']))
+                logging.info(f"Set depth input: {preprocessed_depth.shape} -> {detail['shape']}")
+            elif detail['name'] == 'pc_input':
+                interpreter.set_tensor(detail['index'], preprocessed_pc.astype(detail['dtype']))
+                logging.info(f"Set point cloud input: {preprocessed_pc.shape} -> {detail['shape']}")
         t_invoke_start = time.time()
         logging.debug("Invoking TFLite interpreter...")
         try:
             interpreter.invoke()
             logging.debug("Interpreter invoked successfully.")
         except Exception as invoke_e:
-            logging.exception(f"Error invoking TFLite interpreter for {image_path}: {invoke_e}")
+            logging.exception(f"Error invoking TFLite interpreter for {image_input}: {invoke_e}")
             return None
 
         # Get output tensor
@@ -263,14 +315,14 @@ def run_segmentation_inference(
                          f"  Sample values (first 5 from flattened): {raw_output.flatten()[:5]}")
             logging.debug(f"Raw output tensor shape: {raw_output.shape}, dtype: {raw_output.dtype}")
         except Exception as get_tensor_e:
-            logging.exception(f"Error getting output tensor for {image_path}: {get_tensor_e}")
+            logging.exception(f"Error getting output tensor for {image_input}: {get_tensor_e}")
             return None
 
         # Postprocess mask
         final_mask = postprocess_mask(raw_output, output_resize_shape_hw, num_classes, threshold=threshold) # Pass the threshold
         return final_mask
     except Exception as e:
-        logging.exception(f"Error during segmentation inference for {image_path}: {e}")
+        logging.exception(f"Error during segmentation inference for {image_input}: {e}")
         return None
 
 def predict_standalone(config_path:str, image_path:str, output_path:str = None, show_overlay:bool=False):
