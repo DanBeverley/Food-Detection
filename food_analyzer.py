@@ -114,7 +114,8 @@ def _load_input_data(image_path: str, depth_map_path: str | None, image_basename
         raise
 
 def _perform_segmentation(image: np.ndarray, config: dict, mask_path: str | None, 
-                         image_basename: str, save_steps: bool, output_dir: str | None) -> tuple[np.ndarray | None, str, dict]:
+                         image_basename: str, save_steps: bool, output_dir: str | None, 
+                         depth_map: np.ndarray | None = None) -> tuple[np.ndarray | None, str, dict]:
     """Perform food segmentation."""
     timing = {}
     error_messages = []
@@ -158,8 +159,9 @@ def _perform_segmentation(image: np.ndarray, config: dict, mask_path: str | None
             # Load model and run inference
             expected_input_size_hw = (256, 256)  # Standard input size for segmentation model
             model, input_details, output_details = load_segmentation_model(segmentation_tflite_path, expected_input_size_hw)
-            segmentation_mask, predicted_prob = run_segmentation_inference(
-                model, input_details, output_details, image, input_size, threshold
+            segmentation_mask = run_segmentation_inference(
+                model, input_details, output_details, image, expected_input_size_hw, input_size, 2, threshold,
+                depth_input=depth_map, pc_input=None
             )
             segmentation_source = "inference"
             timing['segmentation_inference'] = time.time() - t0_seg
@@ -294,7 +296,7 @@ def analyze_food_item(
     # 2. Food Segmentation
     try:
         segmentation_mask, segmentation_source, seg_results = _perform_segmentation(
-            image, config, mask_path, image_basename, save_steps, output_dir
+            image, config, mask_path, image_basename, save_steps, output_dir, depth_map
         )
         results['timing'].update(seg_results['timing'])
         results['error_messages'].extend(seg_results['error_messages'])

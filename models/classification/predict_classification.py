@@ -20,12 +20,22 @@ def _get_project_root() -> Path:
     return Path(__file__).parent.parent.parent
 
 def _get_preprocess_fn(architecture: str):
-    """Returns the correct preprocessing function for a given architecture."""
+    from tensorflow.keras.applications import efficientnet_v2
+    
     if architecture == "EfficientNetV2B0":
-        return lambda x: x / 255.0
+        def efficientnet_preprocess(x):
+            x = x / 255.0
+            mean = np.array([0.485, 0.456, 0.406])
+            std = np.array([0.229, 0.224, 0.225])
+            x = (x - mean) / std
+            return x.astype(np.float32)
+        return efficientnet_preprocess
     elif architecture == "MobileNetV2":
+        # MobileNetV2 expects [-1,1] normalized input 
         return lambda x: (x / 127.5) - 1.0
+    # Add other architectures as needed
     else:
+        # Default normalization to [0,1]
         logging.warning(f"Architecture '{architecture}' has no specific preprocess function. Defaulting to scale by /255.")
         return lambda x: x / 255.0
 
@@ -44,7 +54,7 @@ def load_classification_model(tflite_model_path: str, labels_path: str = None):
         tuple: (interpreter, input_details, output_details, class_labels list)
                Returns None for class_labels if labels file not found/parsable.
     """
-    # Load Interpreter
+    # Load TFLite Interpreter
     try:
         interpreter = tf.lite.Interpreter(model_path=tflite_model_path)
         interpreter.allocate_tensors()
