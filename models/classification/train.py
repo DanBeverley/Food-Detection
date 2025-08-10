@@ -9,6 +9,7 @@ import tensorflow as tf
 from data import load_classification_data
 from model import build_classification_model
 
+tf.config.optimizer.set_jit(False)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
