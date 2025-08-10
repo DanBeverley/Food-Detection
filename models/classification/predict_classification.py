@@ -20,22 +20,16 @@ def _get_project_root() -> Path:
     return Path(__file__).parent.parent.parent
 
 def _get_preprocess_fn(architecture: str):
-    from tensorflow.keras.applications import efficientnet_v2
-    
-    if architecture == "EfficientNetV2B0":
-        def efficientnet_preprocess(x):
-            x = x / 255.0
-            mean = np.array([0.485, 0.456, 0.406])
-            std = np.array([0.229, 0.224, 0.225])
-            x = (x - mean) / std
-            return x.astype(np.float32)
-        return efficientnet_preprocess
+    """
+    Returns the correct preprocessing function for a given architecture.
+    For EfficientNetV2, this is an identity function as preprocessing is built-in.
+    For MobileNetV2, it scales pixels to [-1, 1].
+    """
+    if architecture.startswith("EfficientNetV2B0"):
+        return lambda x: x
     elif architecture == "MobileNetV2":
-        # MobileNetV2 expects [-1,1] normalized input 
         return lambda x: (x / 127.5) - 1.0
-    # Add other architectures as needed
     else:
-        # Default normalization to [0,1]
         logging.warning(f"Architecture '{architecture}' has no specific preprocess function. Defaulting to scale by /255.")
         return lambda x: x / 255.0
 
@@ -161,7 +155,6 @@ def preprocess_classification_image(
 
     try:
         if image_data is not None:
-            # Assuming image_data is an RGB NumPy array
             img = Image.fromarray(image_data.astype(np.uint8))
         else:
             img = Image.open(image_path).convert('RGB')

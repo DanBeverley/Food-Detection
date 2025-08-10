@@ -10,18 +10,19 @@ data:
   augmentation:
     enabled: true
     mixup_alpha: 0.2
+    cutmix_alpha: 1.0
     horizontal_flip: true
     rotation_range: 20
-    width_shift_range: 0.1
-    height_shift_range: 0.1
-    zoom_range: 0.1
+    width_shift_range: 0.15
+    height_shift_range: 0.15
+    zoom_range: 0.2
     brightness_range: [0.8, 1.2]
 
 model:
   architecture: "EfficientNetV2B0"
   use_pretrained_weights: true
   stage1_trainable_layers: 0
-  stage2_trainable_layers: 80
+  stage2_trainable_layers: 15
   classification_head:
     dense_layers:
       - units: 512
@@ -30,7 +31,9 @@ model:
         dropout: 0.4
     
 optimizer:
+  stage1_weight_decay: 1e-4
   stage1_learning_rate: 0.0002
+  stage2_weight_decay: 1e-5
   stage2_learning_rate: 0.0001
   clipnorm: 1.0
 
@@ -41,3 +44,17 @@ loss:
 training:
   stage1_epochs: 5
   stage2_epochs: 50
+
+export:
+  tflite_filename: "classification_model_final.tflite"
+  quantization:
+    type: "none"
+    representative_dataset:
+      enabled: true
+      num_samples: 500
+
+paths:
+  model_save_dir: "trained_models/classification/"
+  tflite_export_dir: "trained_models/classification/exported/"
+  label_map_dir: "data/classification"
+  label_map_filename: "label_map.json"

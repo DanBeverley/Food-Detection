@@ -69,8 +69,9 @@ def main(args):
         if base_model:
             base_model.trainable = False
         
-        optimizer_stage1 = tf.keras.optimizers.Adam(
+        optimizer_stage1 = tf.keras.optimizers.AdamW(
             learning_rate=optimizer_cfg.get('stage1_learning_rate', 1e-3),
+            weight_decay=optimizer_cfg.get("stage1_weight_decay", 1e-4),
             clipnorm=optimizer_cfg.get('clipnorm', 1.0)
         )
         
@@ -101,8 +102,9 @@ def main(args):
                     layer.trainable = False
                 logger.info(f"Fine-tuning top {num_fine_tune_layers} layers.")
 
-        optimizer_stage2 = tf.keras.optimizers.Adam(
+        optimizer_stage2 = tf.keras.optimizers.AdamW(
             learning_rate=optimizer_cfg.get('stage2_learning_rate', 1e-4),
+            weight_decay=optimizer_cfg.get("stage2_weight_decay", 1e-5),
             clipnorm=optimizer_cfg.get('clipnorm', 1.0)
         )
 
