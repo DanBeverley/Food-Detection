@@ -24,6 +24,7 @@ model:
   stage1_trainable_layers: 0
   stage2_trainable_layers: 15
   classification_head:
+    l2_regularization: 1e-4
     dense_layers:
       - units: 512
         activation: 'relu'
