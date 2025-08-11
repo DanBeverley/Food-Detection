@@ -9,7 +9,6 @@ import tensorflow as tf
 from data import load_classification_data
 from model import build_classification_model
 
-tf.config.optimizer.set_jit(False)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
@@ -79,7 +78,8 @@ def main(args):
         model.compile(
             optimizer=optimizer_stage1,
             loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=config['loss']['params']['label_smoothing']),
-            metrics=['accuracy']
+            metrics=['accuracy'],
+            jit_compile=False
         )
 
         stage1_epochs = training_cfg.get('stage1_epochs', 5)
@@ -112,7 +112,8 @@ def main(args):
         model.compile(
             optimizer=optimizer_stage2,
             loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=config['loss']['params']['label_smoothing']),
-            metrics=['accuracy', tf.keras.metrics.TopKCategoricalAccuracy(k=5, name='top5_accuracy')]
+            metrics=['accuracy', tf.keras.metrics.TopKCategoricalAccuracy(k=5, name='top5_accuracy')],
+            jit_compile=False
         )
 
         callbacks_list = [
