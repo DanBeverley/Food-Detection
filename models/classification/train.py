@@ -28,7 +28,7 @@ def initialize_strategy() -> tf.distribute.Strategy:
 
 
 def main(args):
-    MODEL_CHECKPOINT_PATH = "/kaggle/working/best_classification_model.keras"
+    MODEL_CHECKPOINT_PATH = args.model_checkpoint_path
     
     logger.info(f"Loading configuration from: {args.config}")
     config = yaml.safe_load(Path(args.config).read_text())
@@ -67,7 +67,6 @@ def main(args):
         else:
             logger.info("======== STARTING NEW TRAINING ========")
 
-    # --- TRAINING EXECUTION ---
 
     # If not resuming, run Stage 1
     if not args.resume_training:
@@ -173,6 +172,12 @@ if __name__ == '__main__':
         "--resume_training",
         action="store_true",
         help="Set this flag to load weights from best_classification_model.keras and continue training."
+    )
+    parser.add_argument(
+        "--model_checkpoint_path",
+        type=str,
+        default="best_classification_model.keras",
+        help="Path to the model checkpoint file."
     )
     args = parser.parse_args()
     main(args)
