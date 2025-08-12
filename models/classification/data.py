@@ -50,7 +50,7 @@ def build_augmentation_pipeline(aug_cfg: Dict[str, Any], seed: int) -> tf.keras.
     if aug_cfg.get('randaugment', {}).get('enabled', False):
         num_layers = aug_cfg['randaugment'].get('num_layers', 2)
         magnitude = aug_cfg['randaugment'].get('magnitude', 9)
-        layers_list.append(tf.keras.utils.RandAugment(num_layers=num_layers, magnitude=magnitude))
+        layers_list.append(tf.keras.layers.RandAugment(num_layers=num_layers, magnitude=magnitude))
         logger.info(f"Augmentation enabled: RandAugment (num_layers={num_layers}, magnitude={magnitude})")
 
     if not layers_list:
