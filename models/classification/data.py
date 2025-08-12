@@ -3,6 +3,7 @@ import tensorflow as tf
 from typing import Tuple, Dict, Optional, Any, List
 import logging
 from pathlib import Path
+import tensorflow_addons as tfa
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -46,6 +47,12 @@ def build_augmentation_pipeline(aug_cfg: Dict[str, Any], seed: int) -> tf.keras.
         factor = max(1.0 - aug_cfg['brightness_range'][0], aug_cfg['brightness_range'][1] - 1.0)
         layers_list.append(tf.keras.layers.RandomBrightness(factor=factor, seed=seed))
         logger.info(f"Augmentation enabled: RandomBrightness (factor={factor:.2f})")
+
+    if aug_cfg.get('randaugment', {}).get('enabled', False):
+        num_layers = aug_cfg['randaugment'].get('num_layers', 2)
+        magnitude = aug_cfg['randaugment'].get('magnitude', 9)
+        layers_list.append(tfa.image.RandAugment(num_layers=num_layers, magnitude=magnitude))
+        logger.info(f"Augmentation enabled: RandAugment (num_layers={num_layers}, magnitude={magnitude})")
 
     if not layers_list:
         return None
