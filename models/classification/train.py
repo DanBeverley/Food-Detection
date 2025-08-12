@@ -52,6 +52,13 @@ def main(args):
     with strategy.scope():
         model = build_classification_model(num_classes, config)
         
+        if args.resume_training:
+            if os.path.exists(MODEL_CHECKPOINT_PATH):
+                logger.info(f"Resuming training. Loading weights from: {MODEL_CHECKPOINT_PATH}")
+                model.load_weights(MODEL_CHECKPOINT_PATH)
+            else:
+                logger.warning(f"Resume flag was set, but no model found at {MODEL_CHECKPOINT_PATH}. Starting from scratch.")
+        
         architecture = model_cfg.get('architecture', 'EfficientNetV2B0')
         base_model_name = {
             'EfficientNetV2B0': 'efficientnetv2-b0',
@@ -161,5 +168,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train a food classification model.")
     parser.add_argument("--config", type=str, required=True, help="Path to the YAML configuration file.")
     parser.add_argument("--base_data_dir", type=str, default=None, help="Absolute path to images.")
+    parser.add_argument(
+        "--resume_training",
+        action="store_true",
+        help="Set this flag to load weights from best_classification_model.keras and continue training."
+    )
     args = parser.parse_args()
     main(args)
