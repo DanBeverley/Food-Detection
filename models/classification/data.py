@@ -34,8 +34,8 @@ def build_albumentations_pipeline(aug_cfg: Dict[str, Any]) -> A.Compose:
         logger.info("Augmentation enabled: ShiftScaleRotate")
 
     if aug_cfg.get('coarse_dropout', False):
-        aug_list.append(A.CoarseDropout(max_holes=8, max_height=16, max_width=16, p=0.5))
-        logger.info("Augmentation enabled: CoarseDropout")
+        aug_list.append(A.Cutout(num_holes=8, max_h_size=16, max_w_size=16, p=0.5))
+        logger.info("Augmentation enabled: Cutout (formerly CoarseDropout)")
         
     if aug_cfg.get('color_jitter', False):
         aug_list.append(A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2, p=0.5))

@@ -52,13 +52,6 @@ def main(args):
     with strategy.scope():
         model = build_classification_model(num_classes, config)
         
-        if args.resume_training:
-            if os.path.exists(MODEL_CHECKPOINT_PATH):
-                logger.info(f"Resuming training. Loading weights from: {MODEL_CHECKPOINT_PATH}")
-                model.load_weights(MODEL_CHECKPOINT_PATH)
-            else:
-                logger.warning(f"Resume flag was set, but no model found at {MODEL_CHECKPOINT_PATH}. Starting from scratch.")
-        
         architecture = model_cfg.get('architecture', 'EfficientNetV2B0')
         base_model_name = {
             'EfficientNetV2B0': 'efficientnetv2-b0',
@@ -69,36 +62,50 @@ def main(args):
         if base_model_name is None:
             raise ValueError(f"Architecture '{architecture}' not found in base_model_name map.")
 
-        base_model = model.get_layer(name=base_model_name)
-        
-        logger.info("Stage 1: Training classification head only")
-        
-        if base_model:
-            base_model.trainable = False
-        
-        optimizer_stage1 = tf.keras.optimizers.Adam(
-            learning_rate=optimizer_cfg.get('stage1_learning_rate', 1e-3),
-            clipnorm=optimizer_cfg.get('clipnorm', 1.0)
-        )
-        
-        model.compile(
-            optimizer=optimizer_stage1,
-            loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=config['loss']['params']['label_smoothing']),
-            metrics=['accuracy'],
-            jit_compile=False
-        )
+        if args.resume_training:
+            if os.path.exists(MODEL_CHECKPOINT_PATH):
+                logger.info("======== RESUMING TRAINING ========")
+                logger.info(f"Loading weights from: {MODEL_CHECKPOINT_PATH}")
+                model.load_weights(MODEL_CHECKPOINT_PATH)
+                logger.info("Weights loaded successfully.")
+            else:
+                logger.warning(f"Resume flag was set, but no model found at {MODEL_CHECKPOINT_PATH}. Starting from scratch.")
+        else:
+            logger.info("======== STARTING NEW TRAINING ========")
 
-        stage1_epochs = training_cfg.get('stage1_epochs', 5)
-        if stage1_epochs > 0:
-            model.fit(
-                train_ds,
-                validation_data=val_ds,
-                epochs=stage1_epochs,
-                steps_per_epoch=num_train // data_cfg['batch_size'],
-                validation_steps=num_val // data_cfg['batch_size']
+        base_model = model.get_layer(name=base_model_name)
+
+        if not args.resume_training:
+            logger.info("--- Stage 1: Training classification head only ---")
+            
+            if base_model:
+                base_model.trainable = False
+            
+            optimizer_stage1 = tf.keras.optimizers.Adam(
+                learning_rate=optimizer_cfg.get('stage1_learning_rate', 1e-3),
+                clipnorm=optimizer_cfg.get('clipnorm', 1.0)
             )
+            
+            model.compile(
+                optimizer=optimizer_stage1,
+                loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=config['loss']['params']['label_smoothing']),
+                metrics=['accuracy'],
+                jit_compile=False
+            )
+
+            stage1_epochs = training_cfg.get('stage1_epochs', 5)
+            if stage1_epochs > 0:
+                model.fit(
+                    train_ds,
+                    validation_data=val_ds,
+                    epochs=stage1_epochs,
+                    steps_per_epoch=num_train // data_cfg['batch_size'],
+                    validation_steps=num_val // data_cfg['batch_size']
+                )
+        else:
+            logger.info("--- Resuming Training: Skipping Stage 1 ---")
         
-        logger.info("Stage 2: Fine-tuning the model")
+        logger.info("--- Stage 2: Fine-tuning the model ---")
         
         if base_model:
             base_model.trainable = True
@@ -146,11 +153,14 @@ def main(args):
             ),
         ]
 
+        stage1_epochs = training_cfg.get('stage1_epochs', 5)
+        initial_epoch_to_start = stage1_epochs if not args.resume_training else 41
+
         history = model.fit(
             train_ds,
             validation_data=val_ds,
             epochs=training_cfg.get('stage2_epochs', 50),
-            initial_epoch=stage1_epochs,
+            initial_epoch=initial_epoch_to_start,
             steps_per_epoch=num_train // data_cfg['batch_size'],
             validation_steps=num_val // data_cfg['batch_size'],
             callbacks=callbacks_list
