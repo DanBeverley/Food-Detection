@@ -17,10 +17,9 @@ data:
     height_shift_range: 0.15
     zoom_range: 0.2
     brightness_range: [0.8, 1.2]
-    randaugment:
-      enabled: true
-      num_layers: 2
-      magnitude: 9
+    rand_augment: true
+    rand_augment_layers: 2
+    rand_augment_magnitude: 0.3
 
 model:
   architecture: "EfficientNetV2B0"

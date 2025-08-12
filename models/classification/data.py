@@ -47,11 +47,14 @@ def build_augmentation_pipeline(aug_cfg: Dict[str, Any], seed: int) -> tf.keras.
         layers_list.append(tf.keras.layers.RandomBrightness(factor=factor, seed=seed))
         logger.info(f"Augmentation enabled: RandomBrightness (factor={factor:.2f})")
 
-    if aug_cfg.get('randaugment', {}).get('enabled', False):
-        num_layers = aug_cfg['randaugment'].get('num_layers', 2)
-        magnitude = aug_cfg['randaugment'].get('magnitude', 9)
-        layers_list.append(tf.keras.layers.RandAugment(num_layers=num_layers, magnitude=magnitude))
-        logger.info(f"Augmentation enabled: RandAugment (num_layers={num_layers}, magnitude={magnitude})")
+    if aug_cfg.get('rand_augment', False):
+        layers_list.append(tf.keras.layers.RandAugment(
+            value_range=(0, 255),
+            augmentations_per_image=aug_cfg.get('rand_augment_layers', 2),
+            magnitude=aug_cfg.get('rand_augment_magnitude', 0.3),
+            seed=seed
+        ))
+        logger.info("Augmentation enabled: RandAugment")
 
     if not layers_list:
         return None
