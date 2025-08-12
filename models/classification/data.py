@@ -3,6 +3,7 @@ import tensorflow as tf
 from typing import Tuple, Dict, Optional, Any, List
 import logging
 from pathlib import Path
+import albumentations as A
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -15,51 +16,48 @@ def _get_preprocess_fn():
     """Get the preprocessing function for EfficientNetV2."""
     return tf.keras.applications.efficientnet_v2.preprocess_input
 
-def build_augmentation_pipeline(aug_cfg: Dict[str, Any], seed: int) -> tf.keras.Sequential:
-    """Builds a tf.keras.Sequential model for image augmentation from a config dict."""
-    layers_list = []
+def build_albumentations_pipeline(aug_cfg: Dict[str, Any]) -> A.Compose:
+    """Builds an Albumentations composition for image augmentation."""
+    aug_list = []
     
     if aug_cfg.get('horizontal_flip', False):
-        layers_list.append(tf.keras.layers.RandomFlip("horizontal", seed=seed))
-        logger.info("Augmentation enabled: RandomFlip (horizontal)")
+        aug_list.append(A.HorizontalFlip(p=0.5))
+        logger.info("Augmentation enabled: HorizontalFlip")
 
-    if 'rotation_range' in aug_cfg and aug_cfg['rotation_range'] > 0:
-        factor = aug_cfg['rotation_range'] / 360.0
-        layers_list.append(tf.keras.layers.RandomRotation(factor, seed=seed))
-        logger.info(f"Augmentation enabled: RandomRotation (factor={factor:.2f})")
+    if aug_cfg.get('rotation_range', 0) > 0:
+        limit = aug_cfg['rotation_range']
+        aug_list.append(A.SafeRotate(limit=limit, p=0.5))
+        logger.info(f"Augmentation enabled: SafeRotate (limit={limit})")
 
-    width_shift = aug_cfg.get('width_shift_range', 0.0)
-    height_shift = aug_cfg.get('height_shift_range', 0.0)
-    if width_shift > 0 or height_shift > 0:
-        layers_list.append(tf.keras.layers.RandomTranslation(
-            height_factor=height_shift, width_factor=width_shift, seed=seed
-        ))
-        logger.info(f"Augmentation enabled: RandomTranslation (h={height_shift}, w={width_shift})")
+    if aug_cfg.get('shift_scale_rotate', False):
+        aug_list.append(A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.5))
+        logger.info("Augmentation enabled: ShiftScaleRotate")
 
-    if 'zoom_range' in aug_cfg and aug_cfg['zoom_range'] > 0:
-        layers_list.append(tf.keras.layers.RandomZoom(
-            height_factor=aug_cfg['zoom_range'], seed=seed
-        ))
-        logger.info(f"Augmentation enabled: RandomZoom (factor={aug_cfg['zoom_range']})")
+    if aug_cfg.get('coarse_dropout', False):
+        aug_list.append(A.CoarseDropout(max_holes=8, max_height=16, max_width=16, p=0.5))
+        logger.info("Augmentation enabled: CoarseDropout")
         
-    if 'brightness_range' in aug_cfg:
-        factor = max(1.0 - aug_cfg['brightness_range'][0], aug_cfg['brightness_range'][1] - 1.0)
-        layers_list.append(tf.keras.layers.RandomBrightness(factor=factor, seed=seed))
-        logger.info(f"Augmentation enabled: RandomBrightness (factor={factor:.2f})")
+    if aug_cfg.get('color_jitter', False):
+        aug_list.append(A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2, p=0.5))
+        logger.info("Augmentation enabled: ColorJitter")
 
-    if aug_cfg.get('rand_augment', False):
-        layers_list.append(tf.keras.layers.RandAugment(
-            value_range=(0, 255),
-            augmentations_per_image=aug_cfg.get('rand_augment_layers', 2),
-            magnitude=aug_cfg.get('rand_augment_magnitude', 0.3),
-            seed=seed
-        ))
-        logger.info("Augmentation enabled: RandAugment")
-
-    if not layers_list:
+    if not aug_list:
         return None
         
-    return tf.keras.Sequential(layers_list, name="image_augmentation")
+    return A.Compose(aug_list)
+
+@tf.function
+def apply_albumentations(image, augmentation_pipeline):
+    """Applies an Albumentations pipeline to a TensorFlow tensor."""
+    def aug_fn(img):
+        data = {"image": img.numpy()}
+        aug_data = augmentation_pipeline(**data)
+        aug_img = aug_data["image"]
+        return aug_img
+
+    aug_image = tf.py_function(func=aug_fn, inp=[image], Tout=tf.float32)
+    aug_image.set_shape(image.get_shape())
+    return aug_image
 
 def cutmix(images, labels, alpha=1.0):
     """Apply CutMix augmentation to a batch of images and labels."""
@@ -163,8 +161,8 @@ def load_classification_data(
     use_augmentation = aug_cfg.get('enabled', False)
     augmentation_pipeline = None
     if use_augmentation:
-        logger.info("Building data augmentation pipeline...")
-        augmentation_pipeline = build_augmentation_pipeline(aug_cfg, seed)
+        logger.info("Building data augmentation pipeline with Albumentations...")
+        augmentation_pipeline = build_albumentations_pipeline(aug_cfg)
     else:
         logger.info("Data augmentation is disabled.")
 
@@ -220,13 +218,13 @@ def load_classification_data(
     if mixup_alpha > 0.0 or cutmix_alpha > 0.0:
         logger.info(f"MixUp/CutMix augmentation enabled: mixup_alpha={mixup_alpha}, cutmix_alpha={cutmix_alpha}")
 
-    def configure_dataset(ds: tf.data.Dataset, is_training: bool, aug_pipeline: Optional[tf.keras.Sequential]) -> tf.data.Dataset:
+    def configure_dataset(ds: tf.data.Dataset, is_training: bool, aug_pipeline: Optional[A.Compose]) -> tf.data.Dataset:
         ds = ds.map(lambda path, label: load_and_decode_image(path, label, image_size), num_parallel_calls=tf.data.AUTOTUNE)
         
         if is_training:
             ds = ds.shuffle(1024, seed=seed)
             if aug_pipeline:
-                ds = ds.map(lambda image, label: (aug_pipeline(image, training=True), label), 
+                ds = ds.map(lambda image, label: (apply_albumentations(image, aug_pipeline), label), 
                             num_parallel_calls=tf.data.AUTOTUNE)
             ds = ds.repeat()
         

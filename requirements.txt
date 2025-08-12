@@ -9,4 +9,6 @@ tensorflow>=2.10 # Core machine learning library for model training and executio
 scikit-image
 scipy
 open3d # Added for point cloud processing and volume estimation
+albumentations
+opencv-python-headless
 # Add other specific versions if necessary, e.g., open3d==0.17.0
