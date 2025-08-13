@@ -176,7 +176,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--model_checkpoint_path",
         type=str,
-        default="/kaggle/input/classification_metafood3d/keras/default/1/best_classification_model.keras",
+        default="/kaggle/working/best_classification_model.keras",
         help="Path to the model checkpoint file."
     )
     args = parser.parse_args()
