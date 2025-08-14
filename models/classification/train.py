@@ -104,6 +104,13 @@ def main(args):
     
     # Always run Stage 2
     logger.info("--- Stage 2: Fine-tuning the model ---")
+    steps_per_epoch = num_train // data_cfg['batch_size']
+    total_decay_steps = steps_per_epoch * training_cfg.get('stage2_epochs', 50)
+    cosine_schedule = tf.keras.optimizers.schedules.CosineDecay(
+        learning_rate=optimizer_cfg.get('stage2_learning_rate', 1e-4),
+        decay_steps=total_decay_steps,
+        alpha=0.0
+    )
     architecture = model_cfg.get('architecture', 'EfficientNetV2B0')
     base_model_name = {
         'EfficientNetV2B0': 'efficientnetv2-b0',
@@ -119,7 +126,8 @@ def main(args):
         logger.info(f"Fine-tuning top {num_fine_tune_layers} layers.")
 
     optimizer_stage2 = tf.keras.optimizers.Adam(
-        learning_rate=optimizer_cfg.get('stage2_learning_rate', 1e-4),
+        #learning_rate=optimizer_cfg.get('stage2_learning_rate', 1e-4),
+        learning_rate=cosine_schedule,
         clipnorm=optimizer_cfg.get('clipnorm', 1.0)
     )
     model.compile(
@@ -138,10 +146,10 @@ def main(args):
             monitor='val_accuracy', patience=10, mode='max',
             restore_best_weights=True, verbose=1
         ),
-        tf.keras.callbacks.ReduceLROnPlateau(
-            monitor='val_loss', factor=0.2, patience=3, mode='min',
-            min_lr=1e-7, verbose=1
-        ),
+        #tf.keras.callbacks.ReduceLROnPlateau(
+        #    monitor='val_loss', factor=0.2, patience=3, mode='min',
+        #    min_lr=1e-7, verbose=1
+        #),
     ]
 
     initial_epoch_to_start = training_cfg.get('stage1_epochs', 5) if not args.resume_training else 41
