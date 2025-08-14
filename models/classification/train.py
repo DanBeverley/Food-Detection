@@ -107,7 +107,7 @@ def main(args):
     steps_per_epoch = num_train // data_cfg['batch_size']
     total_decay_steps = steps_per_epoch * training_cfg.get('stage2_epochs', 50)
     cosine_schedule = tf.keras.optimizers.schedules.CosineDecay(
-        learning_rate=optimizer_cfg.get('stage2_learning_rate', 1e-4),
+        initial_learning_rate=optimizer_cfg.get('stage2_learning_rate', 1e-4),
         decay_steps=total_decay_steps,
         alpha=0.0
     )
