@@ -10,10 +10,10 @@ data:
   augmentation:
     enabled: true
     horizontal_flip: true
-    rotation_range: 20
+    rotation_range: 15
     shift_scale_rotate: true
     coarse_dropout: true
-    color_jitter: true
+    color_jitter: false
     mixup_alpha: 0.2
     cutmix_alpha: 1.0
 
@@ -23,12 +23,12 @@ model:
   stage1_trainable_layers: 0
   stage2_trainable_layers: 15
   classification_head:
-    l2_regularization: 1e-4
+    l2_regularization: 1e-5
     dense_layers:
       - units: 512
         activation: 'relu'
         batch_norm: true
-        dropout: 0.4
+        dropout: 0.3
     
 optimizer:
   stage1_weight_decay: 1e-4
@@ -43,7 +43,7 @@ loss:
 
 training:
   stage1_epochs: 5
-  stage2_epochs: 50
+  stage2_epochs: 100
 
 export:
   tflite_filename: "classification_model_final.tflite"
