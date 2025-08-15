@@ -13,7 +13,7 @@ data:
     rotation_range: 15
     shift_scale_rotate: true
     coarse_dropout: true
-    color_jitter: false
+    color_jitter: true
     mixup_alpha: 0.2
     cutmix_alpha: 1.0
 
@@ -21,7 +21,7 @@ model:
   architecture: "EfficientNetV2B0"
   use_pretrained_weights: true
   stage1_trainable_layers: 0
-  stage2_trainable_layers: 15
+  stage2_trainable_layers: 30
   classification_head:
     l2_regularization: 1e-5
     dense_layers:
