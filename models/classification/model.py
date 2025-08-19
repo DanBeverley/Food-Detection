@@ -15,17 +15,20 @@ def build_classification_model(num_classes: int, config: Dict) -> models.Model:
     use_pretrained = model_cfg.get('use_pretrained_weights', True)
     weights = 'imagenet' if use_pretrained else None
 
-    input_layer = layers.Input(shape=(*image_size, 3), name='preprocessed_input')
+    input_layer = layers.Input(shape=(*image_size, 3), name='rgb_input')
 
     if architecture == "EfficientNetV2B0":
+        preprocess_fn = applications.efficientnet_v2.preprocess_input
         base_model = applications.EfficientNetV2B0(
             input_shape=(*image_size, 3), include_top=False, weights=weights
         )
     elif architecture == "MobileNetV2":
+        preprocess_fn = applications.mobilenet_v2.preprocess_input
         base_model = applications.MobileNetV2(
             input_shape=(*image_size, 3), include_top=False, weights=weights
         )
     elif architecture == "MobileNetV3Small":
+        preprocess_fn = applications.mobilenet_v3.preprocess_input
         base_model = applications.MobileNetV3Small(
             input_shape=(*image_size, 3), include_top=False, weights=weights
         )
@@ -34,7 +37,8 @@ def build_classification_model(num_classes: int, config: Dict) -> models.Model:
 
     base_model.trainable = True
 
-    x = base_model(input_layer, training=True)
+    preprocessing_layer = layers.Lambda(preprocess_fn, name='preprocessing')(input_layer)
+    x = base_model(preprocessing_layer, training=True)
 
     head_cfg = model_cfg.get('classification_head', {})
     l2_value = head_cfg.get('l2_regularization', 1e-5)
@@ -56,6 +60,6 @@ def build_classification_model(num_classes: int, config: Dict) -> models.Model:
     output_layer = layers.Dense(num_classes, activation='softmax', name='predictions')(x)
 
     model = models.Model(inputs=input_layer, outputs=output_layer)
-    logger.info(f"Model '{model.name}' built successfully and expects preprocessed input.")
+    logger.info(f"Model '{model.name}' built successfully with internal preprocessing.")
     
     return model
