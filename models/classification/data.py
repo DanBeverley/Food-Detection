@@ -221,28 +221,34 @@ def load_classification_data(
         logger.info(f"MixUp/CutMix augmentation enabled: mixup_alpha={mixup_alpha}, cutmix_alpha={cutmix_alpha}")
 
     def configure_dataset(ds: tf.data.Dataset, is_training: bool, aug_pipeline: Optional[A.Compose]) -> tf.data.Dataset:
+        # Step 1: Load and decode images from paths. Output is (image, label)
         ds = ds.map(lambda path, label: load_and_decode_image(path, label, image_size), num_parallel_calls=tf.data.AUTOTUNE)
         
+        # Step 2: Apply augmentations ONLY if training.
         if is_training:
             ds = ds.shuffle(1024, seed=seed)
             if aug_pipeline:
+                # This is a Python-heavy operation.
                 ds = ds.map(lambda image, label: (apply_albumentations(image, aug_pipeline), label), 
                             num_parallel_calls=tf.data.AUTOTUNE)
 
-        ds = ds.map(lambda image, label: (preprocess_fn(image), label),
-                    num_parallel_calls=tf.data.AUTOTUNE)
-        
-        if is_training:
+            # Step 3 (FOR TRAINING ONLY): Apply pure-TF operations after the py_function.
+            ds = ds.map(lambda image, label: (preprocess_fn(image), label),
+                        num_parallel_calls=tf.data.AUTOTUNE)
             ds = ds.repeat()
-        
-        ds = ds.batch(batch_size)
-        ds = ds.map(lambda img, lbl: (img, tf.one_hot(tf.cast(lbl, tf.int32), depth=num_classes)), num_parallel_calls=tf.data.AUTOTUNE)
-        
-        # Apply MixUp/CutMix only to training data
-        if is_training and (mixup_alpha > 0.0 or cutmix_alpha > 0.0):
-            ds = ds.map(lambda img, lbl: augment_batch(img, lbl, mixup_alpha=mixup_alpha, cutmix_alpha=cutmix_alpha), 
-                       num_parallel_calls=tf.data.AUTOTUNE)
-        
+            ds = ds.batch(batch_size)
+            ds = ds.map(lambda img, lbl: (img, tf.one_hot(tf.cast(lbl, tf.int32), depth=num_classes)), num_parallel_calls=tf.data.AUTOTUNE)
+            if mixup_alpha > 0.0 or cutmix_alpha > 0.0:
+                ds = ds.map(lambda img, lbl: augment_batch(img, lbl, mixup_alpha=mixup_alpha, cutmix_alpha=cutmix_alpha), 
+                           num_parallel_calls=tf.data.AUTOTUNE)
+        else:
+            # Step 3 (FOR VALIDATION ONLY): Simpler pipeline without shuffles or complex augmentations.
+            ds = ds.map(lambda image, label: (preprocess_fn(image), label),
+                        num_parallel_calls=tf.data.AUTOTUNE)
+            ds = ds.batch(batch_size)
+            ds = ds.map(lambda img, lbl: (img, tf.one_hot(tf.cast(lbl, tf.int32), depth=num_classes)), num_parallel_calls=tf.data.AUTOTUNE)
+
+        # Final step for both pipelines
         ds = ds.prefetch(buffer_size=tf.data.AUTOTUNE)
         return ds
         
