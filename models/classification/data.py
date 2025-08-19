@@ -166,6 +166,8 @@ def load_classification_data(
     else:
         logger.info("Data augmentation is disabled.")
 
+    preprocess_fn = tf.keras.applications.efficientnet_v2.preprocess_input
+
     logger.info(f"Loading train metadata from: {train_metadata_path}")
     logger.info(f"Loading val metadata from: {val_metadata_path}")
     
@@ -226,6 +228,11 @@ def load_classification_data(
             if aug_pipeline:
                 ds = ds.map(lambda image, label: (apply_albumentations(image, aug_pipeline), label), 
                             num_parallel_calls=tf.data.AUTOTUNE)
+
+        ds = ds.map(lambda image, label: (preprocess_fn(image), label),
+                    num_parallel_calls=tf.data.AUTOTUNE)
+        
+        if is_training:
             ds = ds.repeat()
         
         ds = ds.batch(batch_size)
