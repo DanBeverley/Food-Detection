@@ -75,7 +75,7 @@ def main(args):
     base_model = model.get_layer(name=base_model_name)
     base_model.trainable = False
     
-    keras.backend.set_value(model.optimizer.learning_rate, optimizer_cfg.get('stage1_learning_rate', 1e-3))
+    model.optimizer.learning_rate.assign(optimizer_cfg.get('stage1_learning_rate', 1e-3))
     
     stage1_epochs = training_cfg.get('stage1_epochs', 5)
     if stage1_epochs > 0:
@@ -97,7 +97,7 @@ def main(args):
         logger.info(f"Fine-tuning top {num_fine_tune_layers} layers.")
 
     new_lr = optimizer_cfg.get('stage2_learning_rate', 1e-4)
-    keras.backend.set_value(model.optimizer.learning_rate, new_lr)
+    model.optimizer.learning_rate.assign(new_lr)
     logger.info(f"Set learning rate for Stage 2 to: {new_lr}")
 
     callbacks_list = [
