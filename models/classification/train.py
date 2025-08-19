@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 import os
 import tensorflow as tf
+import keras
 
 from data import load_classification_data
 from model import build_classification_model
@@ -28,7 +29,7 @@ def initialize_strategy() -> tf.distribute.Strategy:
 
 
 def main(args):
-    MODEL_CHECKPOINT_PATH = args.model_checkpoint_path
+    MODEL_CHECKPOINT_PATH = "/kaggle/working/best_classification_model.keras"
     
     logger.info(f"Loading configuration from: {args.config}")
     config = yaml.safe_load(Path(args.config).read_text())
@@ -49,68 +50,22 @@ def main(args):
         sys.exit(1)
     logger.info(f"Data loaded: {num_train} train, {num_val} val samples.")
 
-    # --- MODEL CREATION AND LOADING (Happens First) ---
     with strategy.scope():
         model = build_classification_model(num_classes, config)
         
-        # Load weights IMMEDIATELY after creation if resuming
-        if args.resume_training:
-            if os.path.exists(MODEL_CHECKPOINT_PATH):
-                logger.info("======== RESUMING TRAINING ========")
-                logger.info(f"Loading weights from: {MODEL_CHECKPOINT_PATH}")
-                # This must be the first operation on the model after building
-                model.load_weights(MODEL_CHECKPOINT_PATH)
-                logger.info("Weights loaded successfully.")
-            else:
-                logger.warning(f"Resume flag was set, but no model found at {MODEL_CHECKPOINT_PATH}. Will start fresh.")
-                args.resume_training = False # Treat as a new run
-        else:
-            logger.info("======== STARTING NEW TRAINING ========")
-
-
-    # If not resuming, run Stage 1
-    if not args.resume_training:
-        logger.info("--- Stage 1: Training classification head only ---")
-        architecture = model_cfg.get('architecture', 'EfficientNetV2B0')
-        base_model_name = {
-            'EfficientNetV2B0': 'efficientnetv2-b0',
-            'MobileNetV2': 'mobilenetv2_1.00_224',
-            'MobileNetV3Small': 'mobilenetv3_small'
-        }.get(architecture)
-        base_model = model.get_layer(name=base_model_name)
-        base_model.trainable = False
-        
-        optimizer_stage1 = tf.keras.optimizers.Adam(
+        optimizer = tf.keras.optimizers.Adam(
             learning_rate=optimizer_cfg.get('stage1_learning_rate', 1e-3),
             clipnorm=optimizer_cfg.get('clipnorm', 1.0)
         )
+        
         model.compile(
-            optimizer=optimizer_stage1,
+            optimizer=optimizer,
             loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=config['loss']['params']['label_smoothing']),
-            metrics=['accuracy'],
+            metrics=['accuracy', tf.keras.metrics.TopKCategoricalAccuracy(k=5, name='top5_accuracy')],
             jit_compile=False
         )
-        stage1_epochs = training_cfg.get('stage1_epochs', 5)
-        if stage1_epochs > 0:
-            model.fit(
-                train_ds,
-                validation_data=val_ds,
-                epochs=stage1_epochs,
-                steps_per_epoch=num_train // data_cfg['batch_size'],
-                validation_steps=num_val // data_cfg['batch_size']
-            )
-    else:
-        logger.info("--- Resuming Training: Skipping Stage 1 ---")
-    
-    # Always run Stage 2
-    logger.info("--- Stage 2: Fine-tuning the model ---")
-    steps_per_epoch = num_train // data_cfg['batch_size']
-    total_decay_steps = steps_per_epoch * training_cfg.get('stage2_epochs', 50)
-    cosine_schedule = tf.keras.optimizers.schedules.CosineDecay(
-        initial_learning_rate=optimizer_cfg.get('stage2_learning_rate', 1e-4),
-        decay_steps=total_decay_steps,
-        alpha=0.0
-    )
+
+    logger.info("--- Stage 1: Training classification head only ---")
     architecture = model_cfg.get('architecture', 'EfficientNetV2B0')
     base_model_name = {
         'EfficientNetV2B0': 'efficientnetv2-b0',
@@ -118,6 +73,22 @@ def main(args):
         'MobileNetV3Small': 'mobilenetv3_small'
     }.get(architecture)
     base_model = model.get_layer(name=base_model_name)
+    base_model.trainable = False
+    
+    keras.backend.set_value(model.optimizer.learning_rate, optimizer_cfg.get('stage1_learning_rate', 1e-3))
+    
+    stage1_epochs = training_cfg.get('stage1_epochs', 5)
+    if stage1_epochs > 0:
+        logger.info(f"Starting Stage 1 fit for {stage1_epochs} epochs.")
+        model.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=stage1_epochs,
+            steps_per_epoch=num_train // data_cfg['batch_size'],
+            validation_steps=num_val // data_cfg['batch_size']
+        )
+    
+    logger.info("--- Stage 2: Fine-tuning the model ---")
     base_model.trainable = True
     num_fine_tune_layers = model_cfg.get('stage2_trainable_layers', 0)
     if num_fine_tune_layers > 0:
@@ -125,17 +96,9 @@ def main(args):
             layer.trainable = False
         logger.info(f"Fine-tuning top {num_fine_tune_layers} layers.")
 
-    optimizer_stage2 = tf.keras.optimizers.Adam(
-        #learning_rate=optimizer_cfg.get('stage2_learning_rate', 1e-4),
-        learning_rate=cosine_schedule,
-        clipnorm=optimizer_cfg.get('clipnorm', 1.0)
-    )
-    model.compile(
-        optimizer=optimizer_stage2,
-        loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=config['loss']['params']['label_smoothing']),
-        metrics=['accuracy', tf.keras.metrics.TopKCategoricalAccuracy(k=5, name='top5_accuracy')],
-        jit_compile=False
-    )
+    new_lr = optimizer_cfg.get('stage2_learning_rate', 1e-4)
+    keras.backend.set_value(model.optimizer.learning_rate, new_lr)
+    logger.info(f"Set learning rate for Stage 2 to: {new_lr}")
 
     callbacks_list = [
         tf.keras.callbacks.ModelCheckpoint(
@@ -146,41 +109,36 @@ def main(args):
             monitor='val_accuracy', patience=10, mode='max',
             restore_best_weights=True, verbose=1
         ),
-        #tf.keras.callbacks.ReduceLROnPlateau(
-        #    monitor='val_loss', factor=0.2, patience=3, mode='min',
-        #    min_lr=1e-7, verbose=1
-        #),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss', factor=0.2, patience=3, mode='min',
+            min_lr=1e-7, verbose=1
+        ),
     ]
-
-    initial_epoch_to_start = training_cfg.get('stage1_epochs', 5) if not args.resume_training else 41
-
+    
+    logger.info("Starting Stage 2 fit.")
     history = model.fit(
         train_ds,
         validation_data=val_ds,
-        epochs=training_cfg.get('stage2_epochs', 50),
-        initial_epoch=initial_epoch_to_start,
+        epochs=training_cfg.get('stage2_epochs', 100),
+        initial_epoch=stage1_epochs,
         steps_per_epoch=num_train // data_cfg['batch_size'],
         validation_steps=num_val // data_cfg['batch_size'],
         callbacks=callbacks_list
     )
     
-    final_train_acc = history.history['accuracy'][-1]
-    final_val_acc = history.history['val_accuracy'][-1]
-    overfitting_gap = final_train_acc - final_val_acc
-    
-    logger.info(f"Final training accuracy: {final_train_acc:.4f}")
-    logger.info(f"Final validation accuracy: {final_val_acc:.4f}")
-    logger.info(f"Overfitting gap: {overfitting_gap:.4f}")
+    if history.history:
+        final_train_acc = history.history['accuracy'][-1]
+        final_val_acc = history.history['val_accuracy'][-1]
+        overfitting_gap = final_train_acc - final_val_acc
+        
+        logger.info(f"Final training accuracy: {final_train_acc:.4f}")
+        logger.info(f"Final validation accuracy: {final_val_acc:.4f}")
+        logger.info(f"Overfitting gap: {overfitting_gap:.4f}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train a food classification model.")
     parser.add_argument("--config", type=str, required=True, help="Path to the YAML configuration file.")
     parser.add_argument("--base_data_dir", type=str, default=None, help="Absolute path to images.")
-    parser.add_argument(
-        "--resume_training",
-        action="store_true",
-        help="Set this flag to load weights from best_classification_model.keras and continue training."
-    )
     parser.add_argument(
         "--model_checkpoint_path",
         type=str,
