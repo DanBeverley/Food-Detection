@@ -55,6 +55,9 @@ def create_dataset_metadata(source_rgbd_base_dir_path: str, output_metadata_dir_
             if not original_folder.is_dir():
                 continue
 
+            depth_folder = instance_folder / "depth"
+            DEPTH_MAP_EXTENSIONS = ['.jpg', '.png'] # Added png just in case, though usually jpg in this dataset
+
             image_files = list(original_folder.glob('*[.jpg][.jpeg][.png][.gif]'))
             if not image_files:
                 continue
@@ -62,8 +65,18 @@ def create_dataset_metadata(source_rgbd_base_dir_path: str, output_metadata_dir_
             instance_key = f"{class_name}/{instance_name}"
             
             for img_path in image_files:
+                depth_map_path = None
+                if depth_folder.is_dir():
+                    img_stem = img_path.stem
+                    for ext in DEPTH_MAP_EXTENSIONS:
+                        potential_path = depth_folder / (img_stem + ext)
+                        if potential_path.is_file():
+                            depth_map_path = str(potential_path.relative_to(source_dir))
+                            break
+                
                 metadata_entry = {
                     "image_path": str(img_path.relative_to(source_dir)),
+                    "depth_map_path": depth_map_path, 
                     "class_name": class_name,
                     "instance_name": instance_name
                 }
