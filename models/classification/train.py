@@ -6,6 +6,9 @@ from pathlib import Path
 import os
 import tensorflow as tf
 import keras
+from tensorflow.keras import mixed_precision
+policy = mixed_precision.Policy('mixed_float16')
+mixed_precision.set_global_policy(policy)
 
 from data import load_classification_data
 from model import build_classification_model
