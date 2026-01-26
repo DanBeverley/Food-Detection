@@ -176,6 +176,35 @@ def preprocess_classification_image(
         logging.error(f"Error loading or preprocessing classification image: {e}")
         raise
 
+def preprocess_classification_depth(
+    depth_data: np.ndarray = None,
+    target_size_hw: tuple = None,
+    expected_channels: int = 1
+) -> np.ndarray:
+    """Preprocesses depth map for classification."""
+    if depth_data is None:
+        raise ValueError("depth_data must be provided.")
+    
+    # Resize
+    img = Image.fromarray(depth_data)
+    # If float, Image.fromarray might fail or need mode 'F'.    
+    # Simple resize using cv2 is safer for depth
+    import cv2
+    target_size_wh = (target_size_hw[1], target_size_hw[0])
+    depth_resized = cv2.resize(depth_data, target_size_wh, interpolation=cv2.INTER_NEAREST)  
+    depth_norm = depth_resized.astype(np.float32)
+    if depth_norm.max() > 1.0:
+        depth_norm = depth_norm / 2000.0
+        depth_norm = np.clip(depth_norm, 0.0, 1.0)
+        
+    depth_norm = np.expand_dims(depth_norm, axis=-1)
+    
+    if expected_channels == 3:
+        depth_norm = np.concatenate([depth_norm, depth_norm, depth_norm], axis=-1)
+        
+    input_data = np.expand_dims(depth_norm, axis=0) # (B, H, W, C)
+    return input_data
+
 def run_classification_inference(
     interpreter: tf.lite.Interpreter,
     input_details: list,
@@ -184,7 +213,8 @@ def run_classification_inference(
     architecture: str, 
     class_labels: list = None,
     image_path: str = None, 
-    image_data: np.ndarray = None 
+    image_data: np.ndarray = None,
+    depth_data: np.ndarray = None 
 ) -> tuple[str | int, float] | tuple[None, None]:
     """
     Runs classification inference on a single image.
@@ -218,12 +248,35 @@ def run_classification_inference(
             target_size_hw=model_input_size_hw
         )
 
-        input_dtype = input_details[0]['dtype']
-        if input_dtype == np.uint8:
-             scale, zero_point = input_details[0]['quantization']
-             input_data = (input_data / scale + zero_point).astype(input_dtype)
+        # Handle Dual Input (RGB + Depth) or Single Input
+        if len(input_details) > 1 and depth_data is not None:
+             # Find indices. Usually sorted by name or check shape
+             # Simple heuristic: 3 channels = rgb, 1 or 3 channels = depth (check name)
+             for inp in input_details:
+                 if 'depth' in inp['name'].lower():
+                     expected_channels = inp['shape'][-1]
+                     depth_input = preprocess_classification_depth(depth_data, model_input_size_hw, expected_channels)
+                     interpreter.set_tensor(inp['index'], depth_input)
+                 elif 'rgb' in inp['name'].lower() or 'image' in inp['name'].lower() or inp['shape'][-1] == 3:
+                     # RGB (preprocessing already done above)
+                     # Re-verify quantization for RGB branch specifically if needed?
+                     # preprocess_classification_image returns float32 usually.
+                     # If quantized model, need to quantize.
+                     if inp['dtype'] == np.uint8:
+                         scale, zero_point = inp['quantization']
+                         rgb_q = (input_data / scale + zero_point).astype(np.uint8)
+                         interpreter.set_tensor(inp['index'], rgb_q)
+                     else:
+                         interpreter.set_tensor(inp['index'], input_data)
+        else:
+            # Single Input (Legacy or RGB-only)
+            input_dtype = input_details[0]['dtype']
+            if input_dtype == np.uint8:
+                 scale, zero_point = input_details[0]['quantization']
+                 input_data = (input_data / scale + zero_point).astype(input_dtype)
 
-        interpreter.set_tensor(input_details[0]['index'], input_data)
+            interpreter.set_tensor(input_details[0]['index'], input_data)
+        
         interpreter.invoke()
 
         output_data = interpreter.get_tensor(output_details[0]['index'])[0]
