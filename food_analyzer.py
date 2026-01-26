@@ -350,19 +350,29 @@ def analyze_food_item(
                 x_max = min(w, x_max + padding)
                 
                 cropped_image_for_classification = img_for_clf_rgb[y_min:y_max, x_min:x_max]
+                if depth_map is not None:
+                    # Ensure depth map matches image dimensions before slicing if needed, but usually they key off same input
+                    if depth_map.shape[:2] == img_for_clf_rgb.shape[:2]:
+                         cropped_depth_for_classification = depth_map[y_min:y_max, x_min:x_max]
+                    else:
+                        logging.warning(f"Image: {image_basename} - Depth map shape {depth_map.shape} mismatch with RGB {img_for_clf_rgb.shape} during classification crop. Skipping depth for classification.")
+
                 logging.info(f"Image: {image_basename} - Cropped to bounding box: ({x_min},{y_min}) to ({x_max},{y_max})")
             else:
                 logging.warning(f"Image: {image_basename} - Empty segmentation mask. Using full image for classification.")
                 cropped_image_for_classification = img_for_clf_rgb
+                cropped_depth_for_classification = depth_map
         else:
             logging.warning(f"Image: {image_basename} - No segmentation mask. Using full image.")
             cropped_image_for_classification = img_for_clf_rgb
+            cropped_depth_for_classification = depth_map
 
     except Exception as e_crop:
         logging.error(f"Image: {image_basename} - Error during image preparation for classification: {e_crop}", exc_info=True)
         results['error_messages'].append(f"ClassImgPrepError: {e_crop};")
     results['timing']['classification_image_preprocessing'] = time.time() - t0_class_img_prep
 
+    cropped_depth_for_classification = None
     if known_food_class:
         food_label = known_food_class
         confidence = 1.0
@@ -412,7 +422,8 @@ def analyze_food_item(
                         model_input_size_hw=tuple(class_input_size_config),
                         architecture=clf_architecture,
                         class_labels=class_labels,
-                        image_data=cropped_image_for_classification
+                        image_data=cropped_image_for_classification,
+                        depth_data=cropped_depth_for_classification
                     )
                     results['timing']['classification_inference'] = time.time() - t0_class_inference
 
