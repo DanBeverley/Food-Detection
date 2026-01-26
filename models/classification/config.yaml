@@ -19,6 +19,8 @@ data:
 
 model:
   architecture: "EfficientNetV2B0"
+  use_depth: true
+  depth_backbone: 'MobileNetV3Small'
   use_pretrained_weights: true
   stage1_trainable_layers: 0
   stage2_trainable_layers: 30
