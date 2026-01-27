@@ -105,7 +105,7 @@ def build_classification_model(num_classes: int, config: Dict) -> models.Model:
             x = layers.BatchNormalization(name=f'bn_{i}')(x)
         x = layers.Dropout(dropout_rate, name=f'dropout_{i}')(x)
 
-    output_layer = layers.Dense(num_classes, activation='softmax', name='predictions')(x)
+    output_layer = layers.Dense(num_classes, activation='softmax', name='predictions', dtype='float32')(x)
 
     model = models.Model(inputs=inputs, outputs=output_layer)
     logger.info(f"Model '{model.name}' built successfully.")
