@@ -72,11 +72,8 @@ def apply_albumentations(image, augmentation_pipeline):
     aug_image.set_shape(image.get_shape())
     return aug_image
 
-def cutmix(images, labels, alpha=1.0):
-    """Apply CutMix augmentation to a batch of images and labels."""
-    batch_size = tf.shape(images)[0]
-    img_h, img_w = tf.shape(images)[1], tf.shape(images)[2]
-    
+def _create_cutmix_mask(batch_size, img_h, img_w):
+    """Create CutMix mask and return mask and lambda value."""
     lambda_val = tf.random.uniform([], 0.0, 1.0)
     lambda_val = tf.maximum(lambda_val, 1.0 - lambda_val)
     
@@ -106,23 +103,41 @@ def cutmix(images, labels, alpha=1.0):
     
     mask = mask - box_mask
     
-    indices = tf.random.shuffle(tf.range(batch_size))
-    shuffled_images = tf.gather(images, indices)
-    shuffled_labels = tf.gather(labels, indices)
-    
-    mixed_images = images * mask + shuffled_images * (1.0 - mask)
-    
     box_area = tf.cast((bbx2 - bbx1) * (bby2 - bby1), tf.float32)
     total_area = tf.cast(img_h * img_w, tf.float32)
     lambda_adj = 1.0 - (box_area / total_area)
     
+    return mask, lambda_adj
+
+
+def cutmix_rgbd(inputs: Dict[str, tf.Tensor], labels: tf.Tensor, alpha: float = 1.0):
+    """Apply CutMix augmentation to RGB-D inputs and labels."""
+    rgb = inputs['rgb_input']
+    depth = inputs['depth_input']
+    
+    batch_size = tf.shape(rgb)[0]
+    img_h, img_w = tf.shape(rgb)[1], tf.shape(rgb)[2]
+    
+    mask, lambda_adj = _create_cutmix_mask(batch_size, img_h, img_w)
+    
+    indices = tf.random.shuffle(tf.range(batch_size))
+    shuffled_rgb = tf.gather(rgb, indices)
+    shuffled_depth = tf.gather(depth, indices)
+    shuffled_labels = tf.gather(labels, indices)
+    
+    mixed_rgb = rgb * mask + shuffled_rgb * (1.0 - mask)
+    mixed_depth = depth * mask + shuffled_depth * (1.0 - mask)
     mixed_labels = labels * lambda_adj + shuffled_labels * (1.0 - lambda_adj)
     
-    return mixed_images, mixed_labels
+    return {'rgb_input': mixed_rgb, 'depth_input': mixed_depth}, mixed_labels
 
-def mixup_batch(images, labels, alpha=0.2):
-    """Apply MixUp augmentation to a batch of images and labels."""
-    batch_size = tf.shape(images)[0]
+
+def mixup_rgbd(inputs: Dict[str, tf.Tensor], labels: tf.Tensor, alpha: float = 0.2):
+    """Apply MixUp augmentation to RGB-D inputs and labels."""
+    rgb = inputs['rgb_input']
+    depth = inputs['depth_input']
+    
+    batch_size = tf.shape(rgb)[0]
     
     if alpha > 0:
         lambda_mix = tf.random.uniform([], 0.0, alpha)
@@ -131,19 +146,27 @@ def mixup_batch(images, labels, alpha=0.2):
     
     indices = tf.random.shuffle(tf.range(batch_size))
     
-    mixed_images = lambda_mix * images + (1 - lambda_mix) * tf.gather(images, indices)
+    mixed_rgb = lambda_mix * rgb + (1 - lambda_mix) * tf.gather(rgb, indices)
+    mixed_depth = lambda_mix * depth + (1 - lambda_mix) * tf.gather(depth, indices)
     mixed_labels = lambda_mix * labels + (1 - lambda_mix) * tf.gather(labels, indices)
     
-    return mixed_images, mixed_labels
+    return {'rgb_input': mixed_rgb, 'depth_input': mixed_depth}, mixed_labels
 
-def augment_batch(images, labels, mixup_alpha=0.2, cutmix_alpha=1.0, use_cutmix_prob=0.5):
-    """Apply either MixUp or CutMix augmentation randomly."""
+
+def augment_batch_rgbd(
+    inputs: Dict[str, tf.Tensor], 
+    labels: tf.Tensor, 
+    mixup_alpha: float = 0.2, 
+    cutmix_alpha: float = 1.0, 
+    use_cutmix_prob: float = 0.5
+):
+    """Apply either MixUp or CutMix augmentation randomly to RGB-D batch."""
     if tf.random.uniform([]) < use_cutmix_prob and cutmix_alpha > 0:
-        return cutmix(images, labels, alpha=cutmix_alpha)
+        return cutmix_rgbd(inputs, labels, alpha=cutmix_alpha)
     elif mixup_alpha > 0:
-        return mixup_batch(images, labels, alpha=mixup_alpha)
+        return mixup_rgbd(inputs, labels, alpha=mixup_alpha)
     else:
-        return images, labels
+        return inputs, labels
 
 def load_and_decode_rgbd(rgb_path: tf.Tensor, depth_path: tf.Tensor, label: tf.Tensor, image_size: tuple) -> Tuple[Dict[str, tf.Tensor], tf.Tensor]:
     """Loads RGB and Depth images."""
@@ -284,8 +307,11 @@ def load_classification_data(
         ds = ds.map(lambda inputs, lbl: (inputs, tf.one_hot(tf.cast(lbl, tf.int32), depth=num_classes)), 
                     num_parallel_calls=tf.data.AUTOTUNE)
         
-        # Note: MixUp/CutMix logic needs update for Dictionary inputs. Disabling for now to ensure stability of RGB-D upgrade.
-        # if is_training and (mixup_alpha > 0.0 or cutmix_alpha > 0.0): ...
+        if is_training and (mixup_alpha > 0.0 or cutmix_alpha > 0.0):
+            ds = ds.map(
+                lambda inputs, lbl: augment_batch_rgbd(inputs, lbl, mixup_alpha, cutmix_alpha),
+                num_parallel_calls=tf.data.AUTOTUNE
+            )
         
         ds = ds.prefetch(buffer_size=tf.data.AUTOTUNE)
         return ds
