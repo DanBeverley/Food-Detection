@@ -30,8 +30,12 @@ def build_albumentations_pipeline(aug_cfg: Dict[str, Any]) -> A.Compose:
         logger.info(f"Augmentation enabled: SafeRotate (limit={limit})")
 
     if aug_cfg.get('shift_scale_rotate', False):
-        aug_list.append(A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.5))
-        logger.info("Augmentation enabled: ShiftScaleRotate")
+        # ShiftScaleRotate is deprecated/special case of Affine.
+        # shift_limit=0.0625 -> translate_percent
+        # scale_limit=0.1 -> scale=(0.9, 1.1)
+        # rotate_limit=15 -> rotate=(-15, 15)
+        aug_list.append(A.Affine(scale=(0.9, 1.1), translate_percent=(-0.0625, 0.0625), rotate=(-15, 15), p=0.5))
+        logger.info("Augmentation enabled: Affine (ShiftScaleRotate replacement)")
 
     if aug_cfg.get('coarse_dropout', False):
         # Updated for Albumentations >= 1.4.0 (using ranges)
