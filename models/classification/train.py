@@ -118,12 +118,30 @@ def main(args):
 
     logger.info("--- Stage 1: Training classification head only ---")
     architecture = model_cfg.get('architecture', 'EfficientNetV2B0')
+    
+    # Keras layer names are derived from the class name (usually) if _name is ignored
+    # Based on error logs: efficientnetv2-b0_rgb -> efficientnetv2-b0
     base_model_name = {
-        'EfficientNetV2B0': 'efficientnetv2-b0_rgb',
-        'MobileNetV2': 'mobilenetv2_rgb',
-        'MobileNetV3Small': 'mobilenetv3small_rgb'
+        'EfficientNetV2B0': 'efficientnetv2-b0',
+        'MobileNetV2': 'mobilenetv2_1.00_224', # Typical default, might need adjustment if used
+        'MobileNetV3Small': 'MobileNetV3Small'
     }.get(architecture)
-    base_model = model.get_layer(name=base_model_name)
+    
+    # Fallback search if exact name fails
+    try:
+        base_model = model.get_layer(name=base_model_name)
+    except ValueError:
+        # If strict lookup fails, try finding the backbone by class type partial match
+        logging.warning(f"Layer {base_model_name} not found. Searching for backbone layer...")
+        candidates = [l.name for l in model.layers if 'efficientnet' in l.name or 'mobilenet' in l.name]
+        if candidates:
+             # Heuristic: pick the first one that looks like a backbone (not fusion/dense)
+             base_model_name = candidates[0]
+             logging.info(f"Found candidate backbone layer: {base_model_name}")
+             base_model = model.get_layer(name=base_model_name)
+        else:
+             raise
+
     base_model.trainable = False
     
     model.optimizer.learning_rate.assign(optimizer_cfg.get('stage1_learning_rate', 1e-3))
