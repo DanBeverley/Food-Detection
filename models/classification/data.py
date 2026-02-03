@@ -4,6 +4,7 @@ from typing import Tuple, Dict, Optional, Any, List
 import logging
 from pathlib import Path
 import albumentations as A
+import numpy as np
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -55,7 +56,8 @@ def build_albumentations_pipeline(aug_cfg: Dict[str, Any]) -> A.Compose:
 def apply_albumentations_rgbd(rgb, depth, augmentation_pipeline):
     """Applies Albumentations pipeline to RGB and Depth."""
     def aug_fn(rgb_np, depth_np):
-        data = {"image": rgb_np, "depth": depth_np} 
+        # Explicit conversion to numpy (though py_function usually provides numpy arrays, explicit ensures it)
+        data = {"image": np.array(rgb_np), "depth": np.array(depth_np)} 
         aug_data = augmentation_pipeline(**data)
         return aug_data["image"], aug_data["depth"]
 
@@ -68,7 +70,8 @@ def apply_albumentations_rgbd(rgb, depth, augmentation_pipeline):
 def apply_albumentations(image, augmentation_pipeline):
     """Applies an Albumentations pipeline to a TensorFlow tensor."""
     def aug_fn(img):
-        data = {"image": img.numpy()}
+        # Convert to numpy if not already (safeguard)
+        data = {"image": np.array(img)}
         aug_data = augmentation_pipeline(**data)
         aug_img = aug_data["image"]
         return aug_img
