@@ -241,9 +241,21 @@ def analyze_food_item(
                         total_cals = (mass / 100.0) * cals_per_100g
                         item_result['calories_kcal'] = total_cals
                         
+                        # Calculate Macros
+                        prot_per_100 = info.get('protein_g_per_100g', 0)
+                        carb_per_100 = info.get('carbs_g_per_100g', 0)
+                        fat_per_100 = info.get('fat_g_per_100g', 0)
+                        
+                        item_result['protein_g'] = (mass / 100.0) * prot_per_100
+                        item_result['carbs_g'] = (mass / 100.0) * carb_per_100
+                        item_result['fat_g'] = (mass / 100.0) * fat_per_100
+
                         # Accumulate Totals
                         results['total_summary']['total_calories'] += total_cals
                         results['total_summary']['total_mass_g'] += mass
+                        results['total_summary']['total_protein_g'] = results['total_summary'].get('total_protein_g', 0) + item_result['protein_g']
+                        results['total_summary']['total_carbs_g'] = results['total_summary'].get('total_carbs_g', 0) + item_result['carbs_g']
+                        results['total_summary']['total_fat_g'] = results['total_summary'].get('total_fat_g', 0) + item_result['fat_g']
                 else:
                     item_result['warnings'].append("Density not found in DB")
             else:
@@ -272,11 +284,16 @@ def analyze_food_item(
         for item in results['food_items']:
             print(f"  - {item['label']} ({item['confidence']:.2f})")
             print(f"    Volume: {item['volume_cm3']:.2f} cm3")
-            if item['calories_kcal']:
+            if item.get('calories_kcal'):
                 print(f"    Calories: {item['calories_kcal']:.2f} kcal")
+                print(f"    Macros: P: {item.get('protein_g',0):.1f}g | C: {item.get('carbs_g',0):.1f}g | F: {item.get('fat_g',0):.1f}g")
             else:
                 print(f"    Calories: N/A")
-        print(f"TOTAL CALORIES: {results['total_summary']['total_calories']:.2f} kcal")
+        
+        summ = results['total_summary']
+        print("----------------------------")
+        print(f"TOTAL CALORIES: {summ['total_calories']:.2f} kcal")
+        print(f"TOTAL MACROS:   P: {summ.get('total_protein_g', 0):.1f}g | C: {summ.get('total_carbs_g', 0):.1f}g | F: {summ.get('total_fat_g', 0):.1f}g")
         print("============================")
 
     return results
