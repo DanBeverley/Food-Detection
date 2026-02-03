@@ -46,6 +46,8 @@ loss:
 training:
   stage1_epochs: 5
   stage2_epochs: 100
+  use_warmup: true
+  warmup_epochs: 3
 
 export:
   tflite_filename: "classification_model_final.tflite"
