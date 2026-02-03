@@ -11,4 +11,6 @@ scipy
 open3d # Added for point cloud processing and volume estimation
 albumentations
 opencv-python-headless
+keras-tuner
 # Add other specific versions if necessary, e.g., open3d==0.17.0
+ultralytics>=8.0.0 # For YOLOv8 segmentation
