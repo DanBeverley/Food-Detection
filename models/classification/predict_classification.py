@@ -33,6 +33,124 @@ def _get_preprocess_fn(architecture: str):
         logging.warning(f"Architecture '{architecture}' has no specific preprocess function. Defaulting to scale by /255.")
         return lambda x: x / 255.0
 
+
+def apply_tta_transforms(image: np.ndarray, depth: np.ndarray = None, transform_idx: int = 0):
+    """
+    Apply test-time augmentation transform to image and optionally depth.
+    
+    Transforms:
+        0: Original
+        1: Horizontal flip
+        2: Vertical flip
+        3: Horizontal + Vertical flip
+    
+    Args:
+        image: Input image array (H, W, C)
+        depth: Optional depth array (H, W, 1)
+        transform_idx: Index of transform to apply (0-3)
+    
+    Returns:
+        Tuple of (transformed_image, transformed_depth)
+    """
+    if transform_idx == 0:
+        return image, depth
+    elif transform_idx == 1:
+        # Horizontal flip
+        img_out = np.flip(image, axis=1).copy()
+        depth_out = np.flip(depth, axis=1).copy() if depth is not None else None
+    elif transform_idx == 2:
+        # Vertical flip
+        img_out = np.flip(image, axis=0).copy()
+        depth_out = np.flip(depth, axis=0).copy() if depth is not None else None
+    elif transform_idx == 3:
+        # Both flips
+        img_out = np.flip(np.flip(image, axis=1), axis=0).copy()
+        depth_out = np.flip(np.flip(depth, axis=1), axis=0).copy() if depth is not None else None
+    else:
+        return image, depth
+    
+    return img_out, depth_out
+
+
+def run_inference_with_tta(
+    interpreter: tf.lite.Interpreter,
+    input_details: list,
+    output_details: list,
+    model_input_size_hw: tuple,
+    architecture: str,
+    image_data: np.ndarray,
+    depth_data: np.ndarray = None,
+    num_tta_transforms: int = 2
+) -> np.ndarray:
+    """
+    Run inference with Test-Time Augmentation.
+    
+    Runs the model multiple times with different augmentations and averages
+    the predictions to improve accuracy.
+    
+    Args:
+        interpreter: TFLite interpreter
+        input_details: Model input details
+        output_details: Model output details
+        model_input_size_hw: Expected input size (H, W)
+        architecture: Model architecture string
+        image_data: Original image array (H, W, C)
+        depth_data: Optional depth array
+        num_tta_transforms: Number of TTA transforms to use (1-4, default 2 = original + h-flip)
+    
+    Returns:
+        Averaged prediction probabilities
+    """
+    all_predictions = []
+    
+    for t_idx in range(min(num_tta_transforms, 4)):
+        aug_image, aug_depth = apply_tta_transforms(image_data.copy(), 
+                                                     depth_data.copy() if depth_data is not None else None,
+                                                     t_idx)
+        
+        # Preprocess augmented image
+        preprocess_fn = _get_preprocess_fn(architecture)
+        input_img = Image.fromarray(aug_image.astype(np.uint8) if aug_image.max() > 1 else (aug_image * 255).astype(np.uint8))
+        input_img = input_img.resize((model_input_size_hw[1], model_input_size_hw[0]), Image.LANCZOS)
+        input_array = np.array(input_img, dtype=np.float32)
+        input_array = preprocess_fn(input_array)
+        input_array = np.expand_dims(input_array, axis=0)
+        
+        # Handle single vs dual input models
+        if len(input_details) > 1 and aug_depth is not None:
+            for inp in input_details:
+                if 'depth' in inp['name'].lower():
+                    expected_channels = inp['shape'][-1]
+                    depth_resized = np.array(Image.fromarray(aug_depth.squeeze()).resize(
+                        (model_input_size_hw[1], model_input_size_hw[0]), Image.LANCZOS))
+                    depth_norm = depth_resized.astype(np.float32) / 2000.0
+                    depth_norm = np.clip(depth_norm, 0.0, 1.0)
+                    if expected_channels == 3:
+                        depth_norm = np.stack([depth_norm] * 3, axis=-1)
+                    else:
+                        depth_norm = np.expand_dims(depth_norm, axis=-1)
+                    interpreter.set_tensor(inp['index'], np.expand_dims(depth_norm, axis=0))
+                elif 'rgb' in inp['name'].lower() or inp['shape'][-1] == 3:
+                    interpreter.set_tensor(inp['index'], input_array)
+        else:
+            interpreter.set_tensor(input_details[0]['index'], input_array)
+        
+        interpreter.invoke()
+        output = interpreter.get_tensor(output_details[0]['index'])[0]
+        
+        # Apply softmax if needed
+        if not np.isclose(np.sum(output), 1.0, atol=0.1):
+            output = tf.nn.softmax(output).numpy()
+        
+        all_predictions.append(output)
+    
+    # Average predictions
+    avg_predictions = np.mean(all_predictions, axis=0)
+    logging.info(f"TTA: Averaged {len(all_predictions)} predictions")
+    
+    return avg_predictions
+
+
 # Core Logic
 
 def load_classification_model(tflite_model_path: str, labels_path: str = None):
