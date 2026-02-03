@@ -1,18 +1,125 @@
 import numpy as np
 import open3d as o3d
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# --- Placeholder Camera Intrinsics ---
-# These are VERY ROUGH ESTIMATES. Actual values depend heavily on the specific
-# iPhone model, RevoPoint POP model, resolution, and API used.
-# For MetaFood3D, if the resolution of depth maps is known (e.g., 640x480, 1280x720),
-# these would need to be adjusted. Without official intrinsics from the dataset,
-# volume estimation will have inherent inaccuracies.
 
-# Camera intrinsics are now loaded from config files for better modularity
-# This eliminates hardcoded camera parameters and improves robustness
+# Pre-defined intrinsics for known sensor configurations
+KNOWN_SENSOR_INTRINSICS = {
+    'iphone_lidar_640x480': {
+        'fx': 500.0, 'fy': 500.0, 'cx': 320.0, 'cy': 240.0,
+        'width': 640, 'height': 480
+    },
+    'iphone_lidar_256x192': {
+        'fx': 200.0, 'fy': 200.0, 'cx': 128.0, 'cy': 96.0,
+        'width': 256, 'height': 192
+    },
+    'revopoint_pop_640x480': {
+        'fx': 550.0, 'fy': 550.0, 'cx': 320.0, 'cy': 240.0,
+        'width': 640, 'height': 480
+    },
+}
+
+
+def estimate_camera_intrinsics(
+    depth_map: np.ndarray,
+    sensor_type: Optional[str] = None,
+    fov_degrees: float = 60.0
+) -> dict:
+    """
+    Estimates camera intrinsics from depth map resolution.
+    
+    When exact camera parameters are unavailable (like MetaFood3D), this function
+    calculates reasonable estimates based on the depth map dimensions and assumed FOV.
+    
+    Args:
+        depth_map: Depth map array (H, W) or (H, W, 1)
+        sensor_type: Optional known sensor type ('iphone_lidar_640x480', 'revopoint_pop_640x480', etc.)
+        fov_degrees: Assumed horizontal field of view in degrees (default 60°, typical for depth sensors)
+    
+    Returns:
+        Dictionary with 'fx', 'fy', 'cx', 'cy', 'width', 'height'
+    """
+    if depth_map.ndim == 3:
+        depth_map = depth_map.squeeze()
+    
+    height, width = depth_map.shape
+    
+    # Check for known sensor configuration
+    if sensor_type and sensor_type in KNOWN_SENSOR_INTRINSICS:
+        known = KNOWN_SENSOR_INTRINSICS[sensor_type]
+        if known['width'] == width and known['height'] == height:
+            logger.info(f"Using known intrinsics for sensor: {sensor_type}")
+            return known.copy()
+        else:
+            logger.warning(
+                f"Sensor type '{sensor_type}' specified but resolution mismatch. "
+                f"Expected {known['width']}x{known['height']}, got {width}x{height}. "
+                f"Falling back to auto-calculation."
+            )
+    
+    # Auto-calculate intrinsics from resolution and assumed FOV
+    # Formula: fx = width / (2 * tan(FOV/2))
+    fov_rad = np.radians(fov_degrees)
+    fx = width / (2 * np.tan(fov_rad / 2))
+    fy = fx  # Assume square pixels
+    
+    # Principal point at image center
+    cx = width / 2.0
+    cy = height / 2.0
+    
+    intrinsics = {
+        'fx': float(fx),
+        'fy': float(fy),
+        'cx': float(cx),
+        'cy': float(cy),
+        'width': int(width),
+        'height': int(height)
+    }
+    
+    logger.info(
+        f"Auto-calculated camera intrinsics for {width}x{height} depth map "
+        f"(FOV={fov_degrees}°): fx={fx:.1f}, fy={fy:.1f}, cx={cx:.1f}, cy={cy:.1f}"
+    )
+    
+    return intrinsics
+
+
+def get_intrinsics_for_depth_map(
+    depth_map: np.ndarray,
+    provided_intrinsics: Optional[dict] = None,
+    sensor_type: Optional[str] = None
+) -> dict:
+    """
+    Returns camera intrinsics, using provided values or auto-calculating if not available.
+    
+    Priority order:
+    1. Provided intrinsics (if complete)
+    2. Known sensor type intrinsics
+    3. Auto-calculated from resolution
+    
+    Args:
+        depth_map: Depth map array
+        provided_intrinsics: Optional dict with 'fx', 'fy', 'cx', 'cy'
+        sensor_type: Optional known sensor type
+    
+    Returns:
+        Complete intrinsics dictionary
+    """
+    required_keys = {'fx', 'fy', 'cx', 'cy'}
+    
+    if provided_intrinsics and required_keys.issubset(provided_intrinsics.keys()):
+        intrinsics = provided_intrinsics.copy()
+        if 'width' not in intrinsics or 'height' not in intrinsics:
+            h, w = depth_map.shape[:2]
+            intrinsics['width'] = w
+            intrinsics['height'] = h
+        logger.info("Using provided camera intrinsics.")
+        return intrinsics
+    
+    return estimate_camera_intrinsics(depth_map, sensor_type)
 
 def create_point_cloud_from_depth_mask(
     depth_map: np.ndarray,
