@@ -1,15 +1,1078 @@
 {
-  "_comment": "Populate this file with food items (matching classification output). Preferred format: \"food_item\": {\"density\": value_g_cm3, \"calories_kcal_per_100g\": value_kcal_100g}. Legacy format (density only): \"food_item\": value_g_cm3. Example: \"apple_fuji_raw\": {\"density\": 0.75, \"calories_kcal_per_100g\": 50.0}",
-  "apple": {
-    "density": 0.8,
-    "calories_kcal_per_100g": 52.0
-  },
+  "_comment": "Generated offline database. Values are category-based estimates or cached from API.",
   "almond(bowl)": {
-    "density": 0.46,
-    "calories_kcal_per_100g": 161.0
+    "density": 0.6,
+    "calories_kcal_per_100g": 884,
+    "original_name": "Almond(bowl)",
+    "category": "Nut",
+    "protein_g_per_100g": 0,
+    "carbs_g_per_100g": 0,
+    "fat_g_per_100g": 100,
+    "source": "USDA_API_FETCHED"
+  },
+  "almonds": {
+    "density": 0.6,
+    "calories_kcal_per_100g": 583,
+    "original_name": "Almonds",
+    "category": "Nut",
+    "protein_g_per_100g": 19.4,
+    "carbs_g_per_100g": 16.7,
+    "fat_g_per_100g": 52.8,
+    "source": "USDA_API_FETCHED"
+  },
+  "apple": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 54.0,
+    "original_name": "Apple",
+    "category": "Fruit",
+    "protein_g_per_100g": 0.41,
+    "carbs_g_per_100g": 14.0,
+    "fat_g_per_100g": 0.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "applesauce": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 40.0,
+    "original_name": "Applesauce",
+    "category": "Fruit",
+    "protein_g_per_100g": 0.0,
+    "carbs_g_per_100g": 11.3,
+    "fat_g_per_100g": 0.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "asparagus": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 18.0,
+    "original_name": "Asparagus",
+    "category": "Vegetable",
+    "protein_g_per_100g": 2.35,
+    "carbs_g_per_100g": 3.53,
+    "fat_g_per_100g": 0.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "avocado": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 884,
+    "original_name": "Avocado",
+    "category": "Fruit",
+    "protein_g_per_100g": 0.0,
+    "carbs_g_per_100g": 0.0,
+    "fat_g_per_100g": 100,
+    "source": "USDA_API_FETCHED"
+  },
+  "bacon": {
+    "density": 1.05,
+    "calories_kcal_per_100g": 467,
+    "original_name": "Bacon",
+    "category": "Meat",
+    "protein_g_per_100g": 26.7,
+    "carbs_g_per_100g": 0.0,
+    "fat_g_per_100g": 40.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "bagel": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 200,
+    "original_name": "Bagel",
+    "category": "Carb_Bread",
+    "protein_g_per_100g": 4.0,
+    "carbs_g_per_100g": 40.0,
+    "fat_g_per_100g": 5.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "baked_potato": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 469,
+    "original_name": "Baked_Potato",
+    "category": "Vegetable",
+    "protein_g_per_100g": 5,
+    "carbs_g_per_100g": 71.4,
+    "fat_g_per_100g": 18.2,
+    "source": "USDA_API_FETCHED"
   },
   "banana": {
-    "density": 0.952,
-    "calories_kcal_per_100g": 89.0
+    "density": 0.85,
+    "calories_kcal_per_100g": 346,
+    "original_name": "Banana",
+    "category": "Fruit",
+    "protein_g_per_100g": 3.89,
+    "carbs_g_per_100g": 88.3,
+    "fat_g_per_100g": 1.81,
+    "source": "USDA_API_FETCHED"
+  },
+  "beans": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 119,
+    "original_name": "Beans",
+    "category": "Vegetable",
+    "protein_g_per_100g": 5.44,
+    "carbs_g_per_100g": 15.89,
+    "fat_g_per_100g": 3.7,
+    "source": "USDA_API_FETCHED"
+  },
+  "bell_pepper": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 27.0,
+    "original_name": "Bell Pepper",
+    "category": "Vegetable",
+    "protein_g_per_100g": 0.896,
+    "carbs_g_per_100g": 6.65,
+    "fat_g_per_100g": 0.126,
+    "source": "USDA_API_FETCHED"
+  },
+  "biscuits": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 460,
+    "original_name": "Biscuits",
+    "category": "Carb_Bread",
+    "protein_g_per_100g": 8.0,
+    "carbs_g_per_100g": 74.0,
+    "fat_g_per_100g": 14.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "blueberries": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 39.0,
+    "original_name": "Blueberries",
+    "category": "Fruit",
+    "protein_g_per_100g": 0.0,
+    "carbs_g_per_100g": 8.57,
+    "fat_g_per_100g": 0.71,
+    "source": "USDA_API_FETCHED"
+  },
+  "blueberry(bowl)": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 64,
+    "original_name": "Blueberry(bowl)",
+    "category": "Fruit",
+    "protein_g_per_100g": 0.7,
+    "carbs_g_per_100g": 14.57,
+    "fat_g_per_100g": 0.31,
+    "source": "USDA_API_FETCHED"
+  },
+  "breaded_fish": {
+    "density": 0.7,
+    "calories_kcal_per_100g": 221,
+    "original_name": "Breaded_Fish",
+    "category": "Fried",
+    "protein_g_per_100g": 18.2,
+    "carbs_g_per_100g": 7.54,
+    "fat_g_per_100g": 12.7,
+    "source": "USDA_API_FETCHED"
+  },
+  "broccoli": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 29.0,
+    "original_name": "Broccoli",
+    "category": "Vegetable",
+    "protein_g_per_100g": 1.18,
+    "carbs_g_per_100g": 3.53,
+    "fat_g_per_100g": 0.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "brownies": {
+    "density": 0.65,
+    "calories_kcal_per_100g": 452,
+    "original_name": "Brownies",
+    "category": "Sweet",
+    "protein_g_per_100g": 3.23,
+    "carbs_g_per_100g": 66.1,
+    "fat_g_per_100g": 19.4,
+    "source": "USDA_API_FETCHED"
+  },
+  "burger": {
+    "density": 1.05,
+    "calories_kcal_per_100g": 224,
+    "original_name": "Burger",
+    "category": "Meat",
+    "protein_g_per_100g": 12.96,
+    "carbs_g_per_100g": 30.82,
+    "fat_g_per_100g": 5.2,
+    "source": "USDA_API_FETCHED"
+  },
+  "burrito": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 206,
+    "original_name": "Burrito",
+    "category": "Carb_Rice",
+    "protein_g_per_100g": 8.82,
+    "carbs_g_per_100g": 35.3,
+    "fat_g_per_100g": 3.53,
+    "source": "USDA_API_FETCHED"
+  },
+  "cabbage": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 34,
+    "original_name": "Cabbage",
+    "category": "Vegetable",
+    "protein_g_per_100g": 1.24,
+    "carbs_g_per_100g": 6.79,
+    "fat_g_per_100g": 0.21,
+    "source": "USDA_API_FETCHED"
+  },
+  "cake": {
+    "density": 0.65,
+    "calories_kcal_per_100g": 324,
+    "original_name": "Cake",
+    "category": "Sweet",
+    "protein_g_per_100g": 2.9,
+    "carbs_g_per_100g": 61.6,
+    "fat_g_per_100g": 9.1,
+    "source": "USDA_API_FETCHED"
+  },
+  "carrot": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 41.0,
+    "original_name": "Carrot",
+    "category": "Vegetable",
+    "protein_g_per_100g": 0.93,
+    "carbs_g_per_100g": 9.58,
+    "fat_g_per_100g": 0.24,
+    "source": "USDA_API_FETCHED"
+  },
+  "cauliflower": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 24.0,
+    "original_name": "Cauliflower",
+    "category": "Vegetable",
+    "protein_g_per_100g": 0.0,
+    "carbs_g_per_100g": 3.53,
+    "fat_g_per_100g": 0.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "cereal_bars": {
+    "density": 0.65,
+    "calories_kcal_per_100g": 435,
+    "original_name": "Cereal bars",
+    "category": "Sweet",
+    "protein_g_per_100g": 4.35,
+    "carbs_g_per_100g": 73.9,
+    "fat_g_per_100g": 10.9,
+    "source": "USDA_API_FETCHED"
+  },
+  "chicken_breast": {
+    "density": 1.05,
+    "calories_kcal_per_100g": 107,
+    "original_name": "Chicken_breast",
+    "category": "Meat",
+    "protein_g_per_100g": 19.6,
+    "carbs_g_per_100g": 1.79,
+    "fat_g_per_100g": 1.79,
+    "source": "USDA_API_FETCHED"
+  },
+  "chicken_nugget": {
+    "density": 0.7,
+    "calories_kcal_per_100g": 298,
+    "original_name": "Chicken_Nugget",
+    "category": "Fried",
+    "protein_g_per_100g": 13.36,
+    "carbs_g_per_100g": 17.88,
+    "fat_g_per_100g": 19.23,
+    "source": "USDA_API_FETCHED"
+  },
+  "chicken_tender": {
+    "density": 1.05,
+    "calories_kcal_per_100g": 297,
+    "original_name": "Chicken_tender",
+    "category": "Meat",
+    "protein_g_per_100g": 19.6,
+    "carbs_g_per_100g": 18.0,
+    "fat_g_per_100g": 16.2,
+    "source": "USDA_API_FETCHED"
+  },
+  "chicken_thighs": {
+    "density": 1.05,
+    "calories_kcal_per_100g": 214,
+    "original_name": "Chicken_thighs",
+    "category": "Meat",
+    "protein_g_per_100g": 17.0,
+    "carbs_g_per_100g": 0.0,
+    "fat_g_per_100g": 17.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "chicken_wings": {
+    "density": 1.05,
+    "calories_kcal_per_100g": 223,
+    "original_name": "Chicken_wings",
+    "category": "Meat",
+    "protein_g_per_100g": 18.8,
+    "carbs_g_per_100g": 0.0,
+    "fat_g_per_100g": 16.1,
+    "source": "USDA_API_FETCHED"
+  },
+  "chocolate": {
+    "density": 0.65,
+    "calories_kcal_per_100g": 441,
+    "original_name": "Chocolate",
+    "category": "Sweet",
+    "protein_g_per_100g": 2.94,
+    "carbs_g_per_100g": 70.6,
+    "fat_g_per_100g": 17.6,
+    "source": "USDA_API_FETCHED"
+  },
+  "cinnamon_roll": {
+    "density": 0.65,
+    "calories_kcal_per_100g": 375,
+    "original_name": "Cinnamon_Roll",
+    "category": "Sweet",
+    "protein_g_per_100g": 4.69,
+    "carbs_g_per_100g": 51.6,
+    "fat_g_per_100g": 17.2,
+    "source": "USDA_API_FETCHED"
+  },
+  "coleslaw": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 24.0,
+    "original_name": "Coleslaw",
+    "category": "Vegetable",
+    "protein_g_per_100g": 1.18,
+    "carbs_g_per_100g": 5.88,
+    "fat_g_per_100g": 0.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "cookies": {
+    "density": 0.65,
+    "calories_kcal_per_100g": 467,
+    "original_name": "Cookies",
+    "category": "Sweet",
+    "protein_g_per_100g": 6.67,
+    "carbs_g_per_100g": 60.0,
+    "fat_g_per_100g": 23.3,
+    "source": "USDA_API_FETCHED"
+  },
+  "corn_dog": {
+    "density": 0.7,
+    "calories_kcal_per_100g": 250,
+    "original_name": "Corn dog",
+    "category": "Fried",
+    "protein_g_per_100g": 8.57,
+    "carbs_g_per_100g": 27.0,
+    "fat_g_per_100g": 12.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "corn(bowl)": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 93.0,
+    "original_name": "Corn(bowl)",
+    "category": "Vegetable",
+    "protein_g_per_100g": 2.67,
+    "carbs_g_per_100g": 21.3,
+    "fat_g_per_100g": 0.67,
+    "source": "USDA_API_FETCHED"
+  },
+  "corn_stick": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 277,
+    "original_name": "Corn_Stick",
+    "category": "Vegetable",
+    "protein_g_per_100g": 11.01,
+    "carbs_g_per_100g": 21.66,
+    "fat_g_per_100g": 16.23,
+    "source": "USDA_API_FETCHED"
+  },
+  "cottage_cheese": {
+    "density": 1.02,
+    "calories_kcal_per_100g": 105,
+    "original_name": "Cottage cheese",
+    "category": "Dairy",
+    "protein_g_per_100g": 11.4,
+    "carbs_g_per_100g": 3.51,
+    "fat_g_per_100g": 4.39,
+    "source": "USDA_API_FETCHED"
+  },
+  "crab": {
+    "density": 1.02,
+    "calories_kcal_per_100g": 197,
+    "original_name": "Crab",
+    "category": "Seafood",
+    "protein_g_per_100g": 4.07,
+    "carbs_g_per_100g": 8.66,
+    "fat_g_per_100g": 16.28,
+    "source": "USDA_API_FETCHED"
+  },
+  "crab_cake": {
+    "density": 0.7,
+    "calories_kcal_per_100g": 155,
+    "original_name": "Crab cake",
+    "category": "Fried",
+    "protein_g_per_100g": 20.2,
+    "carbs_g_per_100g": 0.48,
+    "fat_g_per_100g": 7.52,
+    "source": "USDA_API_FETCHED"
+  },
+  "croissant": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 400,
+    "original_name": "Croissant",
+    "category": "Carb_Bread",
+    "protein_g_per_100g": 4.44,
+    "carbs_g_per_100g": 51.1,
+    "fat_g_per_100g": 15.6,
+    "source": "USDA_API_FETCHED"
+  },
+  "cucumber": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 45,
+    "original_name": "Cucumber",
+    "category": "Vegetable",
+    "protein_g_per_100g": 0.72,
+    "carbs_g_per_100g": 3.37,
+    "fat_g_per_100g": 3.2,
+    "source": "USDA_API_FETCHED"
+  },
+  "doughnut": {
+    "density": 0.65,
+    "calories_kcal_per_100g": 417,
+    "original_name": "Doughnut",
+    "category": "Sweet",
+    "protein_g_per_100g": 5.2,
+    "carbs_g_per_100g": 51.95,
+    "fat_g_per_100g": 22.44,
+    "source": "USDA_API_FETCHED"
+  },
+  "edamame": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 106,
+    "original_name": "Edamame",
+    "category": "Vegetable",
+    "protein_g_per_100g": 10.6,
+    "carbs_g_per_100g": 8.24,
+    "fat_g_per_100g": 4.71,
+    "source": "USDA_API_FETCHED"
+  },
+  "egg": {
+    "density": 1.02,
+    "calories_kcal_per_100g": 367,
+    "original_name": "Egg",
+    "category": "Dairy",
+    "protein_g_per_100g": 0.0,
+    "carbs_g_per_100g": 90.0,
+    "fat_g_per_100g": 0.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "falafel": {
+    "density": 0.7,
+    "calories_kcal_per_100g": 357,
+    "original_name": "Falafel",
+    "category": "Fried",
+    "protein_g_per_100g": 21.4,
+    "carbs_g_per_100g": 60.7,
+    "fat_g_per_100g": 3.57,
+    "source": "USDA_API_FETCHED"
+  },
+  "frankfurter_sandwich": {
+    "density": 1.05,
+    "calories_kcal_per_100g": 233,
+    "original_name": "Frankfurter_Sandwich",
+    "category": "Meat",
+    "protein_g_per_100g": 19.6,
+    "carbs_g_per_100g": 7.7,
+    "fat_g_per_100g": 13.7,
+    "source": "USDA_API_FETCHED"
+  },
+  "french_fry": {
+    "density": 0.7,
+    "calories_kcal_per_100g": 0.0,
+    "original_name": "French_Fry",
+    "category": "Fried",
+    "protein_g_per_100g": 0.0,
+    "carbs_g_per_100g": 0.0,
+    "fat_g_per_100g": 0.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "french_toast": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 278,
+    "original_name": "French_toast",
+    "category": "Carb_Bread",
+    "protein_g_per_100g": 7.52,
+    "carbs_g_per_100g": 40.62,
+    "fat_g_per_100g": 9.18,
+    "source": "USDA_API_FETCHED"
+  },
+  "fried_mushrooms": {
+    "density": 0.7,
+    "calories_kcal_per_100g": 26.0,
+    "original_name": "Fried mushrooms",
+    "category": "Fried",
+    "protein_g_per_100g": 3.58,
+    "carbs_g_per_100g": 4.04,
+    "fat_g_per_100g": 0.33,
+    "source": "USDA_API_FETCHED"
+  },
+  "fried_egg": {
+    "density": 1.02,
+    "calories_kcal_per_100g": 171,
+    "original_name": "Fried_egg",
+    "category": "Dairy",
+    "protein_g_per_100g": 11.57,
+    "carbs_g_per_100g": 0.95,
+    "fat_g_per_100g": 13.52,
+    "source": "USDA_API_FETCHED"
+  },
+  "fried_rice": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 141,
+    "original_name": "Fried_rice",
+    "category": "Carb_Rice",
+    "protein_g_per_100g": 5.49,
+    "carbs_g_per_100g": 25.1,
+    "fat_g_per_100g": 1.96,
+    "source": "USDA_API_FETCHED"
+  },
+  "grapes": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 66,
+    "original_name": "Grapes",
+    "category": "Fruit",
+    "protein_g_per_100g": 0.18,
+    "carbs_g_per_100g": 15.73,
+    "fat_g_per_100g": 0.28,
+    "source": "USDA_API_FETCHED"
+  },
+  "green_bean": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 40,
+    "original_name": "Green_Bean",
+    "category": "Vegetable",
+    "protein_g_per_100g": 1.97,
+    "carbs_g_per_100g": 7.41,
+    "fat_g_per_100g": 0.28,
+    "source": "USDA_API_FETCHED"
+  },
+  "green_beans": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 35.0,
+    "original_name": "Green_beans",
+    "category": "Vegetable",
+    "protein_g_per_100g": 2.35,
+    "carbs_g_per_100g": 7.06,
+    "fat_g_per_100g": 0.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "guacamole": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 89.0,
+    "original_name": "Guacamole",
+    "category": "Vegetable",
+    "protein_g_per_100g": 3.57,
+    "carbs_g_per_100g": 10.7,
+    "fat_g_per_100g": 7.14,
+    "source": "USDA_API_FETCHED"
+  },
+  "gyoza": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 188,
+    "original_name": "Gyoza",
+    "category": "Carb_Rice",
+    "protein_g_per_100g": 8.72,
+    "carbs_g_per_100g": 26.8,
+    "fat_g_per_100g": 4.7,
+    "source": "USDA_API_FETCHED"
+  },
+  "hashbrown": {
+    "density": 0.7,
+    "calories_kcal_per_100g": 83.0,
+    "original_name": "Hashbrown",
+    "category": "Fried",
+    "protein_g_per_100g": 2.38,
+    "carbs_g_per_100g": 19.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "ice_cream": {
+    "density": 0.65,
+    "calories_kcal_per_100g": 248,
+    "original_name": "Ice_cream",
+    "category": "Sweet",
+    "protein_g_per_100g": 2.65,
+    "carbs_g_per_100g": 26.6,
+    "fat_g_per_100g": 15.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "kiwi": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 61.0,
+    "original_name": "Kiwi",
+    "category": "Fruit",
+    "protein_g_per_100g": 1.35,
+    "carbs_g_per_100g": 14.9,
+    "fat_g_per_100g": 0.68,
+    "source": "USDA_API_FETCHED"
+  },
+  "lasagna": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 171,
+    "original_name": "Lasagna",
+    "category": "Carb_Rice",
+    "protein_g_per_100g": 8.24,
+    "carbs_g_per_100g": 17.1,
+    "fat_g_per_100g": 7.94,
+    "source": "USDA_API_FETCHED"
+  },
+  "lobster": {
+    "density": 1.02,
+    "calories_kcal_per_100g": 187,
+    "original_name": "Lobster",
+    "category": "Seafood",
+    "protein_g_per_100g": 10.29,
+    "carbs_g_per_100g": 1.22,
+    "fat_g_per_100g": 15.4,
+    "source": "USDA_API_FETCHED"
+  },
+  "mac": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 257,
+    "original_name": "Mac",
+    "category": "Carb_Rice",
+    "protein_g_per_100g": 11.8,
+    "carbs_g_per_100g": 20.1,
+    "fat_g_per_100g": 15.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "mango": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 65.0,
+    "original_name": "Mango",
+    "category": "Fruit",
+    "protein_g_per_100g": 0.61,
+    "carbs_g_per_100g": 17.0,
+    "fat_g_per_100g": 0.39,
+    "source": "USDA_API_FETCHED"
+  },
+  "mashed_potato": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 120,
+    "original_name": "Mashed_Potato",
+    "category": "Vegetable",
+    "protein_g_per_100g": 1.6,
+    "carbs_g_per_100g": 16.0,
+    "fat_g_per_100g": 5.6,
+    "source": "USDA_API_FETCHED"
+  },
+  "meatloaf": {
+    "density": 1.05,
+    "calories_kcal_per_100g": 197,
+    "original_name": "Meatloaf",
+    "category": "Meat",
+    "protein_g_per_100g": 21.0,
+    "carbs_g_per_100g": 8.0,
+    "fat_g_per_100g": 9.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "melons": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 36,
+    "original_name": "Melons",
+    "category": "Fruit",
+    "protein_g_per_100g": 0.4,
+    "carbs_g_per_100g": 2.95,
+    "fat_g_per_100g": 2.74,
+    "source": "USDA_API_FETCHED"
+  },
+  "muffin": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 353,
+    "original_name": "Muffin",
+    "category": "Carb_Bread",
+    "protein_g_per_100g": 6.47,
+    "carbs_g_per_100g": 45.9,
+    "fat_g_per_100g": 15.9,
+    "source": "USDA_API_FETCHED"
+  },
+  "nachos": {
+    "density": 0.7,
+    "calories_kcal_per_100g": 210,
+    "original_name": "Nachos",
+    "category": "Fried",
+    "protein_g_per_100g": 4.62,
+    "carbs_g_per_100g": 23.28,
+    "fat_g_per_100g": 11.37,
+    "source": "USDA_API_FETCHED"
+  },
+  "nutrition_bars": {
+    "density": 0.65,
+    "calories_kcal_per_100g": 363,
+    "original_name": "Nutrition bars",
+    "category": "Sweet",
+    "protein_g_per_100g": 14.15,
+    "carbs_g_per_100g": 69.63,
+    "fat_g_per_100g": 3.11,
+    "source": "USDA_API_FETCHED"
+  },
+  "omelet": {
+    "density": 1.02,
+    "calories_kcal_per_100g": 154,
+    "original_name": "Omelet",
+    "category": "Dairy",
+    "protein_g_per_100g": 10.6,
+    "carbs_g_per_100g": 0.64,
+    "fat_g_per_100g": 11.7,
+    "source": "USDA_API_FETCHED"
+  },
+  "onion": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 238,
+    "original_name": "Onion",
+    "category": "Vegetable",
+    "protein_g_per_100g": 8.81,
+    "carbs_g_per_100g": 44.32,
+    "fat_g_per_100g": 2.95,
+    "source": "USDA_API_FETCHED"
+  },
+  "pancake": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 341,
+    "original_name": "Pancake",
+    "category": "Carb_Bread",
+    "protein_g_per_100g": 7.68,
+    "carbs_g_per_100g": 41.18,
+    "fat_g_per_100g": 15.94,
+    "source": "USDA_API_FETCHED"
+  },
+  "papaya": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 52,
+    "original_name": "Papaya",
+    "category": "Fruit",
+    "protein_g_per_100g": 0.35,
+    "carbs_g_per_100g": 13.1,
+    "fat_g_per_100g": 0.21,
+    "source": "USDA_API_FETCHED"
+  },
+  "pasta_mixed_dishes": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 85,
+    "original_name": "Pasta_mixed_dishes",
+    "category": "Carb_Rice",
+    "protein_g_per_100g": 1.7,
+    "carbs_g_per_100g": 19.89,
+    "fat_g_per_100g": 0.1,
+    "source": "USDA_API_FETCHED"
+  },
+  "peach": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 75.0,
+    "original_name": "Peach",
+    "category": "Fruit",
+    "protein_g_per_100g": 0.42,
+    "carbs_g_per_100g": 19.2,
+    "fat_g_per_100g": 0.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "peanut_butter_and_jelly_sandwiches": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 360,
+    "original_name": "Peanut butter and jelly sandwiches",
+    "category": "Carb_Bread",
+    "protein_g_per_100g": 12.48,
+    "carbs_g_per_100g": 43.2,
+    "fat_g_per_100g": 16.81,
+    "source": "USDA_API_FETCHED"
+  },
+  "peanuts": {
+    "density": 0.6,
+    "calories_kcal_per_100g": 607,
+    "original_name": "Peanuts",
+    "category": "Nut",
+    "protein_g_per_100g": 25.0,
+    "carbs_g_per_100g": 17.9,
+    "fat_g_per_100g": 53.6,
+    "source": "USDA_API_FETCHED"
+  },
+  "pie": {
+    "density": 0.65,
+    "calories_kcal_per_100g": 235,
+    "original_name": "Pie",
+    "category": "Sweet",
+    "protein_g_per_100g": 2.01,
+    "carbs_g_per_100g": 33.6,
+    "fat_g_per_100g": 10.1,
+    "source": "USDA_API_FETCHED"
+  },
+  "pineapple": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 370,
+    "original_name": "Pineapple",
+    "category": "Fruit",
+    "protein_g_per_100g": 0.0,
+    "carbs_g_per_100g": 93.0,
+    "fat_g_per_100g": 0.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "pizza": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 250,
+    "original_name": "Pizza",
+    "category": "Carb_Bread",
+    "protein_g_per_100g": 10.7,
+    "carbs_g_per_100g": 27.9,
+    "fat_g_per_100g": 10.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "pork_chop": {
+    "density": 1.05,
+    "calories_kcal_per_100g": 195,
+    "original_name": "Pork_Chop",
+    "category": "Meat",
+    "protein_g_per_100g": 26.97,
+    "carbs_g_per_100g": 0.01,
+    "fat_g_per_100g": 9.17,
+    "source": "USDA_API_FETCHED"
+  },
+  "pork_rib": {
+    "density": 1.05,
+    "calories_kcal_per_100g": 140,
+    "original_name": "Pork_Rib",
+    "category": "Meat",
+    "protein_g_per_100g": 20.8,
+    "carbs_g_per_100g": 0.0,
+    "fat_g_per_100g": 5.64,
+    "source": "USDA_API_FETCHED"
+  },
+  "pudding": {
+    "density": 0.65,
+    "calories_kcal_per_100g": 156,
+    "original_name": "Pudding",
+    "category": "Sweet",
+    "protein_g_per_100g": 5.6,
+    "carbs_g_per_100g": 23.53,
+    "fat_g_per_100g": 4.86,
+    "source": "USDA_API_FETCHED"
+  },
+  "quesadilla": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 357,
+    "original_name": "Quesadilla",
+    "category": "Carb_Bread",
+    "protein_g_per_100g": 21.4,
+    "carbs_g_per_100g": 0.0,
+    "fat_g_per_100g": 28.6,
+    "source": "USDA_API_FETCHED"
+  },
+  "quickbread": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 280,
+    "original_name": "Quickbread",
+    "category": "Carb_Bread"
+  },
+  "rice": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 356,
+    "original_name": "Rice",
+    "category": "Carb_Rice",
+    "protein_g_per_100g": 6.67,
+    "carbs_g_per_100g": 80.0,
+    "fat_g_per_100g": 0.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "salmon_grill": {
+    "density": 1.02,
+    "calories_kcal_per_100g": 213,
+    "original_name": "Salmon_Grill",
+    "category": "Seafood",
+    "protein_g_per_100g": 10.82,
+    "carbs_g_per_100g": 2.73,
+    "fat_g_per_100g": 17.36,
+    "source": "USDA_API_FETCHED"
+  },
+  "sandwich": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 345,
+    "original_name": "Sandwich",
+    "category": "Carb_Bread",
+    "protein_g_per_100g": 22.1,
+    "carbs_g_per_100g": 15.0,
+    "fat_g_per_100g": 20.4,
+    "source": "USDA_API_FETCHED"
+  },
+  "sausages": {
+    "density": 1.05,
+    "calories_kcal_per_100g": 325,
+    "original_name": "Sausages",
+    "category": "Meat",
+    "protein_g_per_100g": 18.53,
+    "carbs_g_per_100g": 1.42,
+    "fat_g_per_100g": 27.25,
+    "source": "USDA_API_FETCHED"
+  },
+  "shrimp": {
+    "density": 1.02,
+    "calories_kcal_per_100g": 107,
+    "original_name": "Shrimp",
+    "category": "Seafood",
+    "protein_g_per_100g": 20.5,
+    "carbs_g_per_100g": 0.89,
+    "fat_g_per_100g": 1.79,
+    "source": "USDA_API_FETCHED"
+  },
+  "soup": {
+    "density": 1.0,
+    "calories_kcal_per_100g": 82.0,
+    "original_name": "Soup",
+    "category": "Soup",
+    "protein_g_per_100g": 1.22,
+    "carbs_g_per_100g": 5.31,
+    "fat_g_per_100g": 5.71,
+    "source": "USDA_API_FETCHED"
+  },
+  "steak": {
+    "density": 1.05,
+    "calories_kcal_per_100g": 95,
+    "original_name": "Steak",
+    "category": "Meat",
+    "protein_g_per_100g": 1.25,
+    "carbs_g_per_100g": 22.04,
+    "fat_g_per_100g": 0.23,
+    "source": "USDA_API_FETCHED"
+  },
+  "stew_beef": {
+    "density": 1.0,
+    "calories_kcal_per_100g": 100,
+    "original_name": "Stew_Beef",
+    "category": "Soup",
+    "protein_g_per_100g": 5,
+    "carbs_g_per_100g": 6.54,
+    "fat_g_per_100g": 5.96,
+    "source": "USDA_API_FETCHED"
+  },
+  "strawberry": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 85.0,
+    "original_name": "Strawberry",
+    "category": "Fruit",
+    "protein_g_per_100g": 0.85,
+    "carbs_g_per_100g": 21.2,
+    "fat_g_per_100g": 0.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "sushi": {
+    "density": 0.85,
+    "calories_kcal_per_100g": 94,
+    "original_name": "Sushi",
+    "category": "Carb_Rice",
+    "protein_g_per_100g": 2.92,
+    "carbs_g_per_100g": 18.39,
+    "fat_g_per_100g": 0.67,
+    "source": "USDA_API_FETCHED"
+  },
+  "sweet_potato": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 191,
+    "original_name": "Sweet Potato",
+    "category": "Vegetable",
+    "protein_g_per_100g": 2.26,
+    "carbs_g_per_100g": 37.3,
+    "fat_g_per_100g": 9.35,
+    "source": "USDA_API_FETCHED"
+  },
+  "taco": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 11,
+    "original_name": "Taco",
+    "category": "Carb_Bread",
+    "protein_g_per_100g": 1.16,
+    "carbs_g_per_100g": 0.72,
+    "fat_g_per_100g": 0.68,
+    "source": "USDA_API_FETCHED"
+  },
+  "tofu": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 94.0,
+    "original_name": "Tofu",
+    "category": "Vegetable",
+    "protein_g_per_100g": 9.41,
+    "carbs_g_per_100g": 2.35,
+    "fat_g_per_100g": 5.29,
+    "source": "USDA_API_FETCHED"
+  },
+  "tomato": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 20,
+    "original_name": "Tomato",
+    "category": "Vegetable",
+    "protein_g_per_100g": 0.82,
+    "carbs_g_per_100g": 4.04,
+    "fat_g_per_100g": 0.31,
+    "source": "USDA_API_FETCHED"
+  },
+  "tomato_slice": {
+    "density": 0.5,
+    "calories_kcal_per_100g": 145,
+    "original_name": "Tomato_slice",
+    "category": "Vegetable",
+    "protein_g_per_100g": 1.87,
+    "carbs_g_per_100g": 8.09,
+    "fat_g_per_100g": 13.09,
+    "source": "USDA_API_FETCHED"
+  },
+  "tortilla": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 306,
+    "original_name": "Tortilla",
+    "category": "Carb_Bread",
+    "protein_g_per_100g": 8.2,
+    "carbs_g_per_100g": 49.38,
+    "fat_g_per_100g": 7.99,
+    "source": "USDA_API_FETCHED"
+  },
+  "tortilla_chips": {
+    "density": 0.7,
+    "calories_kcal_per_100g": 500,
+    "original_name": "Tortilla_Chips",
+    "category": "Fried",
+    "protein_g_per_100g": 7.14,
+    "carbs_g_per_100g": 60.7,
+    "fat_g_per_100g": 25.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "tuna_salad": {
+    "density": 1.02,
+    "calories_kcal_per_100g": 270,
+    "original_name": "Tuna_salad",
+    "category": "Seafood",
+    "protein_g_per_100g": 12.0,
+    "carbs_g_per_100g": 7.0,
+    "fat_g_per_100g": 21.0,
+    "source": "USDA_API_FETCHED"
+  },
+  "waffle": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 373,
+    "original_name": "Waffle",
+    "category": "Carb_Bread",
+    "protein_g_per_100g": 8.7,
+    "carbs_g_per_100g": 41.67,
+    "fat_g_per_100g": 18.78,
+    "source": "USDA_API_FETCHED"
+  },
+  "whole_chicken": {
+    "density": 1.05,
+    "calories_kcal_per_100g": 246,
+    "original_name": "Whole_Chicken",
+    "category": "Meat",
+    "protein_g_per_100g": 17.6,
+    "carbs_g_per_100g": 12.5,
+    "fat_g_per_100g": 13.9,
+    "source": "USDA_API_FETCHED"
+  },
+  "yeast_bread": {
+    "density": 0.4,
+    "calories_kcal_per_100g": 462,
+    "original_name": "Yeast_bread",
+    "category": "Carb_Bread",
+    "protein_g_per_100g": 8.02,
+    "carbs_g_per_100g": 48.6,
+    "fat_g_per_100g": 26.2,
+    "source": "USDA_API_FETCHED"
+  },
+  "yogurt": {
+    "density": 1.02,
+    "calories_kcal_per_100g": 94.0,
+    "original_name": "Yogurt",
+    "category": "Dairy",
+    "protein_g_per_100g": 3.5,
+    "carbs_g_per_100g": 16.0,
+    "fat_g_per_100g": 1.8,
+    "source": "USDA_API_FETCHED"
   }
 }
