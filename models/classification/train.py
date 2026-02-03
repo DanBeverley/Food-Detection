@@ -4,6 +4,7 @@ import argparse
 import logging
 from pathlib import Path
 import os
+import math
 import tensorflow as tf
 import keras
 from tensorflow.keras import mixed_precision
@@ -16,6 +17,53 @@ from model import build_classification_model
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
+
+
+class WarmupCosineDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
+    """
+    Learning rate schedule with linear warmup followed by cosine decay.
+    
+    This helps stabilize training in the early epochs when gradients can be noisy,
+    then smoothly decays the learning rate for better convergence.
+    """
+    
+    def __init__(
+        self,
+        base_learning_rate: float,
+        total_steps: int,
+        warmup_steps: int,
+        min_learning_rate: float = 1e-7
+    ):
+        super().__init__()
+        self.base_learning_rate = base_learning_rate
+        self.total_steps = total_steps
+        self.warmup_steps = warmup_steps
+        self.min_learning_rate = min_learning_rate
+    
+    def __call__(self, step):
+        step = tf.cast(step, tf.float32)
+        warmup_steps = tf.cast(self.warmup_steps, tf.float32)
+        total_steps = tf.cast(self.total_steps, tf.float32)
+        
+        # Linear warmup
+        warmup_lr = self.base_learning_rate * (step / tf.maximum(warmup_steps, 1.0))
+        
+        # Cosine decay after warmup
+        decay_steps = total_steps - warmup_steps
+        decay_step = tf.maximum(step - warmup_steps, 0.0)
+        cosine_decay = 0.5 * (1.0 + tf.cos(math.pi * decay_step / tf.maximum(decay_steps, 1.0)))
+        decay_lr = self.min_learning_rate + (self.base_learning_rate - self.min_learning_rate) * cosine_decay
+        
+        # Use warmup LR during warmup phase, decay LR after
+        return tf.where(step < warmup_steps, warmup_lr, decay_lr)
+    
+    def get_config(self):
+        return {
+            'base_learning_rate': self.base_learning_rate,
+            'total_steps': self.total_steps,
+            'warmup_steps': self.warmup_steps,
+            'min_learning_rate': self.min_learning_rate
+        }
 
 
 def initialize_strategy() -> tf.distribute.Strategy:
@@ -71,9 +119,9 @@ def main(args):
     logger.info("--- Stage 1: Training classification head only ---")
     architecture = model_cfg.get('architecture', 'EfficientNetV2B0')
     base_model_name = {
-        'EfficientNetV2B0': 'efficientnetv2-b0',
-        'MobileNetV2': 'mobilenetv2_1.00_224',
-        'MobileNetV3Small': 'mobilenetv3_small'
+        'EfficientNetV2B0': 'efficientnetv2-b0_rgb',
+        'MobileNetV2': 'mobilenetv2_rgb',
+        'MobileNetV3Small': 'mobilenetv3small_rgb'
     }.get(architecture)
     base_model = model.get_layer(name=base_model_name)
     base_model.trainable = False
@@ -99,9 +147,28 @@ def main(args):
             layer.trainable = False
         logger.info(f"Fine-tuning top {num_fine_tune_layers} layers.")
 
-    new_lr = optimizer_cfg.get('stage2_learning_rate', 1e-4)
-    model.optimizer.learning_rate.assign(new_lr)
-    logger.info(f"Set learning rate for Stage 2 to: {new_lr}")
+    # Calculate warmup schedule parameters
+    stage2_epochs = training_cfg.get('stage2_epochs', 100)
+    steps_per_epoch = num_train // data_cfg['batch_size']
+    total_steps = stage2_epochs * steps_per_epoch
+    warmup_epochs = training_cfg.get('warmup_epochs', 3)
+    warmup_steps = warmup_epochs * steps_per_epoch
+    
+    base_lr = optimizer_cfg.get('stage2_learning_rate', 1e-4)
+    use_warmup = training_cfg.get('use_warmup', True)
+    
+    if use_warmup:
+        lr_schedule = WarmupCosineDecay(
+            base_learning_rate=base_lr,
+            total_steps=total_steps,
+            warmup_steps=warmup_steps,
+            min_learning_rate=optimizer_cfg.get('min_learning_rate', 1e-7)
+        )
+        model.optimizer.learning_rate = lr_schedule
+        logger.info(f"Using WarmupCosineDecay: base_lr={base_lr}, warmup_epochs={warmup_epochs}, total_epochs={stage2_epochs}")
+    else:
+        model.optimizer.learning_rate.assign(base_lr)
+        logger.info(f"Set constant learning rate for Stage 2 to: {base_lr}")
 
     callbacks_list = [
         tf.keras.callbacks.ModelCheckpoint(
